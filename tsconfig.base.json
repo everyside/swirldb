@@ -9,6 +9,10 @@
     "skipLibCheck": true,
     "outDir": "dist",
     "declaration": true,
-    "declarationMap": true
+    "declarationMap": true,
+    "baseUrl": ".",
+    "paths": {
+      "@swirldb/*": ["packages/*/src"]
+    }
   }
 }

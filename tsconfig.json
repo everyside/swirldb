@@ -31,6 +31,7 @@
     },
     {
       "path": "./packages/sync"
-    }
+    },
+    { "path": "./packages/types" }
   ]
 }
