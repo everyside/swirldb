@@ -1,1 +1,5 @@
-import { useSwirl } from '../src'; test('hook returns array', () => { const [v] = useSwirl(); expect(typeof v).toBe('string'); });
+import { useSwirl } from '../src';
+test('hook returns array', () => {
+  const [v] = useSwirl();
+  expect(typeof v).toBe('string');
+});

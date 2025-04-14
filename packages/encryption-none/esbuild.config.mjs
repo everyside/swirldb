@@ -9,5 +9,5 @@ build({
   format: 'cjs',
   sourcemap: true,
   logLevel: 'info',
-  external: ['ws', 'zod']
+  external: ['ws', 'zod'],
 }).catch(() => process.exit(1));

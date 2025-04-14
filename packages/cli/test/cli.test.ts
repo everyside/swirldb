@@ -1,1 +1,3 @@
-test('cli works', () => { expect(true).toBe(true); });
+test('cli works', () => {
+  expect(true).toBe(true);
+});

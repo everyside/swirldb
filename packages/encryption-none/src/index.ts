@@ -1,1 +1,2 @@
-export const encrypt = (d: string) => d; export const decrypt = (d: string) => d;
+export const encrypt = (d: string) => d;
+export const decrypt = (d: string) => d;

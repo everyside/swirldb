@@ -1,1 +1,2 @@
-export const serialize = (data: any) => Buffer.from([]); export const deserialize = (buf: Buffer) => ({});
+export const serialize = (_data: any) => Buffer.from([]);
+export const deserialize = (_buf: Buffer) => ({});
