@@ -1,0 +1,1 @@
+test('cli works', () => { expect(true).toBe(true); });

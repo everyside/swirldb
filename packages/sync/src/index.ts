@@ -1,0 +1,1 @@
+export const merge = (a: any, b: any) => b;

@@ -1,0 +1,1 @@
+export const serialize = (data: any) => Buffer.from([]); export const deserialize = (buf: Buffer) => ({});

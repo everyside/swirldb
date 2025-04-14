@@ -1,18 +1,48 @@
-# Build and Release Folders
-bin-debug/
-bin-release/
-[Oo]bj/
-[Bb]in/
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
 
-# Other files and folders
-.settings/
+# Nx + workspace cache
+dist/
+tmp/
+.cache/
+nx-report.html
 
-# Executables
-*.swf
-*.air
-*.ipa
-*.apk
+# Output from builds
+**/dist/
+**/*.tsbuildinfo
 
-# Project files, i.e. `.project`, `.actionScriptProperties` and `.flexProperties`
-# should NOT be excluded as they contain compiler settings and other important
-# information for Eclipse / Flash Builder.
+# Local env overrides
+.env
+.env.*
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jest
+coverage/
+.jest/
+
+# Prettier
+.prettiercache
+
+# TypeScript
+*.tsbuildinfo
+
+# Misc
+*.local
+
+.nx/cache
+.nx/workspace-data

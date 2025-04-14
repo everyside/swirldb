@@ -1,0 +1,10 @@
+{
+  "name": "@swirldb/encryption-none",
+  "version": "0.1.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "test": "jest"
+  }
+}

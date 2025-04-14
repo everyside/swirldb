@@ -1,0 +1,1 @@
+import { createServer } from '../src'; test('rest', () => { expect(createServer()).toBe('rest-server'); });
