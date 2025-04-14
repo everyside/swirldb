@@ -1,0 +1,29 @@
+# Contributing to SwirlDB
+
+Thanks for your interest in contributing! Here’s how to get started.
+
+## Development
+
+```bash
+npm install
+npm run build
+npm run test
+```
+
+## Guidelines
+
+- Use clear, descriptive commit messages
+- Write or update tests for new features
+- Run `npm run lint` and `npm run format:check` before submitting PRs
+
+## Issues
+
+Before filing an issue:
+- Search open issues to avoid duplicates
+- Include reproducible steps, version info, and context
+
+## Pull Requests
+
+- Base your PR off `main`
+- Keep PRs focused and atomic
+- Describe what the change does and why it’s needed
