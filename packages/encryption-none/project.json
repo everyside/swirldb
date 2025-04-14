@@ -1,0 +1,22 @@
+{
+  "name": "encryption-none",
+  "root": "packages/encryption-none",
+  "sourceRoot": "packages/encryption-none/src",
+  "projectType": "library",
+  "targets": {
+    "build": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "npm run build",
+        "cwd": "packages/encryption-none"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "npm test",
+        "cwd": "packages/encryption-none"
+      }
+    }
+  }
+}

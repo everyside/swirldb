@@ -1,0 +1,22 @@
+{
+  "name": "transport-rest",
+  "root": "packages/transport-rest",
+  "sourceRoot": "packages/transport-rest/src",
+  "projectType": "library",
+  "targets": {
+    "build": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "npm run build",
+        "cwd": "packages/transport-rest"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "npm test",
+        "cwd": "packages/transport-rest"
+      }
+    }
+  }
+}

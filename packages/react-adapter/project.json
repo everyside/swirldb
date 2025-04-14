@@ -1,0 +1,22 @@
+{
+  "name": "react-adapter",
+  "root": "packages/react-adapter",
+  "sourceRoot": "packages/react-adapter/src",
+  "projectType": "library",
+  "targets": {
+    "build": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "npm run build",
+        "cwd": "packages/react-adapter"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "npm test",
+        "cwd": "packages/react-adapter"
+      }
+    }
+  }
+}

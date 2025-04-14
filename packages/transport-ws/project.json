@@ -1,0 +1,22 @@
+{
+  "name": "transport-ws",
+  "root": "packages/transport-ws",
+  "sourceRoot": "packages/transport-ws/src",
+  "projectType": "library",
+  "targets": {
+    "build": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "npm run build",
+        "cwd": "packages/transport-ws"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "command": "npm test",
+        "cwd": "packages/transport-ws"
+      }
+    }
+  }
+}
