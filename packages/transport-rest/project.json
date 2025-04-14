@@ -14,7 +14,7 @@
     "test": {
       "executor": "nx:run-commands",
       "options": {
-        "command": "npm test",
+        "command": "vitest run",
         "cwd": "packages/transport-rest"
       }
     }

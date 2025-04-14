@@ -1,4 +1,6 @@
+import { test, expect } from 'vitest';
 import { serialize, deserialize } from '../src';
+
 test('serialize/deserialize', () => {
   const buf = serialize({});
   expect(deserialize(buf)).toEqual({});
