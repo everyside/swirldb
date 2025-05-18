@@ -1,48 +1,36 @@
-# Node.js
+# Node
 node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-
-# Nx + workspace cache
 dist/
-tmp/
-.cache/
-nx-report.html
+npm-debug.log*
+.yarn/
+.pnpm-store/
 
-# Output from builds
-**/dist/
-**/*.tsbuildinfo
+# Rust
+target
+Cargo.lock
 
-# Local env overrides
-.env
-.env.*
+# WASM
+*.wasm
+!packages/core-wasm/index_bg.wasm  # include built wasm in npm wrapper if needed
 
-# Logs
-*.log
-
-# IDE
+# VSCode
 .vscode/
-.idea/
-*.swp
+*.code-workspace
 
-# OS
+# OS metadata
 .DS_Store
 Thumbs.db
 
-# Jest
+# Coverage/testing
 coverage/
-.jest/
+*.lcov
 
-# Prettier
-.prettiercache
+# Build artifacts
+*.log
+*.tmp
 
-# TypeScript
-*.tsbuildinfo
+# tsx cache (if applicable)
+tsx-cache/
 
-# Misc
-*.local
-
-.nx/cache
-.nx/workspace-data
+# Optional: Ignore package output if not publishing
+/packages
