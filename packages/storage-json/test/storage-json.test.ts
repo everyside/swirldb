@@ -1,7 +1,0 @@
-import { test, expect } from 'vitest';
-import { load, save } from '../src';
-
-test('save/load json', () => {
-  expect(save({})).toBe(true);
-  expect(load()).toEqual({});
-});

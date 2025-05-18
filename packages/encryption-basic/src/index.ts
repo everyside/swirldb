@@ -1,2 +1,0 @@
-export const encrypt = (d: string) => Buffer.from(d).toString('base64');
-export const decrypt = (d: string) => Buffer.from(d, 'base64').toString();
