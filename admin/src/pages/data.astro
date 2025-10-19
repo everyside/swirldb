@@ -667,6 +667,64 @@
       white-space: pre-wrap;
       word-wrap: break-word;
     }
+
+    .value-editor {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .value-editor-input {
+      width: 100%;
+      padding: 0.75rem;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 0.375rem;
+      color: var(--text);
+      font-family: 'SF Mono', Monaco, Consolas, monospace;
+      font-size: 0.875rem;
+      resize: vertical;
+      min-height: 3rem;
+    }
+
+    .value-editor-input:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    .value-editor-actions {
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+    }
+
+    .btn-save {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem 1rem;
+      background: var(--accent);
+      color: white;
+      border: none;
+      border-radius: 0.375rem;
+      cursor: pointer;
+      font-size: 0.875rem;
+      font-weight: 500;
+      transition: all 0.2s;
+    }
+
+    .btn-save:hover {
+      background: #7c3aed;
+    }
+
+    .btn-save:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .btn-save .material-icons {
+      font-size: 18px;
+    }
   </style>
 </head>
 <body>
@@ -1180,6 +1238,89 @@
       console.log('⏳ Waiting for initial sync...');
       await initialSyncPromise;
       console.log('✅ Initial sync complete, data ready');
+
+      // Set up automatic upstream sync
+      let lastSyncedHeads = db.getHeads();
+      let syncDebounceTimeout = null;
+
+      const syncChanges = () => {
+        const currentHeads = db.getHeads();
+
+        // Compare heads to detect if we have new local changes
+        const headsChanged = lastSyncedHeads.length !== currentHeads.length ||
+          !lastSyncedHeads.every((byte, i) => byte === currentHeads[i]);
+
+        if (headsChanged) {
+          console.log('🔄 Auto-sync: Local changes detected, pushing to server...');
+
+          const changes = db.getChanges();
+          if (changes.length === 0) {
+            lastSyncedHeads = currentHeads;
+            return;
+          }
+
+          // Build MSG_PUSH message
+          const encoder = new TextEncoder();
+          const namespaceBytes = encoder.encode(namespaceId);
+
+          let totalSize = 1 + 4 + namespaceBytes.length + 4;
+          changes.forEach(change => {
+            totalSize += 4 + change.length;
+          });
+
+          const buffer = new Uint8Array(totalSize);
+          let offset = 0;
+
+          buffer[offset++] = 0x03; // MSG_PUSH
+
+          // Namespace ID
+          new DataView(buffer.buffer).setUint32(offset, namespaceBytes.length, false);
+          offset += 4;
+          buffer.set(namespaceBytes, offset);
+          offset += namespaceBytes.length;
+
+          // Changes count
+          new DataView(buffer.buffer).setUint32(offset, changes.length, false);
+          offset += 4;
+
+          // Changes
+          changes.forEach(change => {
+            new DataView(buffer.buffer).setUint32(offset, change.length, false);
+            offset += 4;
+            buffer.set(change, offset);
+            offset += change.length;
+          });
+
+          ws.send(buffer);
+          lastSyncedHeads = currentHeads;
+          console.log('✅ Auto-sync: Pushed', changes.length, 'changes to server');
+        }
+      };
+
+      const debouncedSync = () => {
+        if (syncDebounceTimeout) {
+          clearTimeout(syncDebounceTimeout);
+        }
+        syncDebounceTimeout = setTimeout(syncChanges, 300); // 300ms debounce
+      };
+
+      // Monkey-patch setValue to trigger auto-sync
+      const originalSetValue = db.wasmDB.setValue.bind(db.wasmDB);
+      db.wasmDB.setValue = function(path, value) {
+        const result = originalSetValue(path, value);
+        debouncedSync();
+        return result;
+      };
+
+      // Also patch setPath for completeness
+      const originalSetPath = db.wasmDB.setPath.bind(db.wasmDB);
+      db.wasmDB.setPath = function(path, value) {
+        const result = originalSetPath(path, value);
+        debouncedSync();
+        return result;
+      };
+
+      console.log('🔄 Auto-sync enabled for namespace:', namespaceId);
     }
 
     // Show keys at a given path in a column
@@ -1333,35 +1474,112 @@
         dynamicColumns.appendChild(column);
         scrollColumnsToRight();
       } else {
-        // Primitive value - show in a display column
+        // Primitive value - show in an editable column
         const column = document.createElement('div');
         column.className = 'browser-value-display';
 
-        let displayValue;
-        try {
-          if (data === null) {
-            displayValue = 'null';
-          } else if (data === undefined) {
-            displayValue = 'undefined';
-          } else if (typeof data === 'string') {
-            displayValue = JSON.stringify(data);
-          } else {
-            displayValue = String(data);
-          }
-        } catch (error) {
-          displayValue = '<unable to display>';
+        const dataType = typeof data;
+        let inputValue = '';
+        let inputType = 'text';
+
+        if (data === null) {
+          inputValue = 'null';
+        } else if (data === undefined) {
+          inputValue = 'undefined';
+        } else if (dataType === 'string') {
+          inputValue = data;
+          inputType = 'textarea';
+        } else if (dataType === 'number') {
+          inputValue = String(data);
+          inputType = 'number';
+        } else if (dataType === 'boolean') {
+          inputValue = String(data);
+        } else {
+          inputValue = String(data);
         }
+
+        const editorId = `editor-${Date.now()}`;
+        const saveBtnId = `save-${Date.now()}`;
 
         column.innerHTML = `
           <div class="browser-column-header">${columnHeader}</div>
           <div style="padding: 1.5rem;">
-            <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 1rem;">Type: ${typeof data}</div>
-            <pre style="margin: 0; white-space: pre-wrap; word-wrap: break-word;">${displayValue}</pre>
+            <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 1rem;">Type: ${dataType}</div>
+            <div class="value-editor">
+              ${inputType === 'textarea'
+                ? `<textarea id="${editorId}" class="value-editor-input" rows="4">${inputValue}</textarea>`
+                : `<input id="${editorId}" class="value-editor-input" type="${inputType}" value="${inputValue}" />`
+              }
+              <div class="value-editor-actions">
+                <button id="${saveBtnId}" class="btn-save" style="display: none;">
+                  <span class="material-icons">check</span>
+                  Save
+                </button>
+                <span id="${saveBtnId}-status" style="font-size: 0.75rem; color: var(--text-muted);"></span>
+              </div>
+            </div>
           </div>
         `;
 
         dynamicColumns.appendChild(column);
         scrollColumnsToRight();
+
+        // Setup editing functionality
+        const editor = document.getElementById(editorId);
+        const saveBtn = document.getElementById(saveBtnId);
+        const status = document.getElementById(`${saveBtnId}-status`);
+        const originalValue = inputValue;
+
+        editor.addEventListener('input', () => {
+          const hasChanged = editor.value !== originalValue;
+          saveBtn.style.display = hasChanged ? 'inline-flex' : 'none';
+          status.textContent = '';
+        });
+
+        saveBtn.addEventListener('click', async () => {
+          try {
+            console.log('💾 Save clicked', { namespaceId, pathInNamespace, dataType, value: editor.value });
+            saveBtn.disabled = true;
+            status.textContent = 'Saving...';
+
+            // Get the namespace DB
+            const nsData = namespaceDBs.get(namespaceId);
+            if (!nsData) {
+              throw new Error('Namespace not connected');
+            }
+
+            // Convert value to correct type
+            let newValue = editor.value;
+            if (dataType === 'number') {
+              newValue = parseFloat(newValue);
+            } else if (dataType === 'boolean') {
+              newValue = newValue === 'true';
+            } else if (newValue === 'null') {
+              newValue = null;
+            } else if (newValue === 'undefined') {
+              newValue = undefined;
+            }
+
+            console.log('💾 Saving to path:', pathInNamespace, 'value:', newValue);
+
+            // Save to DB (auto-sync will handle pushing to server)
+            nsData.db.wasmDB.setValue(pathInNamespace, newValue);
+
+            status.textContent = 'Saved! (syncing...)';
+            status.style.color = 'var(--success)';
+            saveBtn.style.display = 'none';
+
+            setTimeout(() => {
+              status.textContent = '';
+            }, 2000);
+          } catch (error) {
+            console.error('❌ Save error:', error);
+            status.textContent = 'Error: ' + error.message;
+            status.style.color = 'var(--danger)';
+          } finally {
+            saveBtn.disabled = false;
+          }
+        });
       }
     }
 
