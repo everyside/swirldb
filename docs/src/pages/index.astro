@@ -1,0 +1,179 @@
+---
+import Layout from '../layouts/Layout.astro';
+---
+
+<Layout title="Home">
+  <div class="hero">
+    <h1>🌀 SwirlDB</h1>
+    <p class="tagline">A modular-first, CRDT-based embedded database for browsers and servers</p>
+    <div class="hero-buttons">
+      <a href="/quickstart" class="btn">Get Started</a>
+      <a href="/examples" class="btn btn-secondary">View Examples</a>
+    </div>
+  </div>
+
+  <section class="features">
+    <h2>Key Features</h2>
+    <div class="feature-grid">
+      <div class="card">
+        <h3>🔌 Pluggable Everything</h3>
+        <p>Storage, encryption, and sync are all swappable adapters. Choose what fits your use case.</p>
+      </div>
+
+      <div class="card">
+        <h3>🎯 Path-Level Control</h3>
+        <p>Fine-grained control over which keys are memory-only, persisted, or synced.</p>
+      </div>
+
+      <div class="card">
+        <h3>👁️ Observable State</h3>
+        <p>Reactive change tracking at the dot-path level with efficient observers.</p>
+      </div>
+
+      <div class="card">
+        <h3>🌐 Multi-Environment</h3>
+        <p>Browser WASM and pure Rust server with target-optimized implementations.</p>
+      </div>
+
+      <div class="card">
+        <h3>&#x1F504; CRDT-Based</h3>
+        <p>Built on Automerge for conflict-free replicated data types.</p>
+      </div>
+
+      <div class="card">
+        <h3>⚡ Native Proxy API</h3>
+        <p>Use native JavaScript property access instead of getter/setter methods.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="quick-example">
+    <h2>Quick Example</h2>
+    <div class="card">
+      <pre><code class="language-typescript">{`import { SwirlDB } from '@swirldb/js';
+
+// Create database with LocalStorage persistence
+const db = await SwirlDB.withLocalStorage('my-app');
+
+// Native property access via Proxies
+db.data.user.name = 'Alice';
+db.data.user.email = 'alice@example.com';
+
+// Get values with .$value
+console.log(db.data.user.name.$value); // 'Alice'
+
+// Observe changes
+db.data.user.name.$observe((newValue) => {
+  console.log('Name changed:', newValue);
+});
+
+// Enable auto-persistence
+db.enableAutoPersist(500); // Debounced 500ms
+db.data.settings.theme = 'dark'; // Auto-saves
+
+// Storage hints for per-path policies
+db.setStorageHint('session.temp', 'memory-only');
+db.setStorageHint('user.profile', 'persisted');
+db.setStorageHint('shared.doc', 'synced');`}</code></pre>
+    </div>
+  </section>
+
+  <section class="architecture">
+    <h2>Architecture</h2>
+    <div class="card">
+      <h3>Browser Target</h3>
+      <p>Compiled to WASM via wasm-bindgen, runs in all modern browsers with LocalStorage and IndexedDB adapters.</p>
+    </div>
+
+    <div class="card">
+      <h3>Server Target (Future)</h3>
+      <p>Pure Rust binary with no Node.js dependency. Optimized for performance with redb or SQLite adapters.</p>
+    </div>
+
+    <div class="card">
+      <h3>Core Engine</h3>
+      <p>Pure Rust core built on Automerge CRDT. Thread-safe, platform-agnostic, with pluggable storage.</p>
+    </div>
+  </section>
+
+  <section class="get-started">
+    <h2>Ready to Build?</h2>
+    <p>Check out the quickstart guide to get SwirlDB running in your project.</p>
+    <a href="/quickstart" class="btn">Get Started →</a>
+  </section>
+</Layout>
+
+<style>
+  .hero {
+    text-align: center;
+    padding: 4rem 0;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    margin: -3rem -20px 3rem;
+    padding-left: 20px;
+    padding-right: 20px;
+    color: white;
+  }
+
+  .hero h1 {
+    font-size: 4rem;
+    margin-bottom: 1rem;
+    color: white;
+  }
+
+  .tagline {
+    font-size: 1.5rem;
+    opacity: 0.95;
+    margin-bottom: 2rem;
+  }
+
+  .hero-buttons {
+    display: flex;
+    gap: 1rem;
+    justify-content: center;
+  }
+
+  .btn-secondary {
+    background: #95a5a6;
+  }
+
+  .btn-secondary:hover {
+    background: #7f8c8d;
+  }
+
+  .feature-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 1.5rem;
+    margin-top: 2rem;
+  }
+
+  .quick-example pre {
+    max-height: 500px;
+    overflow-y: auto;
+  }
+
+  .get-started {
+    text-align: center;
+    padding: 3rem 0;
+    background: var(--bg-light);
+    margin: 3rem -20px 0;
+    padding-left: 20px;
+    padding-right: 20px;
+    border-radius: 12px;
+  }
+
+  @media (max-width: 768px) {
+    .hero h1 {
+      font-size: 2.5rem;
+    }
+
+    .tagline {
+      font-size: 1.2rem;
+    }
+
+    .hero-buttons {
+      flex-direction: column;
+      align-items: center;
+    }
+  }
+</style>

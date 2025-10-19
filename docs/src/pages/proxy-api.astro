@@ -1,0 +1,262 @@
+---
+import Layout from '../layouts/Layout.astro';
+---
+
+<Layout title="Proxy API">
+  <h1>Proxy API</h1>
+  <p>SwirlDB uses JavaScript Proxies to provide native property access instead of traditional getter/setter methods.</p>
+
+  <section>
+    <h2>Why Proxies?</h2>
+    <p>Compare the traditional approach with the Proxy API:</p>
+
+    <div class="comparison">
+      <div class="card">
+        <h3>❌ Traditional API</h3>
+        <pre><code>{`// Traditional getter/setter approach
+db.setPath('user.name', 'Alice');
+db.setPath('user.email', 'alice@example.com');
+
+const name = db.getPath('user.name');
+const email = db.getPath('user.email');
+
+// Verbose and repetitive
+db.observe('user.name', (value) => {
+  console.log('Name changed:', value);
+});`}</code></pre>
+      </div>
+
+      <div class="card">
+        <h3>✅ Proxy API</h3>
+        <pre><code>{`// Native property access
+db.data.user.name = 'Alice';
+db.data.user.email = 'alice@example.com';
+
+const name = db.data.user.name.$value;
+const email = db.data.user.email.$value;
+
+// More intuitive and concise
+db.data.user.name.$observe((value) => {
+  console.log('Name changed:', value);
+});`}</code></pre>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Core Concepts</h2>
+
+    <h3>The <code>data</code> Property</h3>
+    <p>All database access goes through the <code>db.data</code> proxy:</p>
+    <pre><code>{`const db = new SwirlDB(new WasmDB());
+
+// db.data is the root proxy
+db.data.myKey = 'value';`}</code></pre>
+
+    <h3>Auto-Created Paths</h3>
+    <p>Intermediate objects are created automatically:</p>
+    <pre><code>{`// No need to manually create 'app' or 'settings'
+db.data.app.settings.theme = 'dark';
+
+// This just works!
+console.log(db.data.app.settings.theme.$value); // 'dark'`}</code></pre>
+
+    <h3>The <code>.$value</code> Accessor</h3>
+    <p>Use <code>.$value</code> to read the actual stored value:</p>
+    <pre><code>{`db.data.count = 42;
+
+// Returns a proxy (for further nesting)
+const countProxy = db.data.count;
+
+// Returns the actual value
+const countValue = db.data.count.$value; // 42`}</code></pre>
+  </section>
+
+  <section>
+    <h2>Special Methods</h2>
+
+    <h3><code>.$value</code> - Get Value</h3>
+    <p>Retrieve the actual stored value at a path.</p>
+    <pre><code>{`db.data.user.name = 'Alice';
+const name = db.data.user.name.$value; // 'Alice'
+
+// Works with nested objects
+db.data.config = { host: 'localhost', port: 3000 };
+const config = db.data.config.$value; // { host: 'localhost', port: 3000 }`}</code></pre>
+
+    <h3><code>.$observe(callback)</code> - Watch Changes</h3>
+    <p>Register a callback that fires when a value changes.</p>
+    <pre><code>{`db.data.counter.$observe((newValue) => {
+  console.log('Counter changed to:', newValue);
+});
+
+db.data.counter = 1; // Logs: "Counter changed to: 1"
+db.data.counter = 2; // Logs: "Counter changed to: 2"`}</code></pre>
+
+    <h3><code>.$delete()</code> - Remove Value</h3>
+    <p>Delete a value at a specific path.</p>
+    <pre><code>{`db.data.temp = 'temporary data';
+console.log(db.data.temp.$value); // 'temporary data'
+
+db.data.temp.$delete();
+console.log(db.data.temp.$value); // null`}</code></pre>
+  </section>
+
+  <section>
+    <h2>Scoped Proxies</h2>
+    <p>Get a proxy scoped to a specific path for cleaner code:</p>
+
+    <pre><code>{`// Instead of repeating the full path:
+db.data.user.profile.name = 'Alice';
+db.data.user.profile.bio = 'Developer';
+db.data.user.profile.location = 'SF';
+
+// Use a scoped proxy:
+const profile = db.at('user.profile');
+profile.name = 'Alice';
+profile.bio = 'Developer';
+profile.location = 'SF';
+
+// Read values through the scoped proxy
+console.log(profile.name.$value); // 'Alice'`}</code></pre>
+  </section>
+
+  <section>
+    <h2>Memory Overhead</h2>
+    <p>Proxies are lightweight and garbage-collected:</p>
+
+    <div class="card">
+      <h3>Temporary Proxies</h3>
+      <p>Each property access creates a temporary proxy (~600 bytes) that is immediately eligible for garbage collection:</p>
+      <pre><code>{`// Creates temporary proxies for each step
+db.data.app.settings.theme.color = '#667eea';
+// All intermediate proxies (app, settings, theme) are GC'd`}</code></pre>
+    </div>
+
+    <div class="card">
+      <h3>Persistent Proxies</h3>
+      <p>Only stored references keep proxies alive:</p>
+      <pre><code>{`// This keeps a reference
+const settings = db.data.app.settings;
+settings.theme = 'dark'; // Reuses the same proxy
+
+// This creates and immediately discards
+db.data.app.settings.theme = 'dark'; // Temporary, GC'd`}</code></pre>
+    </div>
+  </section>
+
+  <section>
+    <h2>Type Safety (TypeScript)</h2>
+    <p>The proxy system works seamlessly with TypeScript:</p>
+
+    <pre><code>{`interface UserData {
+  name: string;
+  email: string;
+  age: number;
+}
+
+// Type-safe access (in the future with typed wrappers)
+const user = db.at<UserData>('user');
+user.name = 'Alice'; // ✅ string
+user.age = 30;       // ✅ number
+// user.age = 'thirty'; // ❌ Type error`}</code></pre>
+  </section>
+
+  <section>
+    <h2>Advanced Patterns</h2>
+
+    <h3>Computed Properties</h3>
+    <pre><code>{`// Store base values
+db.data.user.firstName = 'Alice';
+db.data.user.lastName = 'Johnson';
+
+// Compute derived values
+function getFullName() {
+  const first = db.data.user.firstName.$value;
+  const last = db.data.user.lastName.$value;
+  return \`\${first} \${last}\`;
+}
+
+console.log(getFullName()); // 'Alice Johnson'`}</code></pre>
+
+    <h3>Reactive Computed Values</h3>
+    <pre><code>{`// Watch base values and update computed
+db.data.user.firstName.$observe(() => updateFullName());
+db.data.user.lastName.$observe(() => updateFullName());
+
+function updateFullName() {
+  db.data.user.fullName = getFullName();
+}
+
+db.data.user.firstName = 'Bob'; // Triggers update
+console.log(db.data.user.fullName.$value); // 'Bob Johnson'`}</code></pre>
+
+    <h3>Array-like Access</h3>
+    <pre><code>{`// Numeric keys work as array indices
+db.data.items[0] = 'first';
+db.data.items[1] = 'second';
+db.data.items[2] = 'third';
+
+console.log(db.data.items[1].$value); // 'second'`}</code></pre>
+  </section>
+
+  <section>
+    <h2>Performance Tips</h2>
+
+    <ul>
+      <li><strong>Cache scoped proxies:</strong> Reuse <code>db.at()</code> results when accessing the same path repeatedly</li>
+      <li><strong>Batch mutations:</strong> Use <code>db.batch()</code> to group changes and trigger observers once</li>
+      <li><strong>Avoid deep nesting in hot paths:</strong> Long chains like <code>db.data.a.b.c.d.e.f.$value</code> create multiple proxies</li>
+      <li><strong>Use storage hints:</strong> Mark temporary data as <code>memory-only</code> to skip persistence</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Next Steps</h2>
+    <ul>
+      <li><a href="/examples">Try interactive examples</a></li>
+      <li><a href="/storage">Learn about storage adapters</a></li>
+      <li><a href="/quickstart">View the quickstart guide</a></li>
+    </ul>
+  </section>
+</Layout>
+
+<style>
+  .comparison {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+    gap: 2rem;
+    margin: 2rem 0;
+  }
+
+  h2 {
+    margin-top: 3rem;
+  }
+
+  h3 {
+    margin-top: 2rem;
+    font-size: 1.3rem;
+  }
+
+  code {
+    color: var(--primary);
+  }
+
+  ul {
+    line-height: 2;
+    padding-left: 2rem;
+  }
+
+  ul li {
+    margin: 0.5rem 0;
+  }
+
+  ul li strong {
+    color: var(--primary);
+  }
+
+  section > ul li a {
+    font-size: 1.1rem;
+    font-weight: 500;
+  }
+</style>

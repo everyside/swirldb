@@ -1,0 +1,2 @@
+# This directory contains auto-generated WASM build artifacts
+# Run: cd native/swirldb-core && npm run build:wasm

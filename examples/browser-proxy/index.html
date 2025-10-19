@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SwirlDB Proxy API Example</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            max-width: 900px;
+            margin: 50px auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+        }
+        h1 {
+            color: #333;
+            margin-top: 0;
+            font-size: 2.5em;
+        }
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+        }
+        .demo-section {
+            margin: 30px 0;
+            padding: 20px;
+            background: #f9f9f9;
+            border-left: 4px solid #667eea;
+            border-radius: 8px;
+        }
+        .demo-section h3 {
+            margin-top: 0;
+            color: #667eea;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            border-radius: 6px;
+            border: none;
+            background: #667eea;
+            color: white;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+        button:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(102, 126, 234, 0.3);
+        }
+        .code {
+            background: #2d2d2d;
+            color: #f8f8f2;
+            padding: 15px;
+            border-radius: 6px;
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 13px;
+            overflow-x: auto;
+            margin: 10px 0;
+        }
+        .output {
+            background: #f4f4f4;
+            padding: 15px;
+            border-radius: 6px;
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 13px;
+            max-height: 300px;
+            overflow-y: auto;
+            margin: 10px 0;
+        }
+        .log-entry {
+            margin: 5px 0;
+            padding: 8px;
+            background: white;
+            border-radius: 4px;
+            border-left: 3px solid #667eea;
+        }
+        .log-entry.observer {
+            border-left-color: #f39c12;
+            background: #fff9e6;
+        }
+        .highlight {
+            color: #667eea;
+            font-weight: bold;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 10px;
+            margin: 15px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🌀 SwirlDB Proxy API</h1>
+        <p class="subtitle">Native JavaScript property access with CRDT superpowers</p>
+
+        <div class="demo-section">
+            <h3>✨ Before & After</h3>
+            <div class="code">
+// Old way:
+db.setPath('user.name', 'Alice');
+const name = db.getPath('user.name');
+
+// New way with Proxies:
+db.data.user.name = 'Alice';
+const name = db.data.user.name.$value;
+            </div>
+        </div>
+
+        <div class="demo-section">
+            <h3>1. Basic Property Access</h3>
+            <p>Set and get values using native JavaScript syntax</p>
+            <div class="grid">
+                <button onclick="demo1_set()">Set user.name</button>
+                <button onclick="demo1_get()">Get user.name</button>
+                <button onclick="demo1_nested()">Set deep nested path</button>
+            </div>
+        </div>
+
+        <div class="demo-section">
+            <h3>2. Reactive Observers</h3>
+            <p>Watch for changes at any path</p>
+            <div class="grid">
+                <button onclick="demo2_observe()">Add Observer</button>
+                <button onclick="demo2_change()">Change Value</button>
+                <button onclick="demo2_nested()">Change Nested Value</button>
+            </div>
+        </div>
+
+        <div class="demo-section">
+            <h3>3. Scoped Proxies</h3>
+            <p>Get a proxy at a specific path for cleaner code</p>
+            <div class="grid">
+                <button onclick="demo3_scope()">Use Scoped Proxy</button>
+                <button onclick="demo3_batch()">Batch Operations</button>
+            </div>
+        </div>
+
+        <div class="demo-section">
+            <h3>4. Auto-Persisting Store</h3>
+            <p>Automatically sync to localStorage on changes</p>
+            <div class="grid">
+                <button onclick="demo4_persist()">Create Persisted Store</button>
+                <button onclick="demo4_change()">Change (auto-saves)</button>
+                <button onclick="demo4_load()">Reload from Storage</button>
+            </div>
+        </div>
+
+        <div class="demo-section">
+            <h3>5. Complex Objects</h3>
+            <p>Work with arrays and nested structures</p>
+            <div class="grid">
+                <button onclick="demo5_todo()">Add Todo Item</button>
+                <button onclick="demo5_toggle()">Toggle Todo</button>
+                <button onclick="demo5_list()">List All Todos</button>
+            </div>
+        </div>
+
+        <div class="demo-section">
+            <h3>📊 Output Log</h3>
+            <div id="output" class="output"></div>
+            <button onclick="clearLog()" style="background: #e74c3c;">Clear Log</button>
+        </div>
+    </div>
+
+    <script type="module">
+        import init, { SwirlDB as WasmDB } from '/packages/browser-wasm/swirldb_core.js';
+        import { SwirlDB, createPersistedStore } from '/packages/swirldb-js/dist/index.js';
+
+        let db, persistedStore;
+
+        async function initDB() {
+            await init();
+            const wasmDB = new WasmDB();
+            window.db = new SwirlDB(wasmDB);
+            log('✅ SwirlDB initialized with Proxy wrapper');
+        }
+
+        function log(message, isObserver = false) {
+            const output = document.getElementById('output');
+            const entry = document.createElement('div');
+            entry.className = isObserver ? 'log-entry observer' : 'log-entry';
+            entry.innerHTML = message;
+            output.prepend(entry);
+        }
+
+        window.clearLog = function() {
+            document.getElementById('output').innerHTML = '';
+        };
+
+        // Demo 1: Basic Property Access
+        window.demo1_set = function() {
+            window.db.data.user.name = 'Alice';
+            log(`<span class="highlight">db.data.user.name = 'Alice'</span>`);
+        };
+
+        window.demo1_get = function() {
+            const name = window.db.data.user.name.$value;
+            log(`Value: <span class="highlight">${JSON.stringify(name)}</span>`);
+        };
+
+        window.demo1_nested = function() {
+            window.db.data.app.settings.theme.color = 'dark-purple';
+            log(`<span class="highlight">db.data.app.settings.theme.color = 'dark-purple'</span>`);
+            log(`Created nested path automatically!`);
+        };
+
+        // Demo 2: Reactive Observers
+        let observerCount = 0;
+        window.demo2_observe = function() {
+            observerCount++;
+            const currentCount = observerCount; // Capture by value!
+            window.db.data.user.name.$observe((value) => {
+                log(`🔔 Observer #${currentCount} fired: <span class="highlight">${JSON.stringify(value)}</span>`, true);
+            });
+            log(`Added observer #${currentCount} to user.name`);
+        };
+
+        window.demo2_change = function() {
+            const names = ['Alice', 'Bob', 'Charlie', 'Diana'];
+            const name = names[Math.floor(Math.random() * names.length)];
+            window.db.data.user.name = name;
+            log(`Changed user.name to: <span class="highlight">${name}</span>`);
+        };
+
+        window.demo2_nested = function() {
+            window.db.data.user.profile.email = `user${Date.now()}@example.com`;
+            log(`Changed user.profile.email`);
+        };
+
+        // Demo 3: Scoped Proxies
+        window.demo3_scope = function() {
+            const user = window.db.at('user');
+            user.age = 30;
+            user.city = 'San Francisco';
+            user.active = true;
+            log(`Used scoped proxy to set multiple fields:`);
+            log(`- age: 30, city: 'San Francisco', active: true`);
+        };
+
+        window.demo3_batch = function() {
+            window.db.batch((db) => {
+                db.data.counter = 0;
+                for (let i = 1; i <= 5; i++) {
+                    db.data.counter = i;
+                }
+            });
+            log(`Batch operation: incremented counter 5 times`);
+            log(`Final value: <span class="highlight">${window.db.data.counter.$value}</span>`);
+        };
+
+        // Demo 4: Auto-Persisting Store
+        window.demo4_persist = function() {
+            window.persistedStore = createPersistedStore(window.db, 'swirl-demo', 'persisted');
+            window.persistedStore.count = 0;
+            window.persistedStore.lastUpdate = new Date().toISOString();
+            log(`Created persisted store at 'persisted' path`);
+            log(`Auto-saves to localStorage on changes!`);
+        };
+
+        window.demo4_change = function() {
+            if (!window.persistedStore) {
+                window.persistedStore = createPersistedStore(window.db, 'swirl-demo', 'persisted');
+            }
+            window.persistedStore.count = (window.persistedStore.count?.$value || 0) + 1;
+            window.persistedStore.lastUpdate = new Date().toISOString();
+            log(`Incremented count to: <span class="highlight">${window.persistedStore.count.$value}</span>`);
+            log(`Auto-saved to localStorage ✨`);
+        };
+
+        window.demo4_load = function() {
+            const key = 'swirl-demo';
+            const saved = localStorage.getItem(key);
+            if (saved) {
+                const bytes = Uint8Array.from(atob(saved), c => c.charCodeAt(0));
+                window.db.loadState(bytes);
+                log(`Loaded state from localStorage`);
+                log(`Count: <span class="highlight">${window.db.data.persisted.count.$value}</span>`);
+            } else {
+                log(`No saved state found`);
+            }
+        };
+
+        // Demo 5: Complex Objects
+        let todoId = 0;
+        window.demo5_todo = function() {
+            todoId++;
+            const todo = window.db.at(`todos.${todoId}`);
+            todo.text = `Task ${todoId}: Do something awesome`;
+            todo.done = false;
+            todo.createdAt = new Date().toISOString();
+            log(`Added todo #${todoId}: <span class="highlight">${todo.text.$value}</span>`);
+        };
+
+        window.demo5_toggle = function() {
+            if (todoId === 0) {
+                log(`No todos yet! Add one first.`);
+                return;
+            }
+            const todo = window.db.at(`todos.${todoId}`);
+            const currentDone = todo.done.$value || false;
+            todo.done = !currentDone;
+            log(`Toggled todo #${todoId}: ${todo.done.$value ? '✅ Done' : '⏳ Pending'}`);
+        };
+
+        window.demo5_list = function() {
+            log(`<strong>All Todos:</strong>`);
+            for (let i = 1; i <= todoId; i++) {
+                const todo = window.db.at(`todos.${i}`);
+                const text = todo.text.$value;
+                const done = todo.done.$value;
+                if (text) {
+                    log(`${i}. [${done ? '✅' : '⏳'}] ${text}`);
+                }
+            }
+        };
+
+        // Initialize on load
+        initDB();
+    </script>
+</body>
+</html>

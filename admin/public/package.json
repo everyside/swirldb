@@ -1,0 +1,20 @@
+{
+  "name": "swirldb-core",
+  "type": "module",
+  "collaborators": [
+    "Everyside Innovations, LLC"
+  ],
+  "description": "Modular-first CRDT-based embedded database engine",
+  "version": "0.2.0",
+  "license": "Apache-2.0",
+  "files": [
+    "swirldb_core_bg.wasm",
+    "swirldb_core.js",
+    "swirldb_core.d.ts"
+  ],
+  "main": "swirldb_core.js",
+  "types": "swirldb_core.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

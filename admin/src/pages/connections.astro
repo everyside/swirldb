@@ -1,0 +1,653 @@
+---
+// Connections page - Full view of all connections
+---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Connections - SwirlDB Admin</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    :root {
+      --bg-primary: #0a0e1a;
+      --bg-secondary: #13172b;
+      --bg-card: #1a1f3a;
+      --text-primary: #f1f5f9;
+      --text-secondary: #cbd5e1;
+      --text-muted: #94a3b8;
+      --accent: #8b5cf6;
+      --accent-hover: #7c3aed;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --border: #2d3355;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Inter', sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      min-height: 100vh;
+    }
+
+    .app-container {
+      display: flex;
+      min-height: 100vh;
+    }
+
+    /* Sidebar */
+    .sidebar {
+      width: 260px;
+      background: var(--bg-secondary);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .sidebar-header {
+      padding: 1.5rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .sidebar-header h1 {
+      font-size: 1.25rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .sidebar-header h1 .swirl-icon {
+      font-size: 1.75rem;
+      background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      animation: spin 8s linear infinite;
+    }
+
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(-360deg); }
+    }
+
+    .sidebar-header .subtitle {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-top: 0.25rem;
+    }
+
+    .sync-indicator {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .sync-pulse {
+      width: 6px;
+      height: 6px;
+      background: var(--success);
+      border-radius: 50%;
+      animation: pulse 2s infinite;
+    }
+
+    .nav-menu {
+      flex: 1;
+      padding: 1rem;
+    }
+
+    .nav-section {
+      margin-bottom: 1.5rem;
+    }
+
+    .nav-section-title {
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      margin-bottom: 0.5rem;
+      padding: 0 0.75rem;
+    }
+
+    .nav-link {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.75rem;
+      border-radius: 0.5rem;
+      color: var(--text-secondary);
+      text-decoration: none;
+      transition: all 0.2s;
+      font-size: 0.9rem;
+      margin-bottom: 0.25rem;
+    }
+
+    .nav-link:hover {
+      background: var(--bg-card);
+      color: var(--text-primary);
+    }
+
+    .nav-link.active {
+      background: var(--accent);
+      color: white;
+    }
+
+    .nav-icon {
+      width: 20px;
+      height: 20px;
+    }
+
+    /* Main Content */
+    .main-content {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .top-bar {
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border);
+      padding: 1rem 1.5rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .server-status {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .page-header {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .page-header h1 {
+      font-size: 1.5rem;
+      font-weight: 700;
+    }
+
+    .status-indicator {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem 1rem;
+      background: var(--bg-card);
+      border-radius: 0.5rem;
+      font-size: 0.85rem;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      animation: pulse 2s infinite;
+    }
+
+    .status-dot.online {
+      background: var(--success);
+    }
+
+    .status-dot.offline {
+      background: var(--danger);
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .content-area {
+      flex: 1;
+      overflow-y: auto;
+      padding: 1.5rem;
+    }
+
+    .section {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 0.75rem;
+      padding: 1.5rem;
+    }
+
+    .table-container {
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+    }
+
+    th {
+      text-align: left;
+      padding: 0.75rem;
+      border-bottom: 2px solid var(--border);
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    td {
+      padding: 0.75rem;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.9rem;
+    }
+
+    tr:hover {
+      background: var(--bg-card);
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 0.25rem 0.75rem;
+      border-radius: 1rem;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+
+    .badge-info {
+      background: rgba(59, 130, 246, 0.1);
+      color: var(--accent);
+    }
+
+    .code {
+      font-family: 'SF Mono', Monaco, Consolas, monospace;
+      font-size: 0.85rem;
+      background: var(--bg-card);
+      padding: 0.25rem 0.5rem;
+      border-radius: 0.25rem;
+      color: var(--accent);
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 3rem;
+      color: var(--text-muted);
+    }
+
+    .empty-state-icon {
+      font-size: 3rem;
+      margin-bottom: 1rem;
+      opacity: 0.5;
+    }
+  </style>
+</head>
+<body>
+  <div class="app-container">
+    <!-- Sidebar -->
+    <nav class="sidebar">
+      <div class="sidebar-header">
+        <h1><span class="swirl-icon">🌀</span> SwirlDB</h1>
+        <div class="subtitle">Administration Console</div>
+        <div class="sync-indicator" style="margin-top: 0.75rem;">
+          <span class="sync-pulse"></span>
+          <span>Real-time sync active</span>
+        </div>
+      </div>
+
+      <div class="nav-menu">
+        <div class="nav-section">
+          <div class="nav-section-title">Overview</div>
+          <a href="/" class="nav-link">
+            <span class="nav-icon">📊</span>
+            Dashboard
+          </a>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section-title">Data Management</div>
+          <a href="/namespaces" class="nav-link">
+            <span class="nav-icon">🗂️</span>
+            Namespaces
+          </a>
+          <a href="/data" class="nav-link">
+            <span class="nav-icon">🔍</span>
+            Data Browser
+          </a>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section-title">Monitoring</div>
+          <a href="/connections" class="nav-link active">
+            <span class="nav-icon">🔌</span>
+            Connections
+          </a>
+          <a href="/activity" class="nav-link">
+            <span class="nav-icon">📝</span>
+            Activity Log
+          </a>
+        </div>
+      </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="main-content">
+      <div class="top-bar">
+        <div class="server-status">
+          <div class="page-header">
+            <h1>🔌 Active Connections</h1>
+          </div>
+          <div class="status-indicator">
+            <span class="status-dot online" id="status-dot"></span>
+            <span id="status-text">Connected</span>
+          </div>
+          <div class="status-indicator">
+            <span>🌐 localhost:3030</span>
+          </div>
+        </div>
+        <div>
+          <span id="current-time" style="color: var(--text-muted); font-size: 0.85rem;"></span>
+        </div>
+      </div>
+
+      <div class="content-area">
+        <div class="section">
+          <div class="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>Client ID</th>
+                  <th>Namespace</th>
+                  <th>Transport</th>
+                  <th>Connected</th>
+                  <th>Last Seen</th>
+                </tr>
+              </thead>
+              <tbody id="connections-tbody">
+                <tr>
+                  <td colspan="5" class="empty-state">
+                    <div class="empty-state-icon">🔌</div>
+                    <div>Loading connections...</div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script type="module">
+    import { SwirlDB } from '/swirldb.js';
+
+    const ADMIN_NAMESPACE = '__admin';
+    let db;
+    let ws = null;
+    let reconnectAttempts = 0;
+    let maxReconnectDelay = 30000;
+    let reconnectTimer = null;
+
+    // Update current time
+    function updateTime() {
+      document.getElementById('current-time').textContent =
+        new Date().toLocaleString('en-US', {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: false
+        });
+    }
+    updateTime();
+    setInterval(updateTime, 1000);
+
+    function formatRelativeTime(timestamp) {
+      if (!timestamp) return 'Never';
+      const now = Date.now();
+      const diff = now - timestamp;
+      const seconds = Math.floor(diff / 1000);
+
+      if (seconds < 60) return `${seconds}s ago`;
+      if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+      if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+      return new Date(timestamp).toLocaleString();
+    }
+
+    async function init() {
+      try {
+        db = await SwirlDB.withLocalStorage('swirldb-admin');
+        console.log('✅ Connections page SwirlDB initialized');
+
+        db.data.connections.$observe(() => {
+          console.log('🔄 Connections observer triggered');
+          updateConnections();
+        });
+
+        // Give localStorage time to load, then render
+        setTimeout(() => {
+          console.log('📊 Initial render with cached data');
+          updateConnections();
+        }, 50);
+
+        await connectToServer();
+      } catch (error) {
+        console.error('❌ Initialization failed:', error);
+        document.getElementById('status-dot').className = 'status-dot offline';
+        document.getElementById('status-text').textContent = 'Connection Failed';
+      }
+    }
+
+    async function connectToServer() {
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+
+      return new Promise((resolve, reject) => {
+        ws = new WebSocket('ws://localhost:3030/ws');
+        ws.binaryType = 'arraybuffer';
+
+        ws.onopen = () => {
+          console.log('✅ Connected');
+          reconnectAttempts = 0;
+          document.getElementById('status-dot').className = 'status-dot online';
+          document.getElementById('status-text').textContent = 'Connected';
+
+          sendConnectMessage();
+          setTimeout(() => broadcastCRDTState(), 100);
+          resolve();
+        };
+
+        ws.onmessage = (event) => {
+          handleServerMessage(new Uint8Array(event.data));
+        };
+
+        ws.onclose = () => {
+          console.log('👋 Disconnected');
+          document.getElementById('status-dot').className = 'status-dot offline';
+          document.getElementById('status-text').textContent = 'Reconnecting...';
+          scheduleReconnect();
+        };
+
+        ws.onerror = (error) => {
+          console.error('❌ WebSocket error:', error);
+          reject(error);
+        };
+      });
+    }
+
+    function scheduleReconnect() {
+      const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), maxReconnectDelay);
+      reconnectAttempts++;
+      document.getElementById('status-text').textContent = `Reconnecting in ${Math.ceil(delay/1000)}s...`;
+
+      reconnectTimer = setTimeout(async () => {
+        try {
+          await connectToServer();
+        } catch (error) {
+          console.error('❌ Reconnection failed:', error);
+        }
+      }, delay);
+    }
+
+    function sendConnectMessage() {
+      const clientIdBytes = new TextEncoder().encode('admin-connections');
+      const namespaceBytes = new TextEncoder().encode(ADMIN_NAMESPACE);
+      const headsBytes = db.getHeads();
+
+      const size = 1 + 4 + clientIdBytes.length + 4 + namespaceBytes.length + 4 + headsBytes.length;
+      const buffer = new Uint8Array(size);
+      let offset = 0;
+
+      buffer[offset++] = 0x01;
+      writeUint32(buffer, offset, clientIdBytes.length);
+      offset += 4;
+      buffer.set(clientIdBytes, offset);
+      offset += clientIdBytes.length;
+      writeUint32(buffer, offset, namespaceBytes.length);
+      offset += 4;
+      buffer.set(namespaceBytes, offset);
+      offset += namespaceBytes.length;
+      writeUint32(buffer, offset, headsBytes.length);
+      offset += 4;
+      buffer.set(headsBytes, offset);
+
+      ws.send(buffer);
+    }
+
+    function broadcastCRDTState() {
+      const allChanges = db.getChanges();
+      if (allChanges.length === 0) return;
+
+      const namespaceBytes = new TextEncoder().encode(ADMIN_NAMESPACE);
+      let totalSize = 1 + 4 + namespaceBytes.length + 4;
+      for (const change of allChanges) {
+        totalSize += 4 + change.length;
+      }
+
+      const buffer = new Uint8Array(totalSize);
+      let offset = 0;
+
+      buffer[offset++] = 0x03;
+      writeUint32(buffer, offset, namespaceBytes.length);
+      offset += 4;
+      buffer.set(namespaceBytes, offset);
+      offset += namespaceBytes.length;
+      writeUint32(buffer, offset, allChanges.length);
+      offset += 4;
+
+      for (const change of allChanges) {
+        writeUint32(buffer, offset, change.length);
+        offset += 4;
+        buffer.set(change, offset);
+        offset += change.length;
+      }
+
+      ws.send(buffer);
+    }
+
+    function handleServerMessage(buffer) {
+      const msgType = buffer[0];
+      if (msgType === 0x02) handleSync(buffer);
+      else if (msgType === 0x04) handleBroadcast(buffer);
+    }
+
+    function handleSync(buffer) {
+      let offset = 1;
+      const headsLen = readUint32(buffer, offset);
+      offset += 4 + headsLen;
+      applyCRDTChanges(buffer, offset);
+    }
+
+    function handleBroadcast(buffer) {
+      let offset = 1;
+      const clientIdLen = readUint32(buffer, offset);
+      offset += 4 + clientIdLen;
+      applyCRDTChanges(buffer, offset);
+    }
+
+    function applyCRDTChanges(buffer, offset) {
+      const changesCount = readUint32(buffer, offset);
+      offset += 4;
+
+      if (changesCount === 0) return;
+
+      const allChanges = [];
+      for (let i = 0; i < changesCount; i++) {
+        const changeLen = readUint32(buffer, offset);
+        offset += 4;
+        const changeBytes = buffer.slice(offset, offset + changeLen);
+        offset += changeLen;
+        allChanges.push(changeBytes);
+      }
+
+      try {
+        db.applyChanges(allChanges);
+        db.checkObservers();
+      } catch (e) {
+        console.error('❌ Failed to apply changes:', e);
+      }
+    }
+
+    function updateConnections() {
+      try {
+        const connections = db.data.connections.$value;
+        if (!connections) return;
+
+        const connArray = typeof connections === 'string' ? JSON.parse(connections) : connections;
+        const tbody = document.getElementById('connections-tbody');
+
+        if (!Array.isArray(connArray) || connArray.length === 0) {
+          tbody.innerHTML = `
+            <tr>
+              <td colspan="5" class="empty-state">
+                <div class="empty-state-icon">🔌</div>
+                <div>No active connections</div>
+              </td>
+            </tr>
+          `;
+          return;
+        }
+
+        tbody.innerHTML = connArray.map(conn => `
+          <tr>
+            <td><span class="code">${conn.client_id}</span></td>
+            <td><span class="code">${conn.namespace_id}</span></td>
+            <td><span class="badge badge-info">${conn.transport || 'WebSocket'}</span></td>
+            <td>${formatRelativeTime(conn.connected_at)}</td>
+            <td>${formatRelativeTime(conn.last_seen)}</td>
+          </tr>
+        `).join('');
+      } catch (e) {
+        console.error('Error updating connections:', e);
+      }
+    }
+
+    function readUint32(buffer, offset) {
+      return (buffer[offset] << 24) |
+             (buffer[offset + 1] << 16) |
+             (buffer[offset + 2] << 8) |
+             buffer[offset + 3];
+    }
+
+    function writeUint32(buffer, offset, value) {
+      buffer[offset] = (value >>> 24) & 0xFF;
+      buffer[offset + 1] = (value >>> 16) & 0xFF;
+      buffer[offset + 2] = (value >>> 8) & 0xFF;
+      buffer[offset + 3] = value & 0xFF;
+    }
+
+    init();
+  </script>
+</body>
+</html>

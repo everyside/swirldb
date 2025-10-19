@@ -1,0 +1,52 @@
+[package]
+name = "swirldb-server"
+version = "0.1.0"
+edition = "2021"
+authors = ["SwirlDB Contributors"]
+description = "High-performance CRDT sync server with pluggable storage"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "swirldb-server"
+path = "src/main.rs"
+
+[dependencies]
+# SwirlDB Core - the actual CRDT engine
+swirldb-core = { path = "../swirldb-core" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.21"
+futures = "0.3"
+
+# HTTP server
+axum = { version = "0.7", features = ["ws"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# Storage (pluggable)
+redb = "2"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+bytes = "1.5"
+uuid = { version = "1.6", features = ["v4", "serde"] }
+async-trait = "0.1"
+dashmap = "6.0"  # Lock-free concurrent hashmap for massive scalability
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

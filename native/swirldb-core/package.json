@@ -1,0 +1,11 @@
+{
+  "name": "@swirldb/core",
+  "version": "0.2.0",
+  "description": "SwirlDB core library build scripts",
+  "private": true,
+  "scripts": {
+    "build:wasm": "wasm-pack build --target web --features wasm && rm -rf ../../packages/browser-wasm/* && cp -r pkg/* ../../packages/browser-wasm/",
+    "build:wasm:dev": "wasm-pack build --target web --features wasm --dev && rm -rf ../../packages/browser-wasm/* && cp -r pkg/* ../../packages/browser-wasm/"
+  },
+  "license": "MIT"
+}

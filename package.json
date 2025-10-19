@@ -1,0 +1,16 @@
+{
+  "name": "swirldb",
+  "version": "0.2.0",
+  "description": "Modular-first CRDT-based embedded database engine",
+  "private": true,
+  "scripts": {
+    "docs": "cd docs && npm run dev",
+    "docs:build": "cd docs && npm run build",
+    "docs:preview": "cd docs && npm run preview",
+    "start": "npm run docs",
+    "build": "cd native/swirldb-core && npm run build:wasm && cd ../../packages/swirldb-js && npm run build",
+    "build:wasm": "cd native/swirldb-core && npm run build:wasm",
+    "build:ts": "cd packages/swirldb-js && npm run build"
+  },
+  "license": "MIT"
+}
