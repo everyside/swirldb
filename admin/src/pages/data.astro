@@ -7,7 +7,22 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Data Browser - SwirlDB Admin</title>
-  <style>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons" />
+  <style is:global>
+    .material-icons {
+      font-family: 'Material Icons';
+      font-weight: normal;
+      font-style: normal;
+      font-size: 20px;
+      display: inline-block;
+      line-height: 1;
+      text-transform: none;
+      letter-spacing: normal;
+      word-wrap: normal;
+      white-space: nowrap;
+      direction: ltr;
+    }
+
     * {
       margin: 0;
       padding: 0;
@@ -499,9 +514,14 @@
     }
 
     /* Column Browser */
+    #dynamic-columns {
+      display: flex;
+      flex-shrink: 0;
+    }
+
     .browser-column {
-      min-width: 250px;
-      max-width: 250px;
+      width: 280px;
+      flex-shrink: 0;
       border-right: 1px solid var(--border);
       display: flex;
       flex-direction: column;
@@ -534,25 +554,31 @@
     }
 
     .browser-list-item {
-      padding: 0.75rem 1rem;
+      padding: 0.875rem 1rem;
+      padding-left: calc(1rem - 2px);
       cursor: pointer;
-      transition: background 0.15s;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+      transition: all 0.2s;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      border-left: 2px solid transparent;
       display: flex;
       justify-content: space-between;
       align-items: center;
-      font-size: 0.9rem;
+      gap: 0.75rem;
+      font-size: 0.875rem;
       white-space: nowrap;
       overflow: hidden;
+      list-style: none;
     }
 
     .browser-list-item:hover {
-      background: rgba(139, 92, 246, 0.1);
+      background: rgba(139, 92, 246, 0.12);
+      border-left-color: var(--accent);
     }
 
     .browser-list-item.selected {
       background: var(--accent);
       color: white;
+      border-left-color: white;
     }
 
     .browser-list-item .item-name {
@@ -562,22 +588,72 @@
       white-space: nowrap;
       display: flex;
       align-items: center;
+      gap: 0.625rem;
+      font-weight: 500;
+      letter-spacing: -0.01em;
     }
 
     .browser-list-item .item-icon {
-      margin-right: 0.5rem;
-      font-size: 1rem;
+      font-size: 20px;
       flex-shrink: 0;
+      opacity: 0.7;
+      color: var(--text-secondary);
+      line-height: 1;
+      display: flex;
+      align-items: center;
+    }
+
+    .browser-list-item:hover .item-icon {
+      opacity: 0.9;
+    }
+
+    .browser-list-item.selected .item-icon {
+      opacity: 1;
+      color: white;
     }
 
     .browser-list-item .item-type {
-      font-size: 0.7rem;
-      padding: 0.125rem 0.375rem;
-      background: rgba(255, 255, 255, 0.1);
-      border-radius: 0.25rem;
+      font-size: 0.6875rem;
+      padding: 0.25rem 0.5rem;
+      border-radius: 0.375rem;
       font-family: 'SF Mono', Monaco, Consolas, monospace;
       flex-shrink: 0;
-      margin-left: 0.5rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      opacity: 0.85;
+    }
+
+    /* Type badge colors */
+    .browser-list-item .item-type[data-type="string"] {
+      background: rgba(16, 185, 129, 0.15);
+      color: #10b981;
+    }
+
+    .browser-list-item .item-type[data-type="number"] {
+      background: rgba(59, 130, 246, 0.15);
+      color: #3b82f6;
+    }
+
+    .browser-list-item .item-type[data-type="object"] {
+      background: rgba(139, 92, 246, 0.15);
+      color: #a78bfa;
+    }
+
+    .browser-list-item .item-type[data-type="array"] {
+      background: rgba(245, 158, 11, 0.15);
+      color: #f59e0b;
+    }
+
+    .browser-list-item .item-type[data-type="boolean"] {
+      background: rgba(236, 72, 153, 0.15);
+      color: #ec4899;
+    }
+
+    .browser-list-item.selected .item-type {
+      background: rgba(255, 255, 255, 0.25);
+      color: white;
+      opacity: 1;
     }
 
     .browser-value-display {
@@ -700,7 +776,7 @@
               </div>
 
               <!-- Dynamic columns will be added here -->
-              <div id="dynamic-columns" style="display: flex;"></div>
+              <div id="dynamic-columns"></div>
             </div>
           </div>
         </div>
@@ -745,6 +821,44 @@
         alert.remove();
       }, 5000);
     };
+
+    // Standard component for rendering list items
+    function createListItem(options) {
+      const { name, type, value, onClick, selected = false } = options;
+
+      // Icon mapping for Material Icons
+      const iconMap = {
+        'namespace': 'storage',
+        'array': 'view_list',
+        'object': 'data_object',
+        'string': 'text_fields',
+        'number': 'tag',
+        'boolean': 'check_circle'
+      };
+
+      const icon = iconMap[type] || 'code';
+      const arraySize = type === 'array' && Array.isArray(value) ? ` [${value.length}]` : '';
+      const selectedClass = selected ? 'selected' : '';
+
+      return `
+        <li class="browser-list-item ${selectedClass}" ${onClick ? `onclick="${onClick}"` : ''}>
+          <div class="item-name">
+            <span class="material-icons item-icon">${icon}</span>
+            <span>${name}${arraySize}</span>
+          </div>
+        </li>
+      `;
+    }
+
+    // Auto-scroll the columns container to the right
+    function scrollColumnsToRight() {
+      const container = document.querySelector('[style*="overflow-x: auto"]');
+      if (container) {
+        setTimeout(() => {
+          container.scrollLeft = container.scrollWidth;
+        }, 50); // Small delay to ensure DOM is updated
+      }
+    }
 
     // Initialize
     async function init() {
@@ -905,13 +1019,14 @@
           return;
         }
 
-        list.innerHTML = nsArray.map(ns => `
-          <li class="browser-list-item ${selectedNamespace === ns.id ? 'selected' : ''}"
-              onclick="selectNamespaceColumn('${ns.id}')">
-            <div><span class="item-icon">📦</span>${ns.id}</div>
-            <span class="item-type">${ns.connection_count}</span>
-          </li>
-        `).join('');
+        list.innerHTML = nsArray.map(ns =>
+          createListItem({
+            name: ns.id,
+            type: 'namespace',
+            onClick: `selectNamespaceColumn('${ns.id}')`,
+            selected: selectedNamespace === ns.id
+          })
+        ).join('');
       } catch (error) {
         console.error('❌ Error updating namespace list:', error);
         console.error('Error message:', error.message);
@@ -1138,18 +1253,18 @@
             ${keys.map(key => {
               const value = db.wasmDB.getValue(key);
               const valueType = Array.isArray(value) ? 'array' : typeof value;
-              const icon = valueType === 'object' ? '📁' : valueType === 'array' ? '📋' : '📄';
 
-              return `
-                <li class="browser-list-item" onclick="drillDownColumn('${namespaceId}', '${key}', '${key}')">
-                  <div class="item-name"><span class="item-icon">${icon}</span>${key}</div>
-                  <span class="item-type">${valueType}</span>
-                </li>
-              `;
+              return createListItem({
+                name: key,
+                type: valueType,
+                value: value,
+                onClick: `drillDownColumn('${namespaceId}', '${key}', '${key}')`
+              });
             }).join('')}
           </ul>
         `;
         dynamicColumns.appendChild(column);
+        scrollColumnsToRight();
         return;
       } else if (!pathInNamespace) {
         // Empty namespace
@@ -1165,6 +1280,7 @@
           </ul>
         `;
         dynamicColumns.appendChild(column);
+        scrollColumnsToRight();
         return;
       }
 
@@ -1188,6 +1304,7 @@
             </ul>
           `;
           dynamicColumns.appendChild(column);
+        scrollColumnsToRight();
           return;
         }
 
@@ -1202,19 +1319,19 @@
               const fullPath = pathInNamespace ? `${pathInNamespace}.${key}` : key;
               const value = data[key];
               const valueType = Array.isArray(value) ? 'array' : typeof value;
-              const icon = valueType === 'object' ? '📁' : valueType === 'array' ? '📋' : '📄';
 
-              return `
-                <li class="browser-list-item" onclick="drillDownColumn('${namespaceId}', '${fullPath}', '${key}')">
-                  <div class="item-name"><span class="item-icon">${icon}</span>${key}</div>
-                  <span class="item-type">${valueType}</span>
-                </li>
-              `;
+              return createListItem({
+                name: key,
+                type: valueType,
+                value: value,
+                onClick: `drillDownColumn('${namespaceId}', '${fullPath}', '${key}')`
+              });
             }).join('')}
           </ul>
         `;
 
         dynamicColumns.appendChild(column);
+        scrollColumnsToRight();
       } else {
         // Primitive value - show in a display column
         const column = document.createElement('div');
@@ -1244,6 +1361,7 @@
         `;
 
         dynamicColumns.appendChild(column);
+        scrollColumnsToRight();
       }
     }
 
