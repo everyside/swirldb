@@ -1,0 +1,545 @@
+---
+import Layout from '../layouts/Layout.astro';
+---
+
+<Layout title="Sync" description="Sync adapters for SwirlDB - real-time multi-client synchronization">
+  <h1>Sync</h1>
+
+  <p>
+    SwirlDB provides pluggable sync through the <code>SyncAdapter</code> trait. Built on CRDT technology,
+    sync is conflict-free and works offline-first. Multiple clients can edit simultaneously without
+    coordination - changes merge automatically.
+  </p>
+
+  <section class="philosophy">
+    <h2>Sync Architecture</h2>
+    <div class="card highlight">
+      <h3>CRDT-Based Sync</h3>
+      <p>Powered by Automerge, SwirlDB sync is:</p>
+      <ul>
+        <li><strong>Conflict-free:</strong> All changes merge automatically without manual resolution</li>
+        <li><strong>Offline-first:</strong> Work offline, sync when reconnected</li>
+        <li><strong>Incremental:</strong> Only transmit changes since last sync (delta sync)</li>
+        <li><strong>Namespace-based:</strong> Each room/document/tenant syncs independently</li>
+        <li><strong>Multi-client:</strong> Broadcast changes to all connected clients</li>
+      </ul>
+
+      <pre><code>{`┌─────────┐                           ┌─────────┐
+│ Client  │  ─── Push Changes ────→  │ Server  │
+│  Alice  │  ←── Broadcast ────────  │  CRDT   │
+└─────────┘                           │ Engine  │
+                                      └─────────┘
+┌─────────┐                                ↑
+│ Client  │  ─── Push Changes ─────────────┘
+│   Bob   │  ←── Broadcast ─────────────────
+└─────────┘
+
+All changes merge conflict-free`}</code></pre>
+    </div>
+  </section>
+
+  <section>
+    <h2>Built-in Adapters</h2>
+
+    <div class="card">
+      <h3>WebSocket Sync (Real-Time)</h3>
+      <p>
+        Bidirectional real-time sync over WebSockets. Changes pushed immediately to all clients.
+      </p>
+      <pre><code>{`// TypeScript/Browser
+import { SwirlDB, WebSocketSync } from '@swirldb/js';
+
+const db = await SwirlDB.withIndexedDB('my-app');
+const sync = new WebSocketSync('wss://api.example.com/ws');
+
+// Connect to namespace (room/document)
+await sync.connect('room-123', db);
+
+// All changes now auto-sync
+db.data.messages.push({ from: 'Alice', text: 'Hello!' });
+
+// Changes broadcast to all clients in room-123
+
+// Disconnect when done
+await sync.disconnect();`}</code></pre>
+
+      <pre><code>{`// Rust/Server
+use swirldb_server::sync::WebSocketSync;
+
+let sync = WebSocketSync::new("0.0.0.0:3030").await?;
+
+// Server handles:
+// - Client connections
+// - Change merging
+// - Broadcast to all clients
+// - Persistent storage via redb
+
+sync.run().await?;`}</code></pre>
+
+      <p><strong>Features:</strong></p>
+      <ul>
+        <li>Immediate propagation (< 50ms latency)</li>
+        <li>Automatic reconnection with exponential backoff</li>
+        <li>Binary protocol for minimal bandwidth</li>
+        <li>Heartbeat/ping for connection health</li>
+      </ul>
+
+      <p><strong>Use case:</strong> Real-time collaboration, chat, live dashboards, multiplayer games</p>
+    </div>
+
+    <div class="card">
+      <h3>HTTP Sync (Long-Polling Fallback)</h3>
+      <p>
+        HTTP-based sync with long-polling for environments where WebSockets aren't available.
+        Graceful fallback with similar API.
+      </p>
+      <pre><code>{`// TypeScript/Browser
+import { SwirlDB, HttpSync } from '@swirldb/js';
+
+const db = await SwirlDB.withLocalStorage('my-app');
+const sync = new HttpSync('https://api.example.com/sync');
+
+// Connect to namespace
+await sync.connect('room-123', db);
+
+// Push changes
+db.data.user.name = 'Alice';
+await sync.push();
+
+// Long-poll for new changes (25s timeout)
+const changes = await sync.poll();
+db.applyChanges(changes);
+
+// Automatic polling loop
+sync.startPolling(5000); // Poll every 5s
+sync.stopPolling();`}</code></pre>
+
+      <p><strong>HTTP Endpoints:</strong></p>
+      <ul>
+        <li><code>POST /sync/connect</code> - Initial connection, returns full state</li>
+        <li><code>POST /sync/push</code> - Push local changes to server</li>
+        <li><code>GET /sync/poll</code> - Long-poll for new changes (25s timeout)</li>
+      </ul>
+
+      <p><strong>Use case:</strong> Corporate firewalls, restrictive networks, serverless deployments</p>
+    </div>
+
+    <div class="card">
+      <h3>WebRTC Sync (Peer-to-Peer) - Planned</h3>
+      <p>
+        Peer-to-peer sync using WebRTC data channels. Clients discover peers via signaling server.
+      </p>
+      <pre><code>{`// TypeScript/Browser (future)
+import { SwirlDB, WebRTCSync } from '@swirldb/js';
+
+const db = await SwirlDB.withIndexedDB('my-app');
+const sync = new WebRTCSync({
+    signaling: 'wss://signal.example.com',
+    ice: [{ urls: 'stun:stun.l.google.com:19302' }]
+});
+
+// Join P2P room
+await sync.join('room-123', db);
+
+// Clients sync directly (no server storage)
+db.data.doc.title = 'Collaborative Document';
+
+// Server never sees plaintext data`}</code></pre>
+
+      <p><strong>Status:</strong> 🔜 Planned</p>
+      <p><strong>Use case:</strong> Privacy-first apps, local-first collaboration, serverless architectures</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Sync Protocol</h2>
+
+    <div class="card highlight">
+      <h3>Binary WebSocket Protocol</h3>
+      <p>Efficient binary protocol for minimal bandwidth usage:</p>
+      <pre><code>{`Message Types:
+┌──────────────┬──────┬─────────────────────────────────┐
+│ Type         │ Code │ Description                     │
+├──────────────┼──────┼─────────────────────────────────┤
+│ MSG_CONNECT  │ 0x01 │ Client joins namespace          │
+│ MSG_SYNC     │ 0x02 │ Server sends CRDT changes       │
+│ MSG_PUSH     │ 0x03 │ Client pushes local changes     │
+│ MSG_BROADCAST│ 0x04 │ Server broadcasts to all clients│
+└──────────────┴──────┴─────────────────────────────────┘
+
+Frame Format:
+[1 byte: type][4 bytes: length][N bytes: payload]
+
+Payload (CRDT changes):
+- Binary Automerge changes
+- Compressed with LZ4 (future)
+- Encrypted end-to-end (optional)`}</code></pre>
+    </div>
+
+    <div class="card">
+      <h3>Incremental Sync</h3>
+      <p>
+        Only transmit changes since last sync using CRDT heads:
+      </p>
+      <pre><code>{`// Client sends current heads with MSG_CONNECT
+const heads = db.getHeads();
+// heads = [hash1, hash2, ...] - vector clock of last seen changes
+
+// Server computes diff
+let changes = namespace.getChangesSince(heads);
+
+// Server sends only new changes
+socket.send(MSG_SYNC, changes);
+
+// Client applies incrementally
+db.applyChanges(changes);
+
+// Result: Minimal bandwidth, fast sync`}</code></pre>
+    </div>
+
+    <div class="card">
+      <h3>Conflict Resolution</h3>
+      <p>
+        CRDTs merge changes automatically using Automerge's built-in rules:
+      </p>
+      <pre><code>{`Conflict Type      | Resolution Strategy
+───────────────────┼─────────────────────────────────
+Text edits         | Operational transform (OT)
+Concurrent sets    | Last-write-wins (LWW)
+Counter increments | Commutative addition
+List inserts       | Position-based merge
+Map updates        | Per-key LWW
+Deletes            | Tombstone tracking
+
+Example:
+  Alice: db.data.count = 5
+  Bob:   db.data.count = 10
+
+  After sync:
+  - LWW: Highest timestamp wins
+  - Both clients converge to same value
+  - No "conflict markers" or manual resolution`}</code></pre>
+    </div>
+  </section>
+
+  <section>
+    <h2>Sync Strategies</h2>
+
+    <div class="card">
+      <h3>Real-Time Auto-Sync</h3>
+      <p>
+        Push every change immediately.
+      </p>
+      <pre><code>{`const db = await SwirlDB.withIndexedDB('my-app');
+const sync = new WebSocketSync('wss://api.example.com/ws');
+await sync.connect('room-123', db);
+
+// Enable auto-sync (default)
+sync.setAutoSync(true);
+
+// Every mutation triggers sync
+db.data.messages.push(newMessage);  // Synced immediately
+db.data.user.status = 'online';     // Synced immediately
+
+// Batching with debounce (reduce network traffic)
+sync.setDebounce(200); // Wait 200ms before syncing batch`}</code></pre>
+    </div>
+
+    <div class="card">
+      <h3>Periodic Sync</h3>
+      <p>
+        Sync on a fixed interval. Reduces network traffic, tolerates brief disconnections.
+      </p>
+      <pre><code>{`const sync = new HttpSync('https://api.example.com/sync');
+await sync.connect('room-123', db);
+
+// Sync every 10 seconds
+setInterval(async () => {
+    await sync.push();           // Push local changes
+    const changes = await sync.poll(); // Get remote changes
+    db.applyChanges(changes);
+}, 10000);
+
+// Or use built-in polling
+sync.startPolling(10000);`}</code></pre>
+    </div>
+
+    <div class="card">
+      <h3>Manual Sync</h3>
+      <p>
+        Explicit sync on user action.
+      </p>
+      <pre><code>{`const sync = new HttpSync('https://api.example.com/sync');
+
+// Work offline
+db.data.drafts.post1 = { title: 'New Post', content: '...' };
+db.data.drafts.post2 = { title: 'Another Post', content: '...' };
+
+// User clicks "Sync Now"
+document.querySelector('#sync-btn').addEventListener('click', async () => {
+    try {
+        await sync.push();
+        const changes = await sync.poll();
+        db.applyChanges(changes);
+
+        showNotification('✅ Synced successfully');
+    } catch (e) {
+        showNotification('❌ Sync failed - will retry');
+    }
+});`}</code></pre>
+    </div>
+  </section>
+
+  <section>
+    <h2>Server Deployment</h2>
+
+    <div class="card highlight">
+      <h3>Production Server Setup</h3>
+      <pre><code>{`// Rust - native/swirldb-server/src/main.rs
+use swirldb_server::{SyncServer, storage::RedbAdapter};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Configure logging
+    tracing_subscriber::fmt::init();
+
+    // Create persistent storage
+    let storage = RedbAdapter::new("./data/swirldb.redb")?;
+
+    // Start sync server
+    let server = SyncServer::builder()
+        .storage(storage)
+        .bind("0.0.0.0:3030")
+        .max_connections(10000)
+        .namespace_timeout(3600) // Remove idle namespaces after 1hr
+        .build()?;
+
+    tracing::info!("SwirlDB sync server listening on :3030");
+
+    server.run().await?;
+    Ok(())
+}`}</code></pre>
+    </div>
+
+    <div class="card">
+      <h3>Docker Deployment</h3>
+      <pre><code>{`# Dockerfile
+FROM rust:1.70 as builder
+WORKDIR /app
+COPY . .
+RUN cargo build --release --bin swirldb-server
+
+FROM debian:bookworm-slim
+COPY --from=builder /app/target/release/swirldb-server /usr/local/bin/
+EXPOSE 3030
+VOLUME /data
+CMD ["swirldb-server"]
+
+# docker-compose.yml
+version: '3.8'
+services:
+  swirldb:
+    image: swirldb-server:latest
+    ports:
+      - "3030:3030"
+    volumes:
+      - ./data:/data
+    environment:
+      - RUST_LOG=info
+      - SERVER_ID=prod-01`}</code></pre>
+    </div>
+
+    <div class="card">
+      <h3>Load Balancing</h3>
+      <p>
+        For high-scale deployments, use sticky sessions (session affinity):
+      </p>
+      <pre><code>{`# nginx.conf
+upstream swirldb {
+    ip_hash;  # Sticky sessions based on client IP
+    server sync1.example.com:3030;
+    server sync2.example.com:3030;
+    server sync3.example.com:3030;
+}
+
+server {
+    location /ws {
+        proxy_pass http://swirldb;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}`}</code></pre>
+
+      <p>
+        Alternatively, use shared storage (Redis, Postgres) so any server can handle any client.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Security & Authentication</h2>
+
+    <div class="card">
+      <h3>Namespace Access Control</h3>
+      <p>
+        Validate namespace access using JWT claims:
+      </p>
+      <pre><code>{`// Server-side authorization
+async fn handle_connect(
+    socket: WebSocket,
+    namespace_id: String,
+    token: String,
+) -> Result<()> {
+    // Validate JWT
+    let claims = validate_jwt(&token)?;
+    let actor = Actor::from_jwt_claims(claims)?;
+
+    // Check namespace access
+    if !can_access_namespace(&actor, &namespace_id) {
+        return Err("Unauthorized".into());
+    }
+
+    // Allow connection
+    let namespace = get_or_create_namespace(&namespace_id).await;
+    namespace.add_client(socket, actor).await;
+
+    Ok(())
+}
+
+fn can_access_namespace(actor: &Actor, namespace_id: &str) -> bool {
+    // Example: namespace format "org-{org_id}-{room_id}"
+    if let Some(org_id) = &actor.org_id {
+        namespace_id.starts_with(&format!("org-{}", org_id))
+    } else {
+        false
+    }
+}`}</code></pre>
+    </div>
+
+    <div class="card">
+      <h3>End-to-End Encryption</h3>
+      <p>
+        Encrypt CRDT changes before transmission (server never sees plaintext):
+      </p>
+      <pre><code>{`import { AesGcmProvider } from '@swirldb/js';
+
+// Shared key (use key exchange in production)
+const encryption = await AesGcmProvider.fromPassword('room-password', 'room-123');
+
+// Encrypt changes before sync
+const changes = db.getChanges();
+const encrypted = await Promise.all(
+    changes.map(c => encryption.encrypt(c))
+);
+
+// Send encrypted changes
+await sync.push(encrypted);
+
+// Server stores encrypted blobs (no access to content)
+
+// Other clients decrypt
+const remoteChanges = await sync.poll();
+const decrypted = await Promise.all(
+    remoteChanges.map(c => encryption.decrypt(c))
+);
+db.applyChanges(decrypted);`}</code></pre>
+    </div>
+  </section>
+
+  <section>
+    <h2>Performance Optimization</h2>
+
+    <div class="card">
+      <h3>Bandwidth Reduction</h3>
+      <ul>
+        <li><strong>Delta sync:</strong> Only transmit changes since last sync (automatic)</li>
+        <li><strong>Compression:</strong> Use LZ4 or gzip for CRDT changes (future)</li>
+        <li><strong>Batching:</strong> Debounce rapid changes into single sync operation</li>
+        <li><strong>Selective sync:</strong> Only sync paths marked with <code>Synced</code> hint</li>
+      </ul>
+
+      <pre><code>{`// Reduce bandwidth by 90% with batching
+sync.setDebounce(1000); // Batch changes for 1 second
+
+// 100 rapid edits...
+for (let i = 0; i < 100; i++) {
+    db.data.counter = i;
+}
+
+// Result: Single sync with final state, not 100 syncs`}</code></pre>
+    </div>
+
+    <div class="card">
+      <h3>Connection Management</h3>
+      <ul>
+        <li><strong>Heartbeat:</strong> Ping every 30s to detect dead connections</li>
+        <li><strong>Reconnect:</strong> Exponential backoff (1s, 2s, 4s, 8s, max 60s)</li>
+        <li><strong>Resume sync:</strong> Use heads to resume from last successful sync</li>
+        <li><strong>Offline queue:</strong> Queue changes while offline, sync when reconnected</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h3>Scalability</h3>
+      <ul>
+        <li><strong>Namespace sharding:</strong> Different namespaces on different servers</li>
+        <li><strong>Idle cleanup:</strong> Remove namespaces from memory after inactivity</li>
+        <li><strong>Lazy loading:</strong> Load namespaces on-demand from persistent storage</li>
+        <li><strong>Metrics:</strong> Track active connections, namespace count, message throughput</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <h2>Future Enhancements</h2>
+    <ul>
+      <li>WebRTC peer-to-peer sync (no server required)</li>
+      <li>Compression (LZ4, Brotli) for CRDT changes</li>
+      <li>Partial sync (sync only changed documents in large namespace)</li>
+      <li>Sync priorities (high-priority changes first)</li>
+      <li>Conflict callbacks (custom resolution logic)</li>
+      <li>Time-travel debugging (replay sync history)</li>
+      <li>Cross-region replication with eventual consistency</li>
+      <li>GraphQL subscriptions adapter</li>
+    </ul>
+  </section>
+</Layout>
+
+<style>
+  .card {
+    background: white;
+    border: 1px solid #e1e1e1;
+    border-radius: 8px;
+    padding: 1.5rem;
+    margin: 1rem 0;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  }
+
+  .card.highlight {
+    border-left: 4px solid #667eea;
+    background: #f9f9ff;
+    padding: 2rem;
+  }
+
+  .philosophy {
+    margin: 2rem 0;
+  }
+
+  ul {
+    margin-left: 2rem;
+    margin-top: 0.5rem;
+  }
+
+  li {
+    margin: 0.5rem 0;
+  }
+
+  section {
+    margin: 3rem 0;
+  }
+
+  table {
+    margin-top: 1rem;
+  }
+</style>

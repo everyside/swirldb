@@ -1,0 +1,247 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 3030,
+    "transport": "Both"
+  },
+  "auth": {
+    "jwt_secret": "your-secret-key-here",
+    "jwt_algorithm": "HS256",
+    "allow_anonymous": false
+  },
+  "rules": [
+    {
+      "_description": "User can read their own data",
+      "priority": 10,
+      "actor": { "type": "User" },
+      "action": "Read",
+      "path_pattern": "/user/{actor.id}/**",
+      "effect": "Allow"
+    },
+    {
+      "_description": "User can write their own preferences",
+      "priority": 11,
+      "actor": { "type": "User" },
+      "action": "Write",
+      "path_pattern": "/user/{actor.id}/prefs/**",
+      "effect": "Allow"
+    },
+    {
+      "_description": "User can write their own drafts",
+      "priority": 12,
+      "actor": { "type": "User" },
+      "action": "Write",
+      "path_pattern": "/user/{actor.id}/drafts/**",
+      "effect": "Allow"
+    },
+    {
+      "_description": "User can subscribe to their own data changes",
+      "priority": 13,
+      "actor": { "type": "User" },
+      "action": "Subscribe",
+      "path_pattern": "/user/{actor.id}/**",
+      "effect": "Allow"
+    },
+    {
+      "_description": "User can read shared org data",
+      "priority": 20,
+      "actor": { "type": "User" },
+      "action": "Read",
+      "path_pattern": "/org/{actor.org_id}/shared/**",
+      "effect": "Allow"
+    },
+    {
+      "_description": "User can subscribe to shared org changes",
+      "priority": 21,
+      "actor": { "type": "User" },
+      "action": "Subscribe",
+      "path_pattern": "/org/{actor.org_id}/shared/**",
+      "effect": "Allow"
+    },
+    {
+      "_description": "Admin users can write org config",
+      "priority": 22,
+      "actor": { "type": "User", "role": "admin" },
+      "action": "Write",
+      "path_pattern": "/org/{actor.org_id}/config/**",
+      "effect": "Allow"
+    },
+    {
+      "_description": "All users can read chat messages",
+      "priority": 30,
+      "actor": { "type": "User" },
+      "action": "Read",
+      "path_pattern": "/apps/chat/messages/**",
+      "effect": "Allow"
+    },
+    {
+      "_description": "All users can write chat messages",
+      "priority": 31,
+      "actor": { "type": "User" },
+      "action": "Write",
+      "path_pattern": "/apps/chat/messages/**",
+      "effect": "Allow"
+    },
+    {
+      "_description": "All users can subscribe to chat messages",
+      "priority": 32,
+      "actor": { "type": "User" },
+      "action": "Subscribe",
+      "path_pattern": "/apps/chat/messages/**",
+      "effect": "Allow"
+    },
+    {
+      "_description": "Team members can read their team's tasks",
+      "priority": 40,
+      "actor": { "type": "User" },
+      "action": "Read",
+      "path_pattern": "/apps/tasks/teams/{actor.team_id}/**",
+      "effect": "Allow"
+    },
+    {
+      "_description": "Team members can write their team's tasks",
+      "priority": 41,
+      "actor": { "type": "User" },
+      "action": "Write",
+      "path_pattern": "/apps/tasks/teams/{actor.team_id}/**",
+      "effect": "Allow"
+    },
+    {
+      "_description": "Team members can subscribe to team task changes",
+      "priority": 42,
+      "actor": { "type": "User" },
+      "action": "Subscribe",
+      "path_pattern": "/apps/tasks/teams/{actor.team_id}/**",
+      "effect": "Allow"
+    },
+    {
+      "_description": "Admin app can read everything",
+      "priority": 50,
+      "actor": { "type": "App", "id": "admin-dashboard" },
+      "action": "Read",
+      "path_pattern": "/**",
+      "effect": "Allow"
+    },
+    {
+      "_description": "Admin app can write system config",
+      "priority": 51,
+      "actor": { "type": "App", "id": "admin-dashboard" },
+      "action": "Write",
+      "path_pattern": "/system/**",
+      "effect": "Allow"
+    },
+    {
+      "_description": "Peer servers can read everything for replication",
+      "priority": 60,
+      "actor": { "type": "Server" },
+      "action": "Read",
+      "path_pattern": "/**",
+      "effect": "Allow"
+    },
+    {
+      "_description": "Peer servers can write everything for replication",
+      "priority": 61,
+      "actor": { "type": "Server" },
+      "action": "Write",
+      "path_pattern": "/**",
+      "effect": "Allow"
+    },
+    {
+      "_description": "Peer servers can replicate everything",
+      "priority": 62,
+      "actor": { "type": "Server" },
+      "action": "Replicate",
+      "path_pattern": "/**",
+      "effect": "Allow"
+    },
+    {
+      "_description": "Deny anonymous writes",
+      "priority": 9000,
+      "actor": { "type": "Anonymous" },
+      "action": "Write",
+      "path_pattern": "/**",
+      "effect": "Deny"
+    },
+    {
+      "_description": "Deny anonymous subscriptions",
+      "priority": 9001,
+      "actor": { "type": "Anonymous" },
+      "action": "Subscribe",
+      "path_pattern": "/**",
+      "effect": "Deny"
+    },
+    {
+      "_description": "Default deny all writes",
+      "priority": 10000,
+      "actor": { "type": "Any" },
+      "action": "Write",
+      "path_pattern": "/**",
+      "effect": "Deny"
+    }
+  ],
+  "remotes": [
+    {
+      "name": "primary_datacenter",
+      "endpoint": "wss://primary.swirldb.example.com/ws",
+      "transport": "WebSocket",
+      "jwt_provider": "server_token_provider",
+      "path_patterns": ["/**"],
+      "mode": "Bidirectional",
+      "auto_connect": true,
+      "retry_strategy": {
+        "max_retries": 10,
+        "backoff_ms": 1000,
+        "max_backoff_ms": 60000
+      }
+    },
+    {
+      "name": "backup_datacenter",
+      "endpoint": "wss://backup.swirldb.example.com/ws",
+      "transport": "WebSocket",
+      "jwt_provider": "server_token_provider",
+      "path_patterns": ["/**"],
+      "mode": "Push",
+      "auto_connect": true,
+      "retry_strategy": {
+        "max_retries": 5,
+        "backoff_ms": 2000,
+        "max_backoff_ms": 30000
+      }
+    },
+    {
+      "name": "analytics_service",
+      "endpoint": "https://analytics.example.com/swirldb/ingest",
+      "transport": "Http",
+      "jwt_provider": "analytics_token_provider",
+      "path_patterns": [
+        "/apps/*/metrics/**",
+        "/apps/*/events/**"
+      ],
+      "mode": "Push",
+      "auto_connect": true,
+      "retry_strategy": {
+        "max_retries": 3,
+        "backoff_ms": 5000,
+        "max_backoff_ms": 60000
+      }
+    }
+  ],
+  "jwt_providers": {
+    "server_token_provider": {
+      "type": "static",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+    },
+    "analytics_token_provider": {
+      "type": "static",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+    }
+  },
+  "audit": {
+    "enabled": true,
+    "log_path": "./data/audit.log",
+    "log_all_reads": false,
+    "log_all_writes": true,
+    "log_denied_actions": true,
+    "log_format": "json"
+  }
+}

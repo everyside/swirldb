@@ -1,3 +1,6 @@
+// Copyright 2025 Everyside Innovations, LLC
+// SPDX-License-Identifier: Apache-2.0
+
 /// SwirlDB Sync Server - High-performance CRDT synchronization
 ///
 /// Features:
@@ -7,7 +10,6 @@
 /// - Binary protocol for minimal overhead
 /// - Lock-free data structures for scalability
 
-mod protocol;
 mod state;
 mod storage;
 
@@ -23,11 +25,10 @@ use axum::{
     Json, Router,
 };
 use futures::{SinkExt, StreamExt};
-use protocol::Message;
+use swirldb_core::protocol::Message;
 use state::{ServerState, ServerStats};
 use std::net::SocketAddr;
 use std::{env, time::Duration};
-use storage::{memory_adapter::MemoryAdapter, redb_adapter::RedbAdapter, StorageAdapter};
 use tokio::time::interval;
 use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
@@ -55,47 +56,23 @@ async fn main() -> Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(3031);
 
-    let storage_type = env::var("STORAGE_TYPE").unwrap_or_else(|_| "redb".to_string());
-    let data_dir = env::var("DATA_DIR").unwrap_or_else(|_| "./data".to_string());
-
-    // Initialize storage adapter
-    let storage: Box<dyn StorageAdapter> = match storage_type.as_str() {
-        "memory" => {
-            info!("Using in-memory storage (no persistence)");
-            Box::new(MemoryAdapter::new())
-        }
-        "redb" => {
-            let db_path = format!("{}/swirldb.redb", data_dir);
-            info!("Using redb storage at: {}", db_path);
-            let mut adapter = RedbAdapter::new(&db_path)?;
-            adapter.init().await?;
-            Box::new(adapter)
-        }
-        _ => {
-            error!("Unknown storage type: {}", storage_type);
-            std::process::exit(1);
-        }
-    };
+    // TODO: Load policy from config file
+    let policy = None;
 
     // Create server state
-    let server_state = ServerState::new(storage);
+    let server_state = ServerState::new(policy);
 
     // Build axum router
     let app = Router::new()
         .route("/ws", get(websocket_handler))
         .route("/health", get(health_handler))
         .route("/stats", get(stats_handler))
-        .route("/sync/connect", post(http_connect_handler))
-        .route("/sync/poll", get(http_poll_handler))
-        .route("/sync/push", post(http_push_handler))
+        // TODO: Add HTTP sync endpoints with subscription-based protocol
         .layer(CorsLayer::permissive())
         .with_state(server_state.clone());
 
     // Spawn heartbeat task
     tokio::spawn(heartbeat_task(server_state.clone()));
-
-    // Spawn admin stats publishing task
-    tokio::spawn(admin_stats_task(server_state.clone()));
 
     // Start server
     let addr = SocketAddr::from(([0, 0, 0, 0], ws_port));
@@ -124,7 +101,7 @@ async fn handle_websocket(socket: WebSocket, state: ServerState) {
 
     info!("New WebSocket connection: {}", connection_id);
 
-    let mut client_info: Option<(String, String)> = None;
+    let mut client_info: Option<String> = None;
     let mut broadcast_rx: Option<tokio::sync::broadcast::Receiver<state::BroadcastMessage>> = None;
 
     loop {
@@ -146,44 +123,83 @@ async fn handle_websocket(socket: WebSocket, state: ServerState) {
 
                         // Parse binary protocol message
                         match Message::decode(&data) {
-                            Ok(Message::Connect { client_id, namespace_id, heads }) => {
-                                info!("Client {} connecting to namespace {} (client heads: {} bytes)",
-                                      client_id, namespace_id, heads.len());
+                            Ok(Message::Connect { client_id, subscriptions, heads }) => {
+                                info!("📱 Client {} connected ({} subscriptions)",
+                                      client_id, subscriptions.len());
 
-                                // Register client
-                                if let Err(e) = state.register_client(connection_id, client_id.clone(), namespace_id.clone()).await {
-                                    error!("Failed to register client: {}", e);
+                                // TODO: Extract actor from JWT token instead of using anonymous
+                                use swirldb_core::policy::{Actor, ActorType};
+                                let actor = Actor {
+                                    actor_type: ActorType::Anonymous,
+                                    id: client_id.clone(),
+                                    org_id: None,
+                                    team_id: None,
+                                    app_id: None,
+                                    role: None,
+                                    claims: std::collections::HashMap::new(),
+                                };
+
+                                // Register client with subscriptions
+                                let (added, denied) = match state.register_client(
+                                    connection_id,
+                                    client_id.clone(),
+                                    actor,
+                                    subscriptions.clone(),
+                                    "WebSocket".to_string()
+                                ).await {
+                                    Ok(result) => result,
+                                    Err(e) => {
+                                        error!("Failed to register client: {}", e);
+                                        break;
+                                    }
+                                };
+
+                                if !denied.is_empty() {
+                                    warn!("{} subscriptions denied by policy", denied.len());
+                                }
+
+                                client_info = Some(client_id.clone());
+
+                                // Subscribe to broadcasts
+                                broadcast_rx = Some(state.subscribe_to_broadcasts());
+
+                                // Send SubscribeAck to inform client which subscriptions were accepted
+                                let sub_ack = Message::SubscribeAck { added, denied };
+                                if let Err(e) = sender.send(WsMessage::Binary(sub_ack.encode())).await {
+                                    error!("Failed to send subscribe ack: {}", e);
                                     break;
                                 }
 
-                                client_info = Some((client_id.clone(), namespace_id.clone()));
+                                // Get current server heads and changes
+                                let (server_heads, changes) = {
+                                    let db = state.db().read().await;
+                                    let server_heads = db.get_heads();
 
-                                // Subscribe to namespace broadcasts
-                                broadcast_rx = Some(state.subscribe_to_namespace(&namespace_id));
+                                    // Parse client heads if present
+                                    let changes = if heads.is_empty() {
+                                        // Client has no changes, send everything
+                                        db.get_changes()
+                                    } else {
+                                        // Parse client heads (each head is 32 bytes)
+                                        let mut client_heads = Vec::new();
+                                        let mut offset = 0;
+                                        while offset + 32 <= heads.len() {
+                                            client_heads.push(heads[offset..offset+32].to_vec());
+                                            offset += 32;
+                                        }
 
-                                // Get current server heads
-                                let server_heads = state.get_namespace_heads(&namespace_id).await;
+                                        // Send only changes the client doesn't have
+                                        db.get_changes_since(&client_heads)
+                                    };
 
-                                // Get changes the client needs (incremental sync!)
-                                let changes = if heads.is_empty() {
-                                    // Client has no changes, send everything
-                                    let all_changes = state.get_namespace_changes_since(&namespace_id, &[]).await;
-                                    info!("Client has no heads, sending all {} changes", all_changes.len());
-                                    all_changes
-                                } else {
-                                    // Parse client heads (each head is 32 bytes)
-                                    let mut client_heads = Vec::new();
-                                    let mut offset = 0;
-                                    while offset + 32 <= heads.len() {
-                                        client_heads.push(heads[offset..offset+32].to_vec());
-                                        offset += 32;
-                                    }
-
-                                    // Send only changes the client doesn't have
-                                    let delta_changes = state.get_namespace_changes_since(&namespace_id, &client_heads).await;
-                                    info!("Client has {} heads, sending {} new changes", client_heads.len(), delta_changes.len());
-                                    delta_changes
+                                    (server_heads, changes)
                                 };
+
+                                // Calculate total bytes for stats
+                                let total_bytes: usize = changes.iter().map(|c| c.len()).sum();
+                                let sync_mode = if heads.is_empty() { "full" } else { "delta" };
+                                info!("📤 SEND: {} changes ({} bytes, {}) to {}",
+                                    changes.len(), total_bytes, sync_mode, client_id);
 
                                 // Encode server heads as flat bytes (each is 32 bytes)
                                 let heads_bytes: Vec<u8> = server_heads.into_iter().flatten().collect();
@@ -199,26 +215,38 @@ async fn handle_websocket(socket: WebSocket, state: ServerState) {
                                 }
                             }
 
-                            Ok(Message::Push { namespace_id, changes }) => {
-                                if let Some((client_id, expected_room)) = &client_info {
-                                    if &namespace_id != expected_room {
-                                        warn!("Client sent push for wrong room");
-                                        continue;
-                                    }
+                            Ok(Message::Push { heads: _client_heads, changes }) => {
+                                if let Some(client_id) = &client_info {
+                                    // Calculate total bytes for stats
+                                    let total_bytes: usize = changes.iter().map(|c| c.len()).sum();
+                                    info!("📥 RECV: {} changes ({} bytes) from {}",
+                                        changes.len(), total_bytes, client_id);
 
-                                    // Apply CRDT changes and broadcast
+                                    // TODO: Extract affected paths from changes
+                                    // For now, use wildcard to broadcast to all
+                                    let affected_paths = vec!["/**".to_string()];
+
+                                    // Apply CRDT changes and broadcast to subscribers
                                     match state
-                                        .apply_and_broadcast(
-                                            &namespace_id,
+                                        .apply_changes(
                                             client_id.clone(),
-                                            Some(connection_id),
+                                            connection_id,
                                             changes,
+                                            affected_paths,
                                         )
                                         .await
                                     {
                                         Ok(_) => {
-                                            // Send acknowledgment
-                                            let ack = Message::PushAck;
+                                            // Get server's new heads after applying changes
+                                            let server_heads = {
+                                                let db = state.db().read().await;
+                                                let heads = db.get_heads();
+                                                // Flatten Vec<Vec<u8>> to Vec<u8> (each head is 32 bytes)
+                                                heads.into_iter().flatten().collect()
+                                            };
+
+                                            // Send acknowledgment with server heads
+                                            let ack = Message::PushAck { heads: server_heads };
                                             if let Err(e) = sender.send(WsMessage::Binary(ack.encode())).await {
                                                 error!("Failed to send push ack: {}", e);
                                                 break;
@@ -258,7 +286,6 @@ async fn handle_websocket(socket: WebSocket, state: ServerState) {
                     }
 
                     Some(Ok(WsMessage::Close(_))) | None => {
-                        info!("Client {} disconnected", connection_id);
                         break;
                     }
 
@@ -285,10 +312,11 @@ async fn handle_websocket(socket: WebSocket, state: ServerState) {
                             continue;
                         }
 
-                        if let Some((_, _)) = &client_info {
+                        if let Some(_) = &client_info {
                             let broadcast_msg = Message::Broadcast {
                                 from_client_id: msg.from_client_id,
                                 changes: msg.changes,
+                                affected_paths: msg.affected_paths,
                             };
 
                             if let Err(e) = sender.send(WsMessage::Binary(broadcast_msg.encode())).await {
@@ -313,8 +341,6 @@ async fn handle_websocket(socket: WebSocket, state: ServerState) {
     if let Err(e) = state.unregister_client(&connection_id).await {
         error!("Failed to unregister client: {}", e);
     }
-
-    info!("WebSocket connection closed: {}", connection_id);
 }
 
 /// Health check endpoint
@@ -323,132 +349,13 @@ async fn health_handler() -> &'static str {
 }
 
 /// Stats endpoint
-async fn stats_handler(AxumState(state): AxumState<ServerState>) -> Result<Json<ServerStats>, AppError> {
-    let stats = state.get_stats().await?;
-    Ok(Json(stats))
+async fn stats_handler(AxumState(state): AxumState<ServerState>) -> Json<ServerStats> {
+    let stats = state.get_stats().await;
+    Json(stats)
 }
 
-/// HTTP connect endpoint (long-polling fallback)
-#[derive(serde::Deserialize)]
-struct ConnectRequest {
-    client_id: String,
-    namespace_id: String,
-}
-
-async fn http_connect_handler(
-    AxumState(state): AxumState<ServerState>,
-    Json(req): Json<ConnectRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    info!("HTTP connect request from client {} in namespace {}", req.client_id, req.namespace_id);
-
-    // Record HTTP client activity
-    state.record_http_activity(req.client_id.clone(), req.namespace_id.clone()).await;
-
-    // Send complete CRDT state
-    let room_state = state.get_namespace_state(&req.namespace_id).await?;
-
-    // For chat demo compatibility: don't send minimal/empty Automerge docs
-    let changes: Vec<Vec<u8>> = if room_state.len() <= 20 {
-        vec![] // Empty namespace
-    } else {
-        vec![room_state] // Has data
-    };
-
-    Ok(Json(serde_json::json!({
-        "changes": changes,
-        "count": changes.len()
-    })))
-}
-
-/// HTTP poll endpoint (long-polling - waits for new changes)
-#[derive(serde::Deserialize)]
-struct PollParams {
-    client_id: String,
-    namespace_id: String,
-    #[serde(default = "default_timeout")]
-    timeout: u64,
-}
-
-fn default_timeout() -> u64 {
-    30000
-}
-
-async fn http_poll_handler(
-    AxumState(state): AxumState<ServerState>,
-    Query(params): Query<PollParams>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    info!("HTTP poll request from client {} in namespace {} (timeout: {}ms)",
-          params.client_id, params.namespace_id, params.timeout);
-
-    // Record HTTP client activity
-    state.record_http_activity(params.client_id.clone(), params.namespace_id.clone()).await;
-
-    // Subscribe to namespace broadcasts
-    let mut broadcast_rx = state.subscribe_to_namespace(&params.namespace_id);
-
-    // Park the connection and wait for broadcasts or timeout
-    let timeout_duration = Duration::from_millis(params.timeout);
-
-    match tokio::time::timeout(timeout_duration, broadcast_rx.recv()).await {
-        // Received a broadcast before timeout
-        Ok(Ok(msg)) => {
-            info!("HTTP poll returning {} changes to client {}",
-                  msg.changes.len(), params.client_id);
-
-            Ok(Json(serde_json::json!({
-                "changes": msg.changes,
-                "from_client_id": msg.from_client_id,
-                "count": msg.changes.len()
-            })))
-        }
-
-        // Timeout - no new changes
-        Ok(Err(_)) => {
-            info!("HTTP poll timeout for client {}", params.client_id);
-            Ok(Json(serde_json::json!({
-                "changes": [],
-                "count": 0
-            })))
-        }
-
-        // Timeout elapsed
-        Err(_) => {
-            info!("HTTP poll timeout for client {} ({}ms elapsed)",
-                  params.client_id, params.timeout);
-            Ok(Json(serde_json::json!({
-                "changes": [],
-                "count": 0
-            })))
-        }
-    }
-}
-
-/// HTTP push endpoint (long-polling fallback)
-#[derive(serde::Deserialize)]
-struct PushRequest {
-    client_id: String,
-    namespace_id: String,
-    changes: Vec<Vec<u8>>,
-}
-
-async fn http_push_handler(
-    AxumState(state): AxumState<ServerState>,
-    Json(req): Json<PushRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    info!("HTTP push request from client {} in namespace {} ({} changes)",
-          req.client_id, req.namespace_id, req.changes.len());
-
-    // Record HTTP client activity
-    state.record_http_activity(req.client_id.clone(), req.namespace_id.clone()).await;
-
-    state
-        .apply_and_broadcast(&req.namespace_id, req.client_id, None, req.changes)
-        .await?;
-
-    Ok(Json(serde_json::json!({
-        "success": true
-    })))
-}
+// TODO: Add HTTP sync handlers with subscription-based protocol
+// Old HTTP handlers were namespace-based and need to be rewritten
 
 /// Heartbeat task - sends pings to all connected clients
 async fn heartbeat_task(state: ServerState) {
@@ -456,26 +363,7 @@ async fn heartbeat_task(state: ServerState) {
 
     loop {
         ticker.tick().await;
-        info!("Heartbeat tick - {} active clients", state.get_stats().await.ok().map(|s| s.total_clients).unwrap_or(0));
-    }
-}
-
-/// Admin stats publishing task - publishes server stats to __admin namespace every 2 seconds
-async fn admin_stats_task(state: ServerState) {
-    let mut ticker = interval(Duration::from_secs(2));
-
-    loop {
-        ticker.tick().await;
-
-        match state.publish_admin_stats().await {
-            Ok(_) => {
-                // Log successful stats publication
-                info!("Published admin stats");
-            }
-            Err(e) => {
-                error!("Failed to publish admin stats: {}", e);
-            }
-        }
+        info!("Heartbeat tick - {} active connections", state.get_connection_count());
     }
 }
 

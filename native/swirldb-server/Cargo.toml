@@ -2,9 +2,9 @@
 name = "swirldb-server"
 version = "0.1.0"
 edition = "2021"
-authors = ["SwirlDB Contributors"]
+authors = ["Everyside Innovations, LLC"]
 description = "High-performance CRDT sync server with pluggable storage"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 
 [[bin]]
 name = "swirldb-server"

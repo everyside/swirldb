@@ -264,10 +264,11 @@
   <div class="header">
     <h1 id="client-name">Chat Client</h1>
     <div class="header-right">
-      <div class="transport-toggle">
+      <!-- Transport toggle temporarily disabled - WebSocket only -->
+      <!-- <div class="transport-toggle">
         <button id="ws-btn" class="active">WebSocket</button>
         <button id="http-btn">HTTP</button>
-      </div>
+      </div> -->
       <span class="status disconnected" id="status">Disconnected</span>
     </div>
   </div>
@@ -358,8 +359,9 @@
     const inputEl = document.getElementById('message-input');
     const sendBtn = document.getElementById('send-btn');
     const statusEl = document.getElementById('status');
-    const wsBtnEl = document.getElementById('ws-btn');
-    const httpBtnEl = document.getElementById('http-btn');
+    // Transport toggle disabled - WebSocket only
+    // const wsBtnEl = document.getElementById('ws-btn');
+    // const httpBtnEl = document.getElementById('http-btn');
     const prefTransportEl = document.getElementById('pref-transport');
     const prefNotificationsEl = document.getElementById('pref-notifications');
     const prefStorageEl = document.getElementById('pref-storage');
@@ -399,8 +401,9 @@
       console.log('🔍 Setting UI defaults...');
       // Initialize with defaults (settings will persist after first save)
       currentTransport = 'websocket';
-      wsBtnEl.classList.add('active');
-      httpBtnEl.classList.remove('active');
+      // Transport toggle disabled - WebSocket only
+      // wsBtnEl.classList.add('active');
+      // httpBtnEl.classList.remove('active');
       prefTransportEl.value = 'websocket';
       prefNotificationsEl.checked = false;
       prefStorageEl.value = 'indexeddb';
@@ -531,6 +534,13 @@
         initSettings();
         console.log('✅ initSettings() completed');
 
+        // Set up observer to auto-render messages when they change
+        // This enables reactive updates when WASM receives server changes
+        db.data.messages.$observe(() => {
+          console.log('📊 Messages changed, re-rendering...');
+          renderMessages();
+        });
+
         // Connect to sync server with saved preference
         await connectToServer();
 
@@ -551,9 +561,9 @@
 
         sendBtn.addEventListener('click', sendMessage);
 
-        // Set up transport toggle
-        wsBtnEl.addEventListener('click', () => switchTransport('websocket'));
-        httpBtnEl.addEventListener('click', () => switchTransport('http'));
+        // Transport toggle disabled - WebSocket only
+        // wsBtnEl.addEventListener('click', () => switchTransport('websocket'));
+        // httpBtnEl.addEventListener('click', () => switchTransport('http'));
 
       } catch (error) {
         console.error('❌ Initialization failed:', error);
@@ -571,77 +581,34 @@
       }
     }
 
-    // WebSocket message counter for debugging
-    let wsMessageCounter = 0;
-
     async function connectWebSocket() {
-      return new Promise((resolve, reject) => {
-        ws = new WebSocket('ws://localhost:3030/ws');
-        ws.binaryType = 'arraybuffer';
+      try {
+        console.log('✅ Connecting via WebSocket (WASM-managed)');
 
-        // Wrap the send function to log outgoing messages
-        const originalSend = ws.send.bind(ws);
-        ws.send = function(data) {
-          wsMessageCounter++;
-          if (debugMode) {
-            if (typeof data === 'string') {
-              console.log(`📤 WS OUT #${wsMessageCounter} [TEXT]:`, JSON.parse(data));
-            } else {
-              console.log(`📤 WS OUT #${wsMessageCounter} [BINARY]: ${data.byteLength || data.length} bytes`);
-            }
-          }
-          return originalSend(data);
-        };
+        // WASM now manages WebSocket internally!
+        // Just call connect() with URL, client ID, and subscriptions
+        db.connect('ws://demo.swirldb.org:3030/ws', clientId, ['/**']);
 
-        ws.onopen = () => {
-          console.log('✅ Connected via WebSocket');
-          wsMessageCounter = 0; // Reset counter on connect
-          connected = true;
-          statusEl.textContent = 'Connected (WS)';
-          statusEl.className = 'status connected';
+        // Update UI
+        connected = true;
+        statusEl.textContent = 'Connected (WS)';
+        statusEl.className = 'status connected';
 
-          // Send connect message
-          sendConnectMessage();
+        // Note: Initial sync is handled automatically by the WASM layer
+        // when the WebSocket connection opens (server sends MSG_SYNC)
 
-          // Push local CRDT state to server for initial sync
-          setTimeout(() => {
-            console.log('📤 Pushing local CRDT state to server for initial sync');
-            broadcastCRDTState();
-          }, 100); // Small delay to ensure connection is established
-
-          resolve();
-        };
-
-        ws.onmessage = (event) => {
-          wsMessageCounter++;
-          if (debugMode) {
-            if (typeof event.data === 'string') {
-              console.log(`📥 WS IN #${wsMessageCounter} [TEXT]:`, JSON.parse(event.data));
-            } else {
-              console.log(`📥 WS IN #${wsMessageCounter} [BINARY]: ${event.data.byteLength} bytes`);
-            }
-          }
-          handleServerMessage(new Uint8Array(event.data));
-        };
-
-        ws.onclose = () => {
-          console.log('👋 Disconnected from server');
-          connected = false;
-          statusEl.textContent = 'Disconnected';
-          statusEl.className = 'status disconnected';
-        };
-
-        ws.onerror = (error) => {
-          console.error('❌ WebSocket error:', error);
-          reject(error);
-        };
-      });
+      } catch (error) {
+        console.error('❌ WebSocket connection error:', error);
+        statusEl.textContent = 'Error';
+        statusEl.className = 'status disconnected';
+        throw error;
+      }
     }
 
     async function connectHTTP() {
       try {
         // Initial connect to get existing messages
-        const response = await fetch('http://localhost:3030/sync/connect', {
+        const response = await fetch('http://demo.swirldb.org:3030/sync/connect', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -691,7 +658,7 @@
 
         try {
           const response = await fetch(
-            `http://localhost:3030/sync/poll?client_id=${clientId}&namespace_id=${roomId}&timeout=25000`,
+            `http://demo.swirldb.org:3030/sync/poll?client_id=${clientId}&namespace_id=${roomId}&timeout=25000`,
             { method: 'GET' }
           );
 
@@ -731,6 +698,8 @@
       }
     }
 
+    // Transport switching disabled - WebSocket only
+    /*
     async function switchTransport(newTransport) {
       if (newTransport === currentTransport) return;
 
@@ -772,52 +741,8 @@
         statusEl.className = 'status disconnected';
       }
     }
+    */
 
-    function sendConnectMessage() {
-      const clientIdBytes = new TextEncoder().encode(clientId);
-      const roomIdBytes = new TextEncoder().encode(roomId);
-
-      // Get current heads for incremental sync
-      const headsBytes = db.getHeads();
-
-      const size = 1 + 4 + clientIdBytes.length + 4 + roomIdBytes.length + 4 + headsBytes.length;
-      const buffer = new Uint8Array(size);
-      let offset = 0;
-
-      buffer[offset++] = 0x01; // MSG_CONNECT
-      writeUint32(buffer, offset, clientIdBytes.length);
-      offset += 4;
-      buffer.set(clientIdBytes, offset);
-      offset += clientIdBytes.length;
-      writeUint32(buffer, offset, roomIdBytes.length);
-      offset += 4;
-      buffer.set(roomIdBytes, offset);
-      offset += roomIdBytes.length;
-      writeUint32(buffer, offset, headsBytes.length);
-      offset += 4;
-      buffer.set(headsBytes, offset);
-
-      // Debug mode: Send JSON for network inspection
-      if (debugMode) {
-        const debugInfo = {
-          _debug: 'SwirlDB Debug Mode - This message is for human inspection only',
-          type: 'MSG_CONNECT',
-          type_code: '0x01',
-          client_id: clientId,
-          room_id: roomId,
-          heads_length: headsBytes.length + ' bytes (' + (headsBytes.length / 32) + ' heads)',
-          binary_size: size + ' bytes',
-          timestamp: new Date().toISOString()
-        };
-        console.log(`🐛 [DEBUG] WebSocket CONNECT with heads:`, debugInfo);
-
-        // Send JSON as text frame BEFORE binary frame
-        ws.send(JSON.stringify(debugInfo));
-      }
-
-      // Send binary frame (the actual data)
-      ws.send(buffer);
-    }
 
     function sendMessage() {
       const text = inputEl.value.trim();
@@ -852,8 +777,14 @@
       // Persist to IndexedDB
       db.persist();
 
-      // Send CRDT state to server (binary Automerge format)
-      broadcastCRDTState(); // Fire and forget - don't block UI
+      // Send CRDT changes to server
+      if (currentTransport === 'websocket') {
+        // WebSocket: WASM handles protocol internally
+        db.syncChanges();
+      } else {
+        // HTTP: Manual sync (WASM only manages WebSocket)
+        broadcastCRDTStateHTTP();
+      }
 
       // Clear input
       inputEl.value = '';
@@ -865,7 +796,7 @@
     // Track recent mutations for debug output
     const recentMutations = [];
 
-    async function broadcastCRDTState() {
+    async function broadcastCRDTStateHTTP() {
       // Get all CRDT changes (individual Automerge change objects)
       const allChanges = db.getChanges();
 
@@ -874,171 +805,43 @@
         return;
       }
 
-      if (currentTransport === 'websocket') {
-        // WebSocket: Binary protocol
-        const roomIdBytes = new TextEncoder().encode(roomId);
+      // HTTP: REST POST with CRDT changes
+      const requestBody = {
+        client_id: clientId,
+        namespace_id: roomId,
+        changes: allChanges.map(c => Array.from(c))
+      };
 
-        // Calculate total size
-        let totalSize = 1 + 4 + roomIdBytes.length + 4; // header + room ID + changes count
-        for (const change of allChanges) {
-          totalSize += 4 + change.length; // length prefix + change bytes
-        }
-
-        const buffer = new Uint8Array(totalSize);
-        let offset = 0;
-
-        buffer[offset++] = 0x03; // MSG_PUSH
-        writeUint32(buffer, offset, roomIdBytes.length);
-        offset += 4;
-        buffer.set(roomIdBytes, offset);
-        offset += roomIdBytes.length;
-        writeUint32(buffer, offset, allChanges.length);
-        offset += 4;
-
-        // Write each change
-        for (const change of allChanges) {
-          writeUint32(buffer, offset, change.length);
-          offset += 4;
-          buffer.set(change, offset);
-          offset += change.length;
-        }
-
-        // Debug mode: Send JSON for human inspection (not used by server)
-        if (debugMode) {
-          const messages = db.data.messages.$value || [];
-          const debugInfo = {
-            _debug: 'SwirlDB Debug Mode - This JSON is for human inspection only, not parsed by server',
-            type: 'MSG_PUSH',
-            type_code: '0x03',
-            namespace_id: roomId,
-            changes_count: allChanges.length,
-            total_size: totalSize + ' bytes',
-            message_count: messages.length,
-            recent_mutations: recentMutations.slice(0, 20), // Show up to 20 mutations
-            timestamp: new Date().toISOString()
-          };
-          console.log(`🐛 [DEBUG] WebSocket PUSH (${allChanges.length} changes):`);
-          console.log(`   Namespace: ${debugInfo.namespace_id}`);
-          console.log(`   Changes: ${debugInfo.changes_count} (${debugInfo.total_size})`);
-          console.log(`   Recent mutations:`, debugInfo.recent_mutations);
-
-          // Send JSON as text frame BEFORE binary frame
-          ws.send(JSON.stringify(debugInfo));
-        }
-
-        // Send binary frame (the actual CRDT data)
-        ws.send(buffer);
-      } else {
-        // HTTP: REST POST with CRDT changes
-        const requestBody = {
-          client_id: clientId,
-          namespace_id: roomId,
-          changes: allChanges.map(c => Array.from(c))
+      // Debug mode: Add human-readable metadata (server ignores this field)
+      if (debugMode) {
+        const messages = db.data.messages.$value || [];
+        requestBody._debug = {
+          message: 'This field is for debugging only - server ignores it',
+          changes_count: allChanges.length,
+          total_size: allChanges.reduce((sum, c) => sum + c.length, 0) + ' bytes',
+          message_count: messages.length,
+          recent_mutations: recentMutations.slice(0, 20), // Show up to 20 mutations
+          client: clientId,
+          timestamp: new Date().toISOString()
         };
-
-        // Debug mode: Add human-readable metadata (server ignores this field)
-        if (debugMode) {
-          const messages = db.data.messages.$value || [];
-          requestBody._debug = {
-            message: 'This field is for debugging only - server ignores it',
-            changes_count: allChanges.length,
-            total_size: allChanges.reduce((sum, c) => sum + c.length, 0) + ' bytes',
-            message_count: messages.length,
-            recent_mutations: recentMutations.slice(0, 20), // Show up to 20 mutations
-            client: clientId,
-            timestamp: new Date().toISOString()
-          };
-          console.log(`🐛 [DEBUG] HTTP PUSH (${allChanges.length} changes):`, requestBody._debug);
-        }
-
-        try {
-          await fetch('http://localhost:3030/sync/push', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(requestBody)
-          });
-        } catch (error) {
-          console.error('❌ Failed to push via HTTP:', error);
-        }
-      }
-    }
-
-    function handleServerMessage(buffer) {
-      const msgType = buffer[0];
-
-      if (msgType === 0x02) { // MSG_SYNC
-        handleSync(buffer);
-      } else if (msgType === 0x04) { // MSG_BROADCAST
-        handleBroadcast(buffer);
-      }
-    }
-
-    function handleSync(buffer) {
-      // Parse MSG_SYNC: [type][heads_len][heads_bytes][changes...]
-      let offset = 1; // Skip message type
-
-      // Read server heads
-      const headsLen = readUint32(buffer, offset);
-      offset += 4;
-      const serverHeads = buffer.slice(offset, offset + headsLen);
-      offset += headsLen;
-
-      if (debugMode && headsLen > 0) {
-        console.log(`🐛 [DEBUG] Server sent heads: ${headsLen} bytes (${headsLen / 32} heads)`);
-      }
-
-      // Apply incoming CRDT changes
-      applyCRDTChanges(buffer, offset);
-    }
-
-    function handleBroadcast(buffer) {
-      // Apply incoming broadcast CRDT state from another client
-      let offset = 1;
-
-      // Skip from_client_id
-      const clientIdLen = readUint32(buffer, offset);
-      offset += 4 + clientIdLen;
-
-      applyCRDTChanges(buffer, offset);
-    }
-
-    function applyCRDTChanges(buffer, offset) {
-      const changesCount = readUint32(buffer, offset);
-      offset += 4;
-
-      if (changesCount === 0) {
-        console.log('✅ Received empty sync (no changes)');
-        return;
-      }
-
-      // Collect all change bytes
-      const allChanges = [];
-      for (let i = 0; i < changesCount; i++) {
-        const changeLen = readUint32(buffer, offset);
-        offset += 4;
-        const changeBytes = buffer.slice(offset, offset + changeLen);
-        offset += changeLen;
-        allChanges.push(changeBytes);
+        console.log(`🐛 [DEBUG] HTTP PUSH (${allChanges.length} changes):`, requestBody._debug);
       }
 
       try {
-        // Use applyChanges() which MERGES instead of replacing!
-        // This is the critical fix for CRDT convergence
-        db.applyChanges(allChanges);
-        console.log(`✅ Merged ${allChanges.length} CRDT changes (total ${allChanges.reduce((sum, c) => sum + c.length, 0)} bytes)`);
-
-        // Debug mode: Log what changed
-        if (debugMode) {
-          const messages = db.data.messages.$value || [];
-          console.log(`🐛 [DEBUG] CRDT Merged - Now have ${messages.length} messages`);
-        }
-      } catch (e) {
-        console.error('❌ Failed to apply CRDT changes:', e);
+        await fetch('http://demo.swirldb.org:3030/sync/push', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(requestBody)
+        });
+      } catch (error) {
+        console.error('❌ Failed to push via HTTP:', error);
       }
-
-      // Re-render messages after applying CRDT
-      renderMessages();
     }
+
+    // WebSocket message handling is now done internally by WASM!
+    // The protocol encoding/decoding, head tracking, and change merging
+    // all happen in Rust code. We just need to observe changes via the
+    // reactive observer system.
 
     function renderMessages() {
       // Read the messages array from the CRDT (native array with proper CRDT support!)

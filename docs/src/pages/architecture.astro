@@ -1,0 +1,493 @@
+---
+import Layout from '../layouts/Layout.astro';
+---
+
+<Layout title="Architecture">
+  <h1>Architecture</h1>
+  <p class="intro">SwirlDB is a <strong>composition framework</strong> where you assemble your database from independent, swappable adapters.</p>
+
+  <section class="philosophy">
+    <h2>Core Philosophy: Everything is an Adapter</h2>
+    <div class="card highlight">
+      <h3>No Monolith, Just Composition</h3>
+      <p>Traditional databases give you a single implementation with feature flags and configuration. SwirlDB gives you <strong>traits and adapters</strong>:</p>
+      <ul>
+        <li><strong>Storage:</strong> Choose your backend (memory, localStorage, IndexedDB, redb, S3, custom)</li>
+        <li><strong>Sync:</strong> Choose your protocol (WebSocket, HTTP, WebRTC, custom)</li>
+        <li><strong>Auth:</strong> Choose your policy engine (JWT, OAuth, ABAC, custom)</li>
+        <li><strong>Encryption:</strong> Choose your crypto (AES-GCM, field-level, custom)</li>
+      </ul>
+      <p><strong>Key insight:</strong> There are no "default" implementations or "primary" platforms. Every component is a peer. Every environment is equal.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>The 3-Crate System</h2>
+    <p>SwirlDB uses complete separation of concerns:</p>
+
+    <div class="architecture-grid">
+      <div class="card">
+        <h3>🦀 swirldb-core</h3>
+        <p class="subtitle">Platform-agnostic Rust library</p>
+        <h4>Contains:</h4>
+        <ul>
+          <li>CRDT engine (Automerge-based)</li>
+          <li>Trait definitions (DocumentStorage, ChangeLog)</li>
+          <li>Policy engine (path-based authorization)</li>
+          <li>Auth provider interface</li>
+          <li>In-memory reference implementations</li>
+        </ul>
+        <h4>Does NOT contain:</h4>
+        <ul class="negative">
+          <li>❌ WASM bindings</li>
+          <li>❌ Browser APIs</li>
+          <li>❌ Server networking</li>
+          <li>❌ Platform-specific code</li>
+        </ul>
+        <p><strong>Pure Rust. Platform-agnostic. Thread-safe.</strong></p>
+      </div>
+
+      <div class="card">
+        <h3>🌐 swirldb-browser</h3>
+        <p class="subtitle">WASM bindings for browsers</p>
+        <h4>Contains:</h4>
+        <ul>
+          <li>JavaScript bindings via wasm-bindgen</li>
+          <li>localStorage adapter (5-10MB)</li>
+          <li>IndexedDB adapter (50MB-1GB)</li>
+          <li>JavaScript interop</li>
+          <li>Web API implementations</li>
+        </ul>
+        <h4>Build output:</h4>
+        <ul>
+          <li>~786KB WASM binary (~321KB gzipped)</li>
+          <li>~43KB JavaScript glue (~9KB gzipped)</li>
+          <li>TypeScript definitions</li>
+        </ul>
+        <p><strong>Target: wasm32-unknown-unknown. Single-threaded (?Send).</strong></p>
+      </div>
+
+      <div class="card">
+        <h3>🖥️ swirldb-server</h3>
+        <p class="subtitle">Pure Rust binary for servers</p>
+        <h4>Contains:</h4>
+        <ul>
+          <li>HTTP/WebSocket server (axum + tokio)</li>
+          <li>redb adapter (persistent, ACID)</li>
+          <li>Memory adapter (volatile, fast)</li>
+          <li>Binary sync protocol</li>
+          <li>Namespace management</li>
+        </ul>
+        <h4>Does NOT contain:</h4>
+        <ul class="negative">
+          <li>❌ Node.js dependencies</li>
+          <li>❌ npm packages</li>
+          <li>❌ JavaScript runtime</li>
+        </ul>
+        <p><strong>Pure native binary. Multi-threaded (Send + Sync).</strong></p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Browser and Server are Equivalent Nodes</h2>
+    <p>This is a fundamental design principle: <strong>browser and server are peers, not client and server</strong>.</p>
+
+    <div class="card highlight">
+      <h3>Same Traits, Different Implementations</h3>
+      <p>Both environments implement identical storage traits:</p>
+      <pre><code>{`// Defined in swirldb-core/src/storage/mod.rs
+trait DocumentStorage {
+    async fn save(&self, key: &str, data: &[u8]) -> Result<()>;
+    async fn load(&self, key: &str) -> Result<Option<Vec<u8>>>;
+    async fn delete(&self, key: &str) -> Result<()>;
+    async fn list_keys(&self) -> Result<Vec<String>>;
+}
+
+trait ChangeLog {
+    async fn init(&mut self) -> Result<()>;
+    async fn append_change(&self, namespace_id: &str, change: Change) -> Result<()>;
+    async fn append_changes(&self, namespace_id: &str, changes: Vec<Change>) -> Result<()>;
+    async fn get_changes(&self, namespace_id: &str) -> Result<Vec<Change>>;
+    async fn get_changes_since(&self, namespace_id: &str, since: i64) -> Result<Vec<Change>>;
+    async fn change_count(&self, namespace_id: &str) -> Result<usize>;
+    async fn delete_namespace(&self, namespace_id: &str) -> Result<()>;
+}`}</code></pre>
+    </div>
+
+    <div class="comparison-grid">
+      <div class="card">
+        <h3>Browser Implementations</h3>
+        <pre><code>{`// swirldb-browser/src/storage.rs
+
+// localStorage adapter
+pub struct LocalStorageAdapter { /* ... */ }
+
+#[async_trait(?Send)]  // Single-threaded WASM
+impl DocumentStorage for LocalStorageAdapter {
+    async fn save(&self, key: &str, data: &[u8]) -> Result<()> {
+        // Uses web_sys::Storage API
+    }
+    // ...
+}
+
+// IndexedDB adapter
+pub struct IndexedDBAdapter { /* ... */ }
+
+#[async_trait(?Send)]
+impl DocumentStorage for IndexedDBAdapter {
+    async fn save(&self, key: &str, data: &[u8]) -> Result<()> {
+        // Uses web_sys::IdbDatabase API
+    }
+    // ...
+}`}</code></pre>
+      </div>
+
+      <div class="card">
+        <h3>Server Implementations</h3>
+        <pre><code>{`// swirldb-server/src/storage/redb_adapter.rs
+
+// redb adapter
+pub struct RedbAdapter { /* ... */ }
+
+#[async_trait]  // Multi-threaded, Send + Sync
+impl DocumentStorage for RedbAdapter {
+    async fn save(&self, key: &str, data: &[u8]) -> Result<()> {
+        // Uses redb embedded database
+    }
+    // ...
+}
+
+#[async_trait]
+impl ChangeLog for RedbAdapter {
+    async fn append_change(&self, namespace_id: &str, change: Change) -> Result<()> {
+        // Persistent change log
+    }
+    // ...
+}`}</code></pre>
+      </div>
+    </div>
+
+    <p class="key-insight"><strong>Key insight:</strong> The only difference is the <code>#[async_trait(?Send)]</code> marker. Browser is single-threaded, server is multi-threaded. Otherwise, <strong>identical APIs</strong>.</p>
+  </section>
+
+  <section>
+    <h2>Shared Implementations</h2>
+    <p>The pure Rust core is shared by both browser and server. There is no duplication, no divergence, no platform-specific CRDT logic.</p>
+
+    <div class="card">
+      <h3>What's Shared</h3>
+      <ul>
+        <li><strong>CRDT Engine:</strong> Automerge-based document merging (swirldb-core/src/core.rs)</li>
+        <li><strong>Storage Traits:</strong> DocumentStorage + ChangeLog definitions (swirldb-core/src/storage/mod.rs)</li>
+        <li><strong>Policy Engine:</strong> Path-based authorization logic (swirldb-core/src/policy.rs)</li>
+        <li><strong>Auth Providers:</strong> JWT, OAuth, ABAC interfaces (swirldb-core/src/auth.rs)</li>
+        <li><strong>In-Memory Storage:</strong> Reference implementations used for testing</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h3>What's Different</h3>
+      <ul>
+        <li><strong>Browser:</strong> Web APIs (localStorage, IndexedDB), WASM FFI, JavaScript interop</li>
+        <li><strong>Server:</strong> Native I/O (redb, filesystem), HTTP/WebSocket, multi-threading</li>
+      </ul>
+    </div>
+
+    <p>This separation means:</p>
+    <ul class="benefits">
+      <li>✅ Bug fixes in core benefit both platforms simultaneously</li>
+      <li>✅ CRDT behavior is identical across all environments</li>
+      <li>✅ New features land everywhere at once</li>
+      <li>✅ Testing core logic once validates all platforms</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Runtime Composition</h2>
+    <p>Adapters are swapped at runtime, not compile time. No recompilation needed to change behavior.</p>
+
+    <div class="card">
+      <h3>Example: Storage Adapter Switching</h3>
+      <pre><code>{`// Browser: Start with memory, switch to localStorage later
+let db = await SwirlDB.create();  // In-memory
+
+// Later, migrate to persistent storage
+const state = db.saveState();
+db = await SwirlDB.withLocalStorage('my-app');
+db.loadState(state);
+
+// Or switch to IndexedDB for larger storage
+db = await SwirlDB.withIndexedDB('my-app');
+db.loadState(state);`}</code></pre>
+    </div>
+
+    <div class="card">
+      <h3>Example: Server Adapter Composition</h3>
+      <pre><code>{`// Server: Start with memory for development
+let storage = Arc::new(MemoryAdapter::new());
+let db = SwirlDB::with_storage(storage, "db").await;
+
+// Deploy with redb for production
+let storage = Arc::new(RedbAdapter::new("./data")?);
+let db = SwirlDB::with_storage(storage, "db").await;
+
+// Same code. Same APIs. Just different adapter.`}</code></pre>
+    </div>
+  </section>
+
+  <section>
+    <h2>Access Control with Policy Engine</h2>
+    <p>Control who can read and write specific paths using the policy engine. Policies are defined as JSON documents.</p>
+
+    <div class="card">
+      <h3>Policy-Based Access Control</h3>
+      <pre><code>{`// Define access rules in JSON
+const policy = {
+  rules: [
+    {
+      path: "/user/:userId/**",
+      read: ["owner", "admin"],
+      write: ["owner"]
+    },
+    {
+      path: "/public/**",
+      read: ["*"],
+      write: ["authenticated"]
+    }
+  ]
+};
+
+// Apply policy to database instance
+db.withPolicy(policy);`}</code></pre>
+    </div>
+
+    <p>Policies enable fine-grained control: <strong>different paths, different permissions</strong>.</p>
+  </section>
+
+  <section>
+    <h2>Building Custom Adapters</h2>
+    <p>The trait system is fully extensible. Roll your own adapters for any backend.</p>
+
+    <div class="card">
+      <h3>Example: Custom Redis Adapter</h3>
+      <pre><code>{`use redis::{Client, AsyncCommands};
+
+pub struct RedisAdapter {
+    client: Client,
+}
+
+impl RedisAdapter {
+    pub fn new(url: &str) -> Result<Self> {
+        Ok(RedisAdapter {
+            client: Client::open(url)?,
+        })
+    }
+}
+
+impl DocumentStorageMarker for RedisAdapter {}
+
+#[async_trait]
+impl DocumentStorage for RedisAdapter {
+    async fn save(&self, key: &str, data: &[u8]) -> Result<()> {
+        let mut conn = self.client.get_async_connection().await?;
+        conn.set(key, data).await?;
+        Ok(())
+    }
+
+    async fn load(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        let mut conn = self.client.get_async_connection().await?;
+        let result: Option<Vec<u8>> = conn.get(key).await?;
+        Ok(result)
+    }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        let mut conn = self.client.get_async_connection().await?;
+        conn.del(key).await?;
+        Ok(())
+    }
+
+    async fn list_keys(&self) -> Result<Vec<String>> {
+        let mut conn = self.client.get_async_connection().await?;
+        let keys: Vec<String> = conn.keys("*").await?;
+        Ok(keys)
+    }
+}
+
+// Now use it just like any other adapter!
+let storage = Arc::new(RedisAdapter::new("redis://localhost")?);
+let db = SwirlDB::with_storage(storage, "db").await;`}</code></pre>
+    </div>
+
+    <p>That's it. Implement the trait, pass it to <code>SwirlDB::with_storage()</code>, and you're done.</p>
+  </section>
+
+  <section>
+    <h2>Why This Architecture?</h2>
+    <div class="benefits-grid">
+      <div class="card">
+        <h3>🔌 True Modularity</h3>
+        <p>No monolithic codebase. Each adapter is independent, testable, replaceable.</p>
+      </div>
+
+      <div class="card">
+        <h3>⚖️ No Primary Platform</h3>
+        <p>Browser and server are peers. No "privileged" environment. Equal functionality.</p>
+      </div>
+
+      <div class="card">
+        <h3>🔄 Shared Logic</h3>
+        <p>CRDT engine is written once, used everywhere. Bug fixes land in all platforms.</p>
+      </div>
+
+      <div class="card">
+        <h3>🚀 Runtime Flexibility</h3>
+        <p>Swap adapters without recompilation. Deploy same code, different configuration.</p>
+      </div>
+
+      <div class="card">
+        <h3>🧪 Testability</h3>
+        <p>Test core traits with in-memory adapters. Integration tests use real adapters.</p>
+      </div>
+
+      <div class="card">
+        <h3>🌍 Ecosystem</h3>
+        <p>Community can build adapters for any backend. Unlimited extensibility.</p>
+      </div>
+    </div>
+  </section>
+
+</Layout>
+
+<style>
+  .intro {
+    font-size: 1.2rem;
+    text-align: center;
+    margin: 2rem 0;
+    color: var(--text-secondary);
+  }
+
+  .philosophy {
+    margin: 3rem 0;
+  }
+
+  .card.highlight {
+    background: linear-gradient(135deg, #f5f7fa 0%, #e8f0fe 100%);
+    border: 2px solid var(--primary);
+    padding: 2rem;
+  }
+
+  .card.highlight ul {
+    margin: 1rem 0;
+    padding-left: 1.5rem;
+  }
+
+  .card.highlight li {
+    margin: 0.5rem 0;
+  }
+
+  .subtitle {
+    font-size: 1rem;
+    color: var(--text-secondary);
+    margin: 0.5rem 0 1rem;
+    font-weight: normal;
+  }
+
+  .architecture-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 1.5rem;
+    margin: 2rem 0;
+  }
+
+  .comparison-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+    gap: 1.5rem;
+    margin: 2rem 0;
+  }
+
+  .benefits-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 1.5rem;
+    margin: 2rem 0;
+  }
+
+  .card ul {
+    text-align: left;
+    margin: 1rem 0;
+    padding-left: 1.5rem;
+  }
+
+  .card li {
+    margin: 0.3rem 0;
+  }
+
+  .card ul.negative {
+    color: #e74c3c;
+  }
+
+  .card ul.benefits {
+    list-style: none;
+    padding-left: 0;
+  }
+
+  ul.benefits {
+    list-style: none;
+    padding-left: 0;
+    margin: 1.5rem 0;
+  }
+
+  .benefits li {
+    margin: 0.8rem 0;
+    font-size: 1.1rem;
+  }
+
+  .key-insight {
+    text-align: center;
+    font-size: 1.1rem;
+    margin: 2rem 0;
+    padding: 1.5rem;
+    background: var(--bg-light);
+    border-radius: 8px;
+  }
+
+  .next-steps {
+    list-style: none;
+    padding: 0;
+    margin: 2rem 0;
+  }
+
+  .next-steps li {
+    padding: 1rem 0;
+    font-size: 1.2rem;
+  }
+
+  .next-steps a {
+    color: var(--primary);
+    text-decoration: none;
+    font-weight: 500;
+  }
+
+  .next-steps a:hover {
+    text-decoration: underline;
+  }
+
+  h4 {
+    margin: 1.5rem 0 0.5rem;
+    color: var(--primary);
+    font-size: 1rem;
+  }
+
+  pre {
+    max-height: 600px;
+    overflow-y: auto;
+  }
+
+  @media (max-width: 768px) {
+    .comparison-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>

@@ -7,85 +7,32 @@ description = "Modular-first CRDT-based embedded database engine"
 license = "Apache-2.0"
 
 [lib]
-crate-type = ["cdylib", "rlib"]  # cdylib for WASM, rlib for native Rust
+crate-type = ["cdylib", "rlib"]  # cdylib for WASM, rlib for Rust
 
 [dependencies]
 # Core - always included
-automerge = { version = "0.6.1", features = ["wasm"] }
+automerge = "0.6.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"
 base64 = "0.21"
 async-trait = "0.1"
+bytes = "1.5"
 
-# WASM-only dependencies
-wasm-bindgen = { version = "0.2", optional = true }
-wasm-bindgen-futures = { version = "0.4", optional = true }
-js-sys = { version = "0.3", optional = true }
-web-sys = { version = "0.3", optional = true, features = [
-    "Storage",
-    "Window",
-    "console",
-    "Event",
-    "IdbFactory",
-    "IdbDatabase",
-    "IdbObjectStore",
-    "IdbObjectStoreParameters",
-    "IdbTransaction",
-    "IdbTransactionMode",
-    "IdbRequest",
-    "IdbOpenDbRequest",
-    "IdbVersionChangeEvent",
-    "DomStringList",
-] }
-console_error_panic_hook = { version = "0.1", optional = true }
-serde-wasm-bindgen = { version = "0.6", optional = true }
+# Cryptography (cross-platform: WASM + native)
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha2 = "0.10"
 
-# Native server dependencies (future)
-tokio = { version = "1", optional = true, features = ["full"] }
-axum = { version = "0.7", optional = true }
-tracing = { version = "0.1", optional = true }
-tracing-subscriber = { version = "0.3", optional = true }
+# Random number generation
+getrandom = { version = "0.2", features = ["js"] }
+rand = "0.8"
 
-# Storage adapters (future)
-redb = { version = "2", optional = true }
-rusqlite = { version = "0.31", optional = true, features = ["bundled"] }
-
-[features]
-default = []
-
-# Browser WASM target
-wasm = [
-    "dep:wasm-bindgen",
-    "dep:wasm-bindgen-futures",
-    "dep:js-sys",
-    "dep:web-sys",
-    "dep:console_error_panic_hook",
-    "dep:serde-wasm-bindgen",
-]
-
-# Native server target (future)
-native-server = [
-    "dep:tokio",
-    "dep:axum",
-    "dep:tracing",
-    "dep:tracing-subscriber",
-]
-
-# Storage implementations (future)
-storage-redb = ["dep:redb"]
-storage-sqlite = ["dep:rusqlite"]
+[dev-dependencies]
+futures = "0.3"
 
 [profile.release]
-# Optimize for size for WASM
-opt-level = "z"           # Optimize for size
-lto = true                # Link-time optimization
-codegen-units = 1         # Better optimization (slower compile)
-panic = "abort"           # Don't include unwinding code
-strip = true              # Strip symbols
-
-[profile.release-native]
-inherits = "release"
-# Optimize for speed for native
+# Optimize for speed
 opt-level = 3
-lto = "fat"
+lto = true
+codegen-units = 1

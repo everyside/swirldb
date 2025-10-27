@@ -207,18 +207,9 @@ console.log(db.data.items[1].$value); // 'second'`}</code></pre>
       <li><strong>Cache scoped proxies:</strong> Reuse <code>db.at()</code> results when accessing the same path repeatedly</li>
       <li><strong>Batch mutations:</strong> Use <code>db.batch()</code> to group changes and trigger observers once</li>
       <li><strong>Avoid deep nesting in hot paths:</strong> Long chains like <code>db.data.a.b.c.d.e.f.$value</code> create multiple proxies</li>
-      <li><strong>Use storage hints:</strong> Mark temporary data as <code>memory-only</code> to skip persistence</li>
     </ul>
   </section>
 
-  <section>
-    <h2>Next Steps</h2>
-    <ul>
-      <li><a href="/examples">Try interactive examples</a></li>
-      <li><a href="/storage">Learn about storage adapters</a></li>
-      <li><a href="/quickstart">View the quickstart guide</a></li>
-    </ul>
-  </section>
 </Layout>
 
 <style>

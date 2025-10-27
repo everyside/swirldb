@@ -1,119 +1,89 @@
 # SwirlDB
 
-**A modular-first, cross-platform, CRDT-based embedded database engine**
+Cross-platform CRDT database built on Automerge. Runs in browsers via WebAssembly and as a native Rust sync server.
 
-SwirlDB is designed around pluggability and fine-grained control. Every aspect—storage, encryption, sync—is swappable via runtime adapters. You can mark individual paths as memory-only, persisted, or synced, giving you complete control over your data architecture.
+> ⚠️ **UNDER ACTIVE DEVELOPMENT** ⚠️
+>
+> SwirlDB is in early development and not ready for production use.
+> The API is unstable and subject to breaking changes.
 
----
+## Design
 
-## 🎯 Design Philosophy
+- **CRDT-based**: Built on Automerge for automatic conflict resolution
+- **Cross-platform**: Browser WASM and native Rust server with different optimizations
+- **Pluggable storage**: In-memory, LocalStorage, IndexedDB, or redb
+- **Real-time sync**: WebSocket-based synchronization server
+- **Observable**: Field-level change tracking via observers
+- **Policy engine**: Access control for subscriptions
 
-- **Modular-first**: Everything is pluggable—storage, encryption, sync
-- **Path-level control**: Mark specific keys as memory-only, persisted, or synced
-- **CRDT-powered**: Built on Automerge for conflict-free distributed data
-- **Cross-platform**: Browser WASM and pure Rust server (no Node.js)
-- **Observable**: Reactive change tracking at the field level
+## Architecture
 
----
+### Browser and Server Builds
 
-## 🏗️ Architecture
+- **Browser**: WebAssembly module with JavaScript bindings
+- **Server**: Native Rust binary for WebSocket/HTTP sync
 
-### Browser = WASM | Server = Pure Rust
+### Crate Structure
 
-- **Browser**: Compiled to WebAssembly, runs in all modern browsers
-- **Server**: Pure Rust binary, no Node.js dependency, optimized for native I/O
+- **swirldb-core**: Platform-agnostic CRDT engine and storage traits
+- **swirldb-browser**: WASM bindings with localStorage and IndexedDB adapters
+- **swirldb-server**: Sync server with redb storage and subscription management
 
-### Core Structure
+See [BUILD.md](./BUILD.md) for build instructions.
 
-```
-native/swirldb-core/src/
-├── core.rs       # Pure Rust core (thread-safe, platform-agnostic)
-├── browser.rs    # WASM bindings (thin wrapper around core)
-└── lib.rs        # Feature-gated exports
-```
-
----
-
-## 🚀 Quick Start
+## Quick Start
 
 ### Browser (WASM)
 
 **1. Build the WASM package:**
 ```bash
-cd native/swirldb-core
+# From repository root
 npm run build:wasm
 ```
 
-**2. Use in your HTML:**
-```html
-<script type="module">
-  import init, { SwirlDB } from './packages/browser-wasm/index.js';
+**2. Use in your application:**
+```javascript
+import { SwirlDB } from '@swirldb/js';
 
-  await init();
-  const db = new SwirlDB();
+// Configure with LocalStorage adapter (data persists automatically)
+const db = await SwirlDB.withLocalStorage('my-app');
 
-  // Set values with dot-notation paths
-  db.setPath('user.name', 'Alice');
-  db.setPath('user.age', 30);
+// Use natural property access via Proxies
+db.data.user.name = 'Alice';
+db.data.user.age = 30;
 
-  // Get values
-  console.log(db.getPath('user.name')); // "Alice"
+// Read values
+console.log(db.data.user.name.$value); // 'Alice'
 
-  // Observe changes
-  db.observe('user.name', (newValue) => {
-    console.log('Name changed:', newValue);
-  });
+// Observe changes reactively
+db.data.user.name.$observe((newValue) => {
+  console.log('Name changed:', newValue);
+});
 
-  // Persist to localStorage
-  const state = db.saveState();
-  localStorage.setItem('db', state);
-
-  // Restore later
-  db.loadState(localStorage.getItem('db'));
-</script>
+// Data is automatically persisted to localStorage
+// No manual save/load needed!
 ```
 
-**3. Try the example:**
-```bash
-cd examples/browser
-python3 -m http.server 8000
-# Open http://localhost:8000
+**Or with in-memory storage:**
+```javascript
+// Volatile storage (nothing persists)
+const db = await SwirlDB.create();
 ```
 
----
-
-## 📦 Project Structure
-
-```
-swirldb/
-├── native/swirldb-core/       # Rust core + WASM bindings
-│   ├── src/
-│   │   ├── core.rs            # Pure Rust implementation
-│   │   ├── browser.rs         # WASM wrapper
-│   │   └── lib.rs             # Feature gates
-│   └── Cargo.toml
-├── packages/browser-wasm/     # Auto-generated WASM output
-├── examples/
-│   └── browser/               # Browser example
-├── CLAUDE.md                  # Development guide
-└── README.md                  # This file
-```
-
----
-
-## 🔧 Development
+## Development
 
 ### Build WASM for Browser
 
 ```bash
-cd native/swirldb-core
 npm run build:wasm
 ```
 
-Outputs to `packages/browser-wasm/`:
-- `index_bg.wasm` - WASM binary
-- `index.js` - JavaScript glue code
-- `index.d.ts` - TypeScript definitions
+### Build Server
+
+```bash
+cd native/swirldb-server
+cargo build --release
+```
 
 ### Run Tests
 
@@ -122,114 +92,66 @@ cd native/swirldb-core
 cargo test
 ```
 
----
+See [BUILD.md](./BUILD.md) for detailed build instructions.
 
-## 🧩 Planned Features (Pluggable Architecture)
+## Storage and Sync Adapters
+
+SwirlDB is built entirely from swappable adapters:
 
 ### Storage Adapters
-- In-memory (volatile, fast)
-- redb (embedded, persistent)
-- SQLite (portable, queryable)
-- Sharded files (large datasets)
-- IndexedDB (browser only)
 
-**Per-path storage control:**
-```rust
-db.setPath("session.temp", value).with_storage(StorageHint::MemoryOnly);
-db.setPath("user.profile", value).with_storage(StorageHint::Persisted);
-```
+**Implemented:**
+- ✅ In-memory (volatile, fast)
+- ✅ LocalStorage (browser, 5-10MB)
+- ✅ IndexedDB (browser, 50MB-1GB)
+- ✅ redb (server, embedded, persistent)
+- ✅ Memory adapter (server, multi-threaded)
 
-### Encryption Adapters
-- Plaintext (default)
-- AES-GCM (document-level)
-- Field-level (selective encryption)
+**Planned:**
+- 🔜 SQLite (portable, queryable)
+- 🔜 Sharded files (large datasets)
+- 🔜 S3 (cloud-native)
+
 
 ### Sync Adapters
-- HTTP REST (polling)
-- WebSocket (real-time)
-- WebRTC (peer-to-peer)
 
-**Per-path sync control:**
-```rust
-db.setPath("local.draft", value).with_sync(SyncHint::NoSync);
-db.setPath("shared.doc", value).with_sync(SyncHint::Bidirectional);
-```
+**Implemented:**
+- ✅ WebSocket (real-time, bi-directional)
+- ✅ HTTP long-polling (fallback)
 
----
+**Planned:**
+- 🔜 WebRTC (peer-to-peer)
+- 🔜 Custom protocols
 
-## 🛠️ Technology Stack
+### Auth & Policy Adapters
 
-**Core:**
-- Rust 1.70+ (for `std::sync::OnceLock`)
-- Automerge (CRDT engine)
-- wasm-bindgen (Rust ↔ JS FFI)
+**Planned:**
+- 🔜 JWT validation
+- 🔜 OAuth integration
+- 🔜 ABAC (attribute-based access control)
+- 🔜 Custom policy engines
 
-**Browser:**
-- WebAssembly
-- web-sys (browser APIs)
-- IndexedDB/localStorage support
+### Encryption Adapters
 
-**Server (Planned):**
-- Pure Rust binary
-- tokio (async runtime)
-- axum (HTTP framework)
-- redb (embedded storage)
+**Planned:**
+- 🔜 AES-GCM (document-level)
+- 🔜 Field-level encryption
+- 🔜 Custom crypto implementations
 
----
+## Current Status
 
-## 📖 API Reference
+1. ✅ Core CRDT implementation (Automerge-based)
+2. ✅ Browser WASM support (localStorage, IndexedDB)
+3. ✅ Storage adapter architecture (DocumentStorage + ChangeLog traits)
+4. ✅ Pure Rust HTTP/WebSocket server (axum + tokio)
+5. ✅ Real-time sync protocol (WebSocket + HTTP long-polling)
+6. ⏳ Additional adapters (SQLite, S3, WebRTC)
+7. ⏳ Auth & encryption layers
 
-### Core Methods
+See [CLAUDE.md](./CLAUDE.md) for development guidance and [BUILD.md](./BUILD.md) for build instructions.
 
-```typescript
-// Create instance
-const db = new SwirlDB();
+## License
 
-// Set value at path
-db.setPath('user.name', 'Alice');
+Apache 2.0
 
-// Get value at path
-const name = db.getPath('user.name');
-
-// Observe changes
-db.observe('user.name', (newValue) => {
-  console.log('Changed:', newValue);
-});
-
-// Manually check observers
-db.checkObservers();
-
-// Save state to bytes
-const state = db.saveState();
-
-// Load state from bytes
-db.loadState(state);
-```
-
----
-
-## 🤝 Contributing
-
-SwirlDB is in active development. The current focus is on:
-
-1. ✅ Core CRDT implementation
-2. ✅ Browser WASM support
-3. ⏳ Storage adapter architecture
-4. ⏳ Pure Rust HTTP server
-5. ⏳ Sync protocols
-
-See [CLAUDE.md](./CLAUDE.md) for detailed development guidance.
-
----
-
-## 📄 License
-
-MIT
-
----
-
-## 🔗 Resources
-
-- **Documentation**: See [CLAUDE.md](./CLAUDE.md) for architecture details
-- **Examples**: Check `examples/browser/` for working code
-- **Automerge**: [automerge.org](https://automerge.org)
+Copyright 2025 Everyside Innovations, LLC

@@ -42,3 +42,8 @@ coverage/
 # Build outputs
 dist/
 build/
+
+/.claude
+/*.md
+/WIP
+*.redb

@@ -1,19 +1,19 @@
 {
-  "name": "swirldb-core",
+  "name": "swirldb-browser",
   "type": "module",
   "collaborators": [
     "Everyside Innovations, LLC"
   ],
-  "description": "Modular-first CRDT-based embedded database engine",
+  "description": "Browser WASM bindings for SwirlDB",
   "version": "0.2.0",
   "license": "Apache-2.0",
   "files": [
-    "swirldb_core_bg.wasm",
-    "swirldb_core.js",
-    "swirldb_core.d.ts"
+    "swirldb_browser_bg.wasm",
+    "swirldb_browser.js",
+    "swirldb_browser.d.ts"
   ],
-  "main": "swirldb_core.js",
-  "types": "swirldb_core.d.ts",
+  "main": "swirldb_browser.js",
+  "types": "swirldb_browser.d.ts",
   "sideEffects": [
     "./snippets/*"
   ]

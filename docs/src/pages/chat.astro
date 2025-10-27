@@ -32,8 +32,8 @@ import Layout from '../layouts/Layout.astro';
         <li><strong>Storage:</strong> IndexedDB (persistent, per-client)</li>
         <li><strong>Sync:</strong> WebSocket binary protocol</li>
         <li><strong>Server:</strong> Pure Rust (swirldb-server)</li>
-        <li><strong>WebSocket:</strong> ws://localhost:3030/ws</li>
-        <li><strong>HTTP Fallback:</strong> http://localhost:3030/sync/*</li>
+        <li><strong>WebSocket:</strong> ws://demo.swirldb.org:3030/ws</li>
+        <li><strong>HTTP Fallback:</strong> http://demo.swirldb.org:3030/sync/*</li>
         <li><strong>Room:</strong> general</li>
       </ul>
 
@@ -159,7 +159,7 @@ import Layout from '../layouts/Layout.astro';
     if (statusEl) {
       statusEl.innerHTML = `
         <div>⏰ ${new Date().toLocaleTimeString()}</div>
-        <div>🟢 Server: ws://localhost:3030</div>
+        <div>🟢 Server: ws://demo.swirldb.org:3030</div>
         <div>👥 Clients: 2 active</div>
       `;
     }

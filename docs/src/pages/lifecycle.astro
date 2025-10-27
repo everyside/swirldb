@@ -1,0 +1,229 @@
+---
+import Layout from '../layouts/Layout.astro';
+---
+
+<Layout title="Lifecycle">
+  <h1>Lifecycle</h1>
+  <p class="intro">Execution flow showing when each adapter and core function is called.</p>
+
+  <section>
+    <h2>Initialization</h2>
+    <div class="flow">
+      <div class="step">1. <code>DocumentStorage.load(key)</code> → Load persisted CRDT bytes</div>
+      <div class="arrow">↓</div>
+      <div class="step">2. <code>AutoCommit::load(bytes)</code> → Initialize CRDT from bytes</div>
+      <div class="arrow">↓</div>
+      <div class="step">3. Database ready</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Write: <code>db.data.user.name = 'Alice'</code></h2>
+    <div class="flow">
+      <div class="step">1. <code>PolicyEngine::authorize(actor, "write", "/user/name")</code> → Check write permission</div>
+      <div class="arrow">↓</div>
+      <div class="step">2. <code>doc.put(path, value)</code> → CRDT mutation</div>
+      <div class="arrow">↓</div>
+      <div class="step">3. <code>Observer::check_and_fire()</code> → Notify observers if value changed</div>
+      <div class="arrow">↓</div>
+      <div class="step">4. <code>DocumentStorage.save(key, doc.save())</code> → Persist snapshot (if auto-persist enabled)</div>
+      <div class="arrow">↓</div>
+      <div class="step">5. <code>SyncAdapter.send(changes)</code> → Push changes to coordinator (if connected)</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Read: <code>db.data.user.name.$value</code></h2>
+    <div class="flow">
+      <div class="step">1. <code>PolicyEngine::authorize(actor, "read", "/user/name")</code> → Check read permission</div>
+      <div class="arrow">↓</div>
+      <div class="step">2. <code>doc.get(path)</code> → Read from CRDT</div>
+      <div class="arrow">↓</div>
+      <div class="step">3. Return value</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Manual Persist: <code>db.persist()</code></h2>
+    <div class="flow">
+      <div class="step">1. <code>doc.save()</code> → Serialize CRDT to bytes</div>
+      <div class="arrow">↓</div>
+      <div class="step">2. <code>DocumentStorage.save(key, bytes)</code> → Write to storage</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Peer Connects to Sync Coordinator</h2>
+    <div class="flow">
+      <div class="step">1. <code>WebSocket.connect()</code> → Peer opens connection</div>
+      <div class="arrow">↓</div>
+      <div class="step">2. <code>PolicyEngine::authorize_subscription(patterns)</code> → Validate subscription patterns</div>
+      <div class="arrow">↓</div>
+      <div class="step">3. <code>doc.get_changes_since(peer_heads)</code> → Compute delta since peer's last sync</div>
+      <div class="arrow">↓</div>
+      <div class="step">4. <code>WebSocket.send(Sync {"{ changes }"})</code> → Send changes to peer</div>
+      <div class="arrow">↓</div>
+      <div class="step">5. Peer: <code>doc.apply_changes(changes)</code> → Merge into local CRDT</div>
+      <div class="arrow">↓</div>
+      <div class="step">6. Peer: <code>Observer::check_and_fire()</code> → Fire observers for changed paths</div>
+      <div class="arrow">↓</div>
+      <div class="step">7. Peer: <code>DocumentStorage.save()</code> → Persist updated state (if auto-persist enabled)</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Peer Pushes Changes to Coordinator</h2>
+    <div class="flow">
+      <div class="step">1. Peer: <code>doc.get_changes()</code> → Get all local changes</div>
+      <div class="arrow">↓</div>
+      <div class="step">2. Peer: <code>WebSocket.send(Push {"{ changes }"})</code> → Send to coordinator</div>
+      <div class="arrow">↓</div>
+      <div class="step">3. Coordinator: <code>doc.apply_changes(changes)</code> → Merge into coordinator's CRDT</div>
+      <div class="arrow">↓</div>
+      <div class="step">4. Coordinator: <code>DocumentStorage.save()</code> → Persist updated state</div>
+      <div class="arrow">↓</div>
+      <div class="step">5. Coordinator: Find matching subscribers by subscription patterns</div>
+      <div class="arrow">↓</div>
+      <div class="step">6. Coordinator: <code>WebSocket.send(Broadcast {"{ changes }"})</code> → Send to each subscriber</div>
+      <div class="arrow">↓</div>
+      <div class="step">7. Each peer: <code>doc.apply_changes(changes)</code> → Merge changes</div>
+      <div class="arrow">↓</div>
+      <div class="step">8. Each peer: <code>Observer::check_and_fire()</code> → Fire observers</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Observer Registration: <code>db.data.user.name.$observe(callback)</code></h2>
+    <div class="flow">
+      <div class="step">1. <code>doc.get(path)</code> → Read current value</div>
+      <div class="arrow">↓</div>
+      <div class="step">2. Store observer: <code>{"{ path, callback, last_value }"}</code></div>
+      <div class="arrow">↓</div>
+      <div class="step">3. Observer fires on future mutations/syncs to this path</div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Summary: All Adapter Methods</h2>
+    <div class="card">
+      <table>
+        <thead>
+          <tr>
+            <th>Adapter</th>
+            <th>Method</th>
+            <th>When</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>DocumentStorage</td>
+            <td>load(key)</td>
+            <td>Initialization</td>
+          </tr>
+          <tr>
+            <td>DocumentStorage</td>
+            <td>save(key, bytes)</td>
+            <td>Auto-persist or manual persist()</td>
+          </tr>
+          <tr>
+            <td>PolicyEngine</td>
+            <td>authorize(actor, action, path)</td>
+            <td>Every read/write</td>
+          </tr>
+          <tr>
+            <td>PolicyEngine</td>
+            <td>authorize_subscription(patterns)</td>
+            <td>Peer connects</td>
+          </tr>
+          <tr>
+            <td>Observer</td>
+            <td>callback(new_value)</td>
+            <td>After mutations, apply_changes</td>
+          </tr>
+          <tr>
+            <td>SyncAdapter</td>
+            <td>send(message)</td>
+            <td>Push changes to coordinator</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .intro {
+    font-size: 1.2rem;
+    text-align: center;
+    margin: 2rem 0;
+    color: var(--text-light);
+  }
+
+  .flow {
+    background: var(--bg-light);
+    padding: 2rem;
+    border-radius: 8px;
+    margin: 2rem 0;
+  }
+
+  .step {
+    background: white;
+    border: 2px solid var(--primary);
+    border-radius: 6px;
+    padding: 1rem 1.5rem;
+    font-family: 'Monaco', 'Courier New', monospace;
+    font-size: 0.95rem;
+  }
+
+  .arrow {
+    text-align: center;
+    font-size: 2rem;
+    color: var(--primary);
+    margin: 0.5rem 0;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+  }
+
+  th, td {
+    padding: 0.75rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+
+  th {
+    background: var(--primary);
+    color: white;
+    font-weight: 600;
+  }
+
+  tbody tr:hover {
+    background: var(--bg-light);
+  }
+
+  code {
+    font-size: 0.9em;
+  }
+
+  @media (max-width: 768px) {
+    .flow {
+      padding: 1rem;
+    }
+
+    .step {
+      font-size: 0.85rem;
+      padding: 0.75rem 1rem;
+    }
+
+    table {
+      font-size: 0.9rem;
+    }
+
+    th, td {
+      padding: 0.5rem;
+    }
+  }
+</style>

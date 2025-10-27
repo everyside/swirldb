@@ -1,0 +1,11 @@
+{
+  "name": "@swirldb/browser",
+  "version": "0.2.0",
+  "description": "SwirlDB browser/WASM library build scripts",
+  "private": true,
+  "scripts": {
+    "build:wasm": "wasm-pack build --target web && rm -rf ../../packages/browser-wasm/* && cp -r pkg/* ../../packages/browser-wasm/ && cp -r pkg/* ../../packages/swirldb-js/wasm/",
+    "build:wasm:dev": "wasm-pack build --target web --dev && rm -rf ../../packages/browser-wasm/* && cp -r pkg/* ../../packages/browser-wasm/ && cp -r pkg/* ../../packages/swirldb-js/wasm/"
+  },
+  "license": "Apache-2.0"
+}

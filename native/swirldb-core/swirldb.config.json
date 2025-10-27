@@ -1,0 +1,156 @@
+{
+  "policies": {
+    "auth": {
+      "jwt_secret": "your-256-bit-secret-key-here",
+      "jwt_algorithm": "HS256",
+      "allow_anonymous": false
+    },
+    "rules": [
+      {
+        "_description": "Users can read and write their own data",
+        "priority": 10,
+        "actor": { "type": "User" },
+        "action": "Write",
+        "path_pattern": "/user/{actor.id}/**",
+        "effect": "Allow"
+      },
+      {
+        "_description": "Users can read their own data",
+        "priority": 10,
+        "actor": { "type": "User" },
+        "action": "Read",
+        "path_pattern": "/user/{actor.id}/**",
+        "effect": "Allow"
+      },
+      {
+        "_description": "Users can subscribe to their own data",
+        "priority": 10,
+        "actor": { "type": "User" },
+        "action": "Subscribe",
+        "path_pattern": "/user/{actor.id}/**",
+        "effect": "Allow"
+      },
+      {
+        "_description": "Users in an org can read shared org data",
+        "priority": 20,
+        "actor": { "type": "User" },
+        "action": "Read",
+        "path_pattern": "/org/{actor.org_id}/shared/**",
+        "effect": "Allow"
+      },
+      {
+        "_description": "Users in an org can subscribe to shared org data",
+        "priority": 20,
+        "actor": { "type": "User" },
+        "action": "Subscribe",
+        "path_pattern": "/org/{actor.org_id}/shared/**",
+        "effect": "Allow"
+      },
+      {
+        "_description": "Admins can write to org data",
+        "priority": 30,
+        "actor": { "type": "User", "role": "admin" },
+        "action": "Write",
+        "path_pattern": "/org/{actor.org_id}/**",
+        "effect": "Allow"
+      },
+      {
+        "_description": "All authenticated users can read public data",
+        "priority": 50,
+        "actor": { "type": "User" },
+        "action": "Read",
+        "path_pattern": "/public/**",
+        "effect": "Allow"
+      },
+      {
+        "_description": "All authenticated users can subscribe to public data",
+        "priority": 50,
+        "actor": { "type": "User" },
+        "action": "Subscribe",
+        "path_pattern": "/public/**",
+        "effect": "Allow"
+      },
+      {
+        "_description": "Servers can replicate all data",
+        "priority": 100,
+        "actor": { "type": "Server" },
+        "action": "Replicate",
+        "path_pattern": "/**",
+        "effect": "Allow"
+      },
+      {
+        "_description": "Default deny all writes",
+        "priority": 9999,
+        "actor": { "type": "Any" },
+        "action": "Write",
+        "path_pattern": "/**",
+        "effect": "Deny"
+      }
+    ],
+    "audit": {
+      "enabled": true,
+      "log_path": "./logs/audit.log",
+      "log_all_reads": false,
+      "log_all_writes": true,
+      "log_denied_actions": true,
+      "log_format": "json"
+    },
+    "jwt_providers": {
+      "server_token": {
+        "type": "static",
+        "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+      },
+      "auth_endpoint": {
+        "type": "endpoint",
+        "url": "https://auth.example.com/api/token",
+        "refresh_interval_seconds": 3600
+      }
+    }
+  },
+  "adapters": {
+    "storage": {
+      "type": "redb",
+      "path": "./data/swirldb.redb"
+    },
+    "encryption": {
+      "type": "aes-gcm",
+      "password": "your-encryption-password",
+      "salt": "unique-salt-per-deployment"
+    },
+    "sync": {
+      "type": "websocket",
+      "endpoint": "ws://localhost:3030/ws",
+      "transport": "WebSocket"
+    }
+  },
+  "remotes": [
+    {
+      "name": "primary",
+      "endpoint": "wss://primary.example.com/ws",
+      "transport": "WebSocket",
+      "jwt_provider": "server_token",
+      "path_patterns": ["/**"],
+      "mode": "Bidirectional",
+      "auto_connect": true,
+      "retry_strategy": {
+        "max_retries": 10,
+        "backoff_ms": 1000,
+        "max_backoff_ms": 60000
+      }
+    },
+    {
+      "name": "backup",
+      "endpoint": "wss://backup.example.com/ws",
+      "transport": "WebSocket",
+      "jwt_provider": "server_token",
+      "path_patterns": ["/**"],
+      "mode": "Push",
+      "auto_connect": false,
+      "retry_strategy": {
+        "max_retries": 5,
+        "backoff_ms": 2000,
+        "max_backoff_ms": 30000
+      }
+    }
+  ]
+}

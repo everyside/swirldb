@@ -5,44 +5,56 @@ import Layout from '../layouts/Layout.astro';
 <Layout title="Home">
   <div class="hero">
     <h1>🌀 SwirlDB</h1>
-    <p class="tagline">A modular-first, CRDT-based embedded database for browsers and servers</p>
-    <div class="hero-buttons">
-      <a href="/quickstart" class="btn">Get Started</a>
-      <a href="/examples" class="btn btn-secondary">View Examples</a>
-    </div>
+    <p class="tagline">A modular-first, CRDT-based embedded database built from composable adapters</p>
+    <p class="subtitle">Browser and server are equivalent nodes. No primary platform, no privileged environment. Just pure, swappable components.</p>
   </div>
 
+  <section class="philosophy">
+    <h2>Design Philosophy</h2>
+    <div class="card highlight">
+      <h3>Everything is an Adapter</h3>
+      <p>SwirlDB is not a monolith with configuration options. It's a composition of swappable adapters:</p>
+      <ul>
+        <li><strong>Storage Adapters:</strong> localStorage, IndexedDB, redb, SQLite, sharded files, or your own</li>
+        <li><strong>Sync Adapters:</strong> WebSocket, HTTP, WebRTC, custom protocols</li>
+        <li><strong>Auth Adapters:</strong> JWT, OAuth, ABAC, custom policies</li>
+        <li><strong>Encryption Adapters:</strong> AES-GCM, field-level, custom crypto</li>
+      </ul>
+      <p>No feature flags. No conditional compilation. Each adapter is an independent implementation of a shared trait.</p>
+    </div>
+  </section>
+
   <section class="features">
-    <h2>Key Features</h2>
+    <h2>Core Principles</h2>
     <div class="feature-grid">
       <div class="card">
-        <h3>🔌 Pluggable Everything</h3>
-        <p>Storage, encryption, and sync are all swappable adapters. Choose what fits your use case.</p>
+        <h3>🔌 Adapter-First Architecture</h3>
+        <p>Every subsystem is a pluggable adapter. Compose your database from the exact components you need. Runtime swappable with zero recompilation.</p>
       </div>
 
       <div class="card">
-        <h3>🎯 Path-Level Control</h3>
-        <p>Fine-grained control over which keys are memory-only, persisted, or synced.</p>
+        <h3>⚖️ Equivalent Nodes</h3>
+        <p>Browser and server are peers implementing identical traits. Same CRDT engine, same storage interface, just different adapter implementations.</p>
       </div>
 
       <div class="card">
-        <h3>👁️ Observable State</h3>
-        <p>Reactive change tracking at the dot-path level with efficient observers.</p>
+        <h3>🎯 Path-Level Policies</h3>
+        <p>Per-path control over storage, sync, and auth. Different data, different rules. Configure at runtime without rebuilding.</p>
       </div>
 
       <div class="card">
-        <h3>🌐 Multi-Environment</h3>
-        <p>Browser WASM and pure Rust server with target-optimized implementations.</p>
+        <h3>🧩 Shared Implementations</h3>
+        <p>Pure Rust core with unified traits. Browser WASM and native servers share the same CRDT logic, differ only in platform adapters.</p>
       </div>
 
       <div class="card">
-        <h3>&#x1F504; CRDT-Based</h3>
-        <p>Built on Automerge for conflict-free replicated data types.</p>
+        <h3>&#x1F504; CRDT-Based Sync</h3>
+        <p>Built on Automerge for conflict-free replicated data. Multi-user by default, with incremental delta sync and merge semantics.</p>
       </div>
 
       <div class="card">
-        <h3>⚡ Native Proxy API</h3>
-        <p>Use native JavaScript property access instead of getter/setter methods.</p>
+        <h3>⚡ Natural APIs</h3>
+        <p>Native property access in JavaScript via Proxies. Idiomatic Rust APIs. No learning curve, just write code naturally.</p>
       </div>
     </div>
   </section>
@@ -69,38 +81,72 @@ db.data.user.name.$observe((newValue) => {
 
 // Enable auto-persistence
 db.enableAutoPersist(500); // Debounced 500ms
-db.data.settings.theme = 'dark'; // Auto-saves
-
-// Storage hints for per-path policies
-db.setStorageHint('session.temp', 'memory-only');
-db.setStorageHint('user.profile', 'persisted');
-db.setStorageHint('shared.doc', 'synced');`}</code></pre>
+db.data.settings.theme = 'dark'; // Auto-saves`}</code></pre>
     </div>
   </section>
 
   <section class="architecture">
-    <h2>Architecture</h2>
-    <div class="card">
-      <h3>Browser Target</h3>
-      <p>Compiled to WASM via wasm-bindgen, runs in all modern browsers with LocalStorage and IndexedDB adapters.</p>
+    <h2>Architecture: The 3-Crate System</h2>
+    <p class="arch-intro">SwirlDB uses complete separation of concerns with no feature flags:</p>
+
+    <div class="feature-grid">
+      <div class="card">
+        <h3>swirldb-core</h3>
+        <p><strong>Platform-agnostic Rust library</strong></p>
+        <ul>
+          <li>CRDT engine (Automerge-based)</li>
+          <li>Storage trait definitions (DocumentStorage + ChangeLog)</li>
+          <li>Policy engine (path-based authorization)</li>
+          <li>Auth providers (extensible)</li>
+          <li>Zero platform dependencies</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h3>swirldb-browser</h3>
+        <p><strong>WASM bindings for browsers</strong></p>
+        <ul>
+          <li>JavaScript bindings via wasm-bindgen</li>
+          <li>localStorage adapter (5-10MB)</li>
+          <li>IndexedDB adapter (50MB-1GB)</li>
+          <li>Browser-specific storage implementations</li>
+          <li>~830KB total (~330KB gzipped)</li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h3>swirldb-server</h3>
+        <p><strong>Pure Rust binary for servers</strong></p>
+        <ul>
+          <li>HTTP/WebSocket sync server (axum + tokio)</li>
+          <li>redb adapter (embedded, persistent)</li>
+          <li>Memory adapter (volatile, fast)</li>
+          <li>No Node.js dependency</li>
+          <li>Native I/O performance</li>
+        </ul>
+      </div>
     </div>
 
-    <div class="card">
-      <h3>Server Target (Future)</h3>
-      <p>Pure Rust binary with no Node.js dependency. Optimized for performance with redb or SQLite adapters.</p>
-    </div>
+    <div class="card highlight">
+      <h3>Unified Traits, Different Implementations</h3>
+      <p>Both browser and server implement the same storage traits:</p>
+      <pre><code>{`trait DocumentStorage {
+    async fn save(&self, key: &str, data: &[u8]) -> Result<()>;
+    async fn load(&self, key: &str) -> Result<Option<Vec<u8>>>;
+    // ...
+}
 
-    <div class="card">
-      <h3>Core Engine</h3>
-      <p>Pure Rust core built on Automerge CRDT. Thread-safe, platform-agnostic, with pluggable storage.</p>
+trait ChangeLog {
+    async fn append_change(&self, namespace_id: &str, change: Change) -> Result<()>;
+    async fn get_changes_since(&self, namespace_id: &str, since: i64) -> Result<Vec<Change>>;
+    // ...
+}`}</code></pre>
+      <p><strong>Browser:</strong> localStorage + IndexedDB implementations</p>
+      <p><strong>Server:</strong> redb + memory implementations</p>
+      <p><strong>Same workflows. Same APIs. Just different backends.</strong></p>
     </div>
   </section>
 
-  <section class="get-started">
-    <h2>Ready to Build?</h2>
-    <p>Check out the quickstart guide to get SwirlDB running in your project.</p>
-    <a href="/quickstart" class="btn">Get Started →</a>
-  </section>
 </Layout>
 
 <style>
@@ -123,7 +169,14 @@ db.setStorageHint('shared.doc', 'synced');`}</code></pre>
   .tagline {
     font-size: 1.5rem;
     opacity: 0.95;
+    margin-bottom: 1rem;
+  }
+
+  .subtitle {
+    font-size: 1.1rem;
+    opacity: 0.9;
     margin-bottom: 2rem;
+    font-style: italic;
   }
 
   .hero-buttons {
@@ -150,6 +203,42 @@ db.setStorageHint('shared.doc', 'synced');`}</code></pre>
   .quick-example pre {
     max-height: 500px;
     overflow-y: auto;
+  }
+
+  .philosophy {
+    margin: 3rem 0;
+  }
+
+  .card.highlight {
+    background: linear-gradient(135deg, #f5f7fa 0%, #e8f0fe 100%);
+    border: 2px solid var(--primary);
+    padding: 2rem;
+  }
+
+  .card.highlight ul {
+    margin: 1rem 0;
+    padding-left: 1.5rem;
+  }
+
+  .card.highlight li {
+    margin: 0.5rem 0;
+  }
+
+  .arch-intro {
+    text-align: center;
+    font-size: 1.1rem;
+    margin-bottom: 2rem;
+    color: var(--text-secondary);
+  }
+
+  .card ul {
+    text-align: left;
+    margin: 1rem 0;
+    padding-left: 1.5rem;
+  }
+
+  .card li {
+    margin: 0.3rem 0;
   }
 
   .get-started {

@@ -43,7 +43,7 @@ const { title, description = 'Modular-first CRDT database for browsers and serve
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
         line-height: 1.6;
         color: var(--text);
-        background: var(--bg);
+        background: #000000;
       }
 
       .container {
@@ -71,6 +71,9 @@ const { title, description = 'Modular-first CRDT database for browsers and serve
       nav h1 {
         font-size: 1.8rem;
         font-weight: 700;
+        position: relative;
+        top: -7px;
+        color: white;
       }
 
       nav ul {
@@ -91,8 +94,13 @@ const { title, description = 'Modular-first CRDT database for browsers and serve
       }
 
       main {
-        padding: 3rem 0;
         min-height: calc(100vh - 200px);
+      }
+
+      main .container {
+        background: var(--bg);
+        padding-top: 3rem;
+        padding-bottom: 3rem;
       }
 
       footer {
@@ -198,11 +206,15 @@ const { title, description = 'Modular-first CRDT database for browsers and serve
         <h1>🌀 SwirlDB</h1>
         <ul>
           <li><a href="/">Home</a></li>
-          <li><a href="/quickstart">Quickstart</a></li>
-          <li><a href="/proxy-api">Proxy API</a></li>
+          <li><a href="/architecture">Architecture</a></li>
+          <li><a href="/lifecycle">Lifecycle</a></li>
           <li><a href="/storage">Storage</a></li>
-          <li><a href="/examples">Examples</a></li>
-          <li><a href="https://github.com/fennario/swirldb" target="_blank">GitHub</a></li>
+          <li><a href="/encryption">Encryption</a></li>
+          <li><a href="/auth">Auth</a></li>
+          <li><a href="/sync">Sync</a></li>
+          <li><a href="/policy">Policy</a></li>
+          <li><a href="/chat">Chat Demo</a></li>
+          <li><a href="https://github.com/everyside/swirldb" target="_blank">GitHub</a></li>
         </ul>
       </div>
     </nav>
@@ -216,7 +228,7 @@ const { title, description = 'Modular-first CRDT database for browsers and serve
     <footer>
       <div class="container">
         <p>SwirlDB - Modular-first CRDT database</p>
-        <p>MIT License &copy; 2024</p>
+        <p>Apache 2.0 License &copy; 2025 Everyside Innovations, LLC</p>
       </div>
     </footer>
   </body>

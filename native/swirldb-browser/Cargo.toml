@@ -1,0 +1,67 @@
+[package]
+name = "swirldb-browser"
+version = "0.2.0"
+edition = "2021"
+authors = ["Everyside Innovations, LLC"]
+description = "Browser WASM bindings for SwirlDB"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Core SwirlDB engine
+swirldb-core = { path = "../swirldb-core" }
+
+# CRDT engine (re-exported from core, but needed for WASM bindings)
+automerge = "0.6.1"
+
+# Async support
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde-wasm-bindgen = "0.6"
+base64 = "0.21"
+
+# WASM bindings
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Storage",
+    "Window",
+    "console",
+    "Event",
+    "IdbFactory",
+    "IdbDatabase",
+    "IdbObjectStore",
+    "IdbObjectStoreParameters",
+    "IdbTransaction",
+    "IdbTransactionMode",
+    "IdbRequest",
+    "IdbOpenDbRequest",
+    "IdbVersionChangeEvent",
+    "DomStringList",
+    "WebSocket",
+    "MessageEvent",
+    "CloseEvent",
+    "ErrorEvent",
+    "BinaryType",
+] }
+console_error_panic_hook = "0.1"
+
+# Error handling
+anyhow = "1.0"
+
+# uuid is pulled in by automerge, but needs WASM-specific features
+uuid = { version = "1.18", features = ["v4", "js", "serde"] }
+
+[profile.release]
+# Optimize for size for WASM
+opt-level = "z"           # Optimize for size
+lto = true                # Link-time optimization
+codegen-units = 1         # Better optimization (slower compile)
+panic = "abort"           # Don't include unwinding code
+strip = true              # Strip symbols

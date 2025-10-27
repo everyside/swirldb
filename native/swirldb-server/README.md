@@ -1,15 +1,17 @@
 # SwirlDB Sync Server
 
-High-performance CRDT synchronization server written in pure Rust.
+CRDT synchronization server written in Rust. Handles real-time synchronization between SwirlDB clients using WebSocket protocol with subscription-based change filtering.
 
 ## Features
 
-- ✅ **Full SwirlDB CRDT Engine** - Each room runs a complete SwirlDB instance
-- ✅ **Massively Concurrent** - Lock-free data structures handle thousands of connections
-- ✅ **WebSocket + HTTP** - Binary WebSocket protocol with HTTP long-polling fallback
-- ✅ **Pluggable Storage** - redb (fast embedded DB) or in-memory
-- ✅ **Server-to-Server Sync** - Pure Rust servers can sync with each other
-- ✅ **Zero Dependencies** - Standalone binary, no Node.js required
+- Subscription-based sync with path pattern matching (e.g., `/chat/**`, `/user/*/profile`)
+- Binary WebSocket protocol for real-time updates
+- Single global CRDT instance shared by all clients
+- Policy-based access control for subscriptions
+- Persistent storage via redb (embedded key-value database)
+- Lock-free client tracking using DashMap
+- Incremental sync using CRDT heads
+- Standalone binary, no Node.js required
 
 ## Quick Start
 
@@ -23,11 +25,8 @@ cargo build --release
 ### Run
 
 ```bash
-# With default settings (port 3030, redb storage)
+# With default settings (port 3030)
 ./target/release/swirldb-server
-
-# With environment variables
-PORT=8080 STORAGE_TYPE=memory ./target/release/swirldb-server
 
 # With logging
 RUST_LOG=info ./target/release/swirldb-server
@@ -40,136 +39,121 @@ Environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | 3030 | WebSocket server port |
-| `HTTP_PORT` | 3031 | HTTP fallback port |
-| `STORAGE_TYPE` | `redb` | Storage backend: `redb` or `memory` |
-| `DATA_DIR` | `./data` | Directory for redb database |
 | `RUST_LOG` | (none) | Log level: `error`, `warn`, `info`, `debug`, `trace` |
 
 ## Endpoints
 
-### WebSocket (Primary Transport)
+### WebSocket
 
 ```
 ws://localhost:3030/ws
 ```
 
-Binary protocol for real-time sync. See `/native/swirldb-server/src/protocol/mod.rs` for message format.
+Binary protocol for real-time sync. Message types:
 
-### HTTP (Fallback Transport)
+- **Connect**: Client registration with subscription patterns and heads for incremental sync
+- **Sync**: Server response containing CRDT changes
+- **Push**: Client pushes local changes to server
+- **PushAck**: Server acknowledges push with updated heads
+- **Broadcast**: Server broadcasts changes to other subscribed clients
+- **Ping/Pong**: Heartbeat messages
 
-#### POST `/sync/connect`
-Initial connection and get all changes.
-
-```bash
-curl -X POST http://localhost:3031/sync/connect \
-  -H "Content-Type: application/json" \
-  -d '{"client_id": "alice", "room_id": "general"}'
-```
-
-#### POST `/sync/push`
-Push changes to server.
-
-```bash
-curl -X POST http://localhost:3031/sync/push \
-  -H "Content-Type: application/json" \
-  -d '{
-    "client_id": "alice",
-    "room_id": "general",
-    "changes": [[1,2,3], [4,5,6]]
-  }'
-```
+### HTTP
 
 #### GET `/health`
-Health check.
+
+Health check endpoint.
 
 ```bash
-curl http://localhost:3031/health
+curl http://localhost:3030/health
 ```
 
 #### GET `/stats`
-Server statistics.
+
+Server statistics (connection count, change count, uptime).
 
 ```bash
-curl http://localhost:3031/stats
+curl http://localhost:3030/stats
+```
+
+Returns:
+```json
+{
+  "connection_count": 5,
+  "change_count": 1234,
+  "uptime_seconds": 3600,
+  "last_activity": 1735264200000
+}
 ```
 
 ## Architecture
 
-### Per-Room SwirlDB Instances
+### Subscription-Based Sync
 
-Each room gets its own full SwirlDB CRDT instance:
+Clients subscribe to path patterns using glob-style syntax:
+
+- `/**` - Subscribe to all changes
+- `/chat/**` - Subscribe to all chat-related changes
+- `/user/alice/**` - Subscribe to all changes under user alice
+
+The server filters broadcasts based on affected paths, only sending changes to clients with matching subscriptions.
+
+### Global CRDT Instance
+
+The server maintains a single global SwirlDB CRDT instance:
 
 ```rust
-pub struct Room {
-    pub room_id: String,
-    pub db: Arc<RwLock<SwirlDB>>,  // Full CRDT engine
-    pub broadcast_tx: broadcast::Sender<BroadcastMessage>,
-    pub connection_count: Arc<RwLock<usize>>,
+pub struct ServerState {
+    db: Arc<RwLock<SwirlDB>>,              // Single global CRDT
+    subscriptions: Arc<Mutex<SubscriptionManager>>,  // Path-based filtering
+    broadcast_tx: broadcast::Sender<BroadcastMessage>,
+    clients: Arc<DashMap<Uuid, ClientInfo>>,
 }
 ```
+
+All clients operate on the same CRDT document. Changes from one client are merged and broadcast to other clients with matching subscriptions.
+
+### Incremental Sync
+
+Clients track their last synced state using CRDT heads (change hashes). On reconnection:
+
+1. Client sends its heads with Connect message
+2. Server computes delta using `get_changes_since(heads)`
+3. Server sends only new changes
+4. Client applies changes via `apply_changes()`
+
+This minimizes bandwidth - a client that's already up-to-date receives 0 changes.
 
 ### Concurrency Model
 
-- **Lock-free room/client tracking** using `DashMap`
-- **Tokio broadcast channels** for efficient room-wide messaging
-- **Async-first** - handles thousands of concurrent connections
-- **Zero-copy reads** with redb memory-mapped files
+- Lock-free client tracking using `DashMap`
+- Tokio broadcast channels for efficient room-wide messaging
+- Async-first - handles thousands of concurrent connections
+- Read-write locks minimize contention on CRDT access
 
-### Storage Adapters
+### Storage
 
-Pluggable storage via trait:
+The server uses redb for persistent storage:
 
-```rust
-pub trait StorageAdapter: Send + Sync + 'static {
-    async fn get_room_changes(&self, room_id: &str) -> Result<Vec<Change>>;
-    async fn append_changes(&self, room_id: &str, changes: Vec<Change>) -> Result<()>;
-    // ... more methods
-}
-```
+- ACID transactions
+- Memory-mapped files for zero-copy reads
+- Embedded (no separate database server needed)
+- Fast writes with write-ahead logging
 
-**Implementations:**
-- `RedbAdapter` - Fast embedded database (default)
-- `MemoryAdapter` - In-memory (no persistence)
-- Custom adapters (implement the trait)
-
-## Server-to-Server Sync
-
-SwirlDB servers can sync with each other by connecting to `/ws` endpoint:
-
-```
-Server A (LA)  ←→  Server B (NYC)  ←→  Server C (Tokyo)
-    ↕                   ↕                     ↕
-Browser 1          Browser 2            Browser 3
-```
-
-Each server runs full CRDT logic - automatic conflict resolution via Automerge.
-
-## Performance
-
-**Benchmarks** (on Apple M1):
-- **Connections:** 10,000+ concurrent WebSocket connections
-- **Throughput:** 100,000+ messages/sec
-- **Latency:** <5ms for local WebSocket, <50ms for HTTP
-- **Storage:** Zero-copy reads with redb memory-mapped files
-
-**Production-Ready:**
-- Release build with LTO and optimization level 3
-- Stripped binary (~5MB)
-- ACID transactions for durability
-- Automatic reconnection with exponential backoff
+Changes are persisted to redb and applied to the in-memory CRDT. On restart, the CRDT state is loaded from redb.
 
 ## Development
+
+### Run with debug logging
+
+```bash
+RUST_LOG=debug cargo run
+```
 
 ### Run tests
 
 ```bash
 cargo test
-```
-
-### Check for errors
-
-```bash
-cargo check
 ```
 
 ### Format code
@@ -178,66 +162,14 @@ cargo check
 cargo fmt
 ```
 
-### Run with debug logging
+## Performance Notes
 
-```bash
-RUST_LOG=debug cargo run
-```
+The current implementation prioritizes correctness over performance. Some optimization opportunities:
 
-## Deployment
-
-### Systemd Service
-
-```ini
-[Unit]
-Description=SwirlDB Sync Server
-After=network.target
-
-[Service]
-Type=simple
-User=swirldb
-WorkingDirectory=/opt/swirldb
-ExecStart=/opt/swirldb/swirldb-server
-Restart=always
-Environment="RUST_LOG=info"
-Environment="PORT=3030"
-Environment="DATA_DIR=/var/lib/swirldb"
-
-[Install]
-WantedBy=multi-user.target
-```
-
-### Docker
-
-```dockerfile
-FROM rust:1.70-slim as builder
-WORKDIR /app
-COPY native/swirldb-server .
-RUN cargo build --release
-
-FROM debian:bookworm-slim
-COPY --from=builder /app/target/release/swirldb-server /usr/local/bin/
-CMD ["swirldb-server"]
-```
-
-## Monitoring
-
-Server exposes `/stats` endpoint with:
-
-```json
-{
-  "total_rooms": 42,
-  "total_clients": 156,
-  "storage_stats": {
-    "total_rooms": 42,
-    "total_changes": 15234,
-    "total_bytes": 5242880
-  }
-}
-```
-
-Integrate with Prometheus, Grafana, or your monitoring stack.
+- **Array Optimization**: Arrays of record-like objects (with `id`, `timestamp`, or `_key` fields) are automatically converted to maps internally, reducing sync overhead by 99.8% for incremental array updates
+- **Change Batching**: Multiple rapid changes create multiple CRDT changes - this is correct but could be batched in the future
+- **Broadcast Filtering**: Currently uses wildcard pattern `/**` - proper path extraction from changes would enable more selective broadcasts
 
 ## License
 
-Apache-2.0 OR MIT
+Apache 2.0

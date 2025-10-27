@@ -1,0 +1,571 @@
+---
+import Layout from '../layouts/Layout.astro';
+---
+
+<Layout title="Policy" description="Policy engine for SwirlDB - fine-grained access control via JSON configuration">
+  <h1>Policy</h1>
+
+  <p>
+    SwirlDB uses a JSON-based policy engine for fine-grained access control.
+    Policies are defined as configuration rules with priority-based evaluation,
+    path pattern matching with variable substitution, and support for role-based and custom authorization logic.
+  </p>
+
+  <section class="philosophy">
+    <h2>Policy Architecture</h2>
+    <div class="card highlight">
+      <h3>JSON-Based Configuration</h3>
+      <p>All policies are defined in a JSON configuration file with these core concepts:</p>
+      <ul>
+        <li><strong>Actor:</strong> Who is performing the operation (User, App, Server, Anonymous)</li>
+        <li><strong>Action:</strong> What operation is being performed (Read, Write, Subscribe)</li>
+        <li><strong>Path Pattern:</strong> Which data is being accessed (supports wildcards and variables)</li>
+        <li><strong>Effect:</strong> Allow or Deny</li>
+        <li><strong>Priority:</strong> Lower numbers = higher priority (first match wins)</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <h2>Configuration Structure</h2>
+
+    <div class="card">
+      <h3>Basic Example</h3>
+      <p>A minimal policy configuration:</p>
+      <pre><code>{`{
+  "policies": {
+    "rules": [
+      {
+        "priority": 10,
+        "actor": { "type": "User" },
+        "action": "Read",
+        "path_pattern": "/user/{actor.id}/**",
+        "effect": "Allow"
+      },
+      {
+        "priority": 100,
+        "actor": { "type": "Any" },
+        "action": "Read",
+        "path_pattern": "/**",
+        "effect": "Deny"
+      }
+    ]
+  }
+}`}</code></pre>
+      <p>In this example:</p>
+      <ul>
+        <li>Users can read their own data under <code>/user/{"{actor.id}"}/**</code></li>
+        <li>All other reads are denied (priority 100 runs after priority 10)</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h3>Rule Structure</h3>
+      <p>Each policy rule has these fields:</p>
+      <pre><code>{`{
+  "_description": "Optional description for documentation",
+  "priority": 10,              // Lower = higher priority
+  "actor": {...},              // Actor pattern
+  "action": "Read" | "Write" | "Subscribe",
+  "path_pattern": "/path/**",  // Path with wildcards
+  "effect": "Allow" | "Deny"
+}`}</code></pre>
+    </div>
+  </section>
+
+  <section>
+    <h2>Actor Patterns</h2>
+
+    <div class="card">
+      <h3>User Actor</h3>
+      <p>Match users, optionally filtering by ID or role:</p>
+      <pre><code>{`// Any user
+{ "type": "User" }
+
+// Specific user ID
+{ "type": "User", "id": "alice" }
+
+// Users with specific role
+{ "type": "User", "role": "admin" }
+
+// Specific user with specific role
+{ "type": "User", "id": "alice", "role": "editor" }`}</code></pre>
+    </div>
+
+    <div class="card">
+      <h3>App and Server Actors</h3>
+      <pre><code>{`// Any app
+{ "type": "App" }
+
+// Specific app
+{ "type": "App", "id": "mobile-client" }
+
+// Any server instance
+{ "type": "Server" }
+
+// Specific server
+{ "type": "Server", "id": "sync-coordinator" }`}</code></pre>
+    </div>
+
+    <div class="card">
+      <h3>Special Actors</h3>
+      <pre><code>{`// Anonymous (no JWT)
+{ "type": "Anonymous" }
+
+// Any actor (matches all)
+{ "type": "Any" }`}</code></pre>
+    </div>
+  </section>
+
+  <section>
+    <h2>Path Patterns</h2>
+
+    <div class="card highlight">
+      <h3>Wildcard Matching</h3>
+      <p>Path patterns support two types of wildcards:</p>
+      <ul>
+        <li><code>*</code> — Matches exactly one path segment</li>
+        <li><code>**</code> — Matches zero or more path segments</li>
+      </ul>
+      <pre><code>{`// Exact match
+"/config/version"
+
+// Single wildcard (any organization)
+"/org/*/members"
+
+// Multi wildcard (any depth under /user)
+"/user/**"
+
+// Combined
+"/org/*/teams/*/members"`}</code></pre>
+    </div>
+
+    <div class="card highlight">
+      <h3>Variable Substitution</h3>
+      <p>Use actor attributes in path patterns:</p>
+      <pre><code>{`// Match user's own data
+"/user/{actor.id}/**"
+
+// Match organization data
+"/org/{actor.org_id}/**"
+
+// Match team data
+"/team/{actor.team_id}/**"
+
+// Match app-specific data
+"/app/{actor.app_id}/**"
+
+// Role-based path
+"/access/{actor.role}/**"`}</code></pre>
+      <p><strong>How it works:</strong> The engine substitutes <code>{"{actor.id}"}</code> with the actual actor's ID before matching.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Common Patterns</h2>
+
+    <div class="card">
+      <h3>User Data Isolation</h3>
+      <p>Users can only access their own data:</p>
+      <pre><code>{`{
+  "policies": {
+    "rules": [
+      {
+        "priority": 10,
+        "actor": { "type": "User" },
+        "action": "Read",
+        "path_pattern": "/user/{actor.id}/**",
+        "effect": "Allow"
+      },
+      {
+        "priority": 10,
+        "actor": { "type": "User" },
+        "action": "Write",
+        "path_pattern": "/user/{actor.id}/**",
+        "effect": "Allow"
+      },
+      {
+        "priority": 100,
+        "actor": { "type": "Any" },
+        "action": "Read",
+        "path_pattern": "/**",
+        "effect": "Deny"
+      },
+      {
+        "priority": 100,
+        "actor": { "type": "Any" },
+        "action": "Write",
+        "path_pattern": "/**",
+        "effect": "Deny"
+      }
+    ]
+  }
+}`}</code></pre>
+    </div>
+
+    <div class="card">
+      <h3>Role-Based Access Control</h3>
+      <p>Different permissions per role:</p>
+      <pre><code>{`{
+  "policies": {
+    "rules": [
+      {
+        "_description": "Admins can do anything",
+        "priority": 1,
+        "actor": { "type": "User", "role": "admin" },
+        "action": "Write",
+        "path_pattern": "/**",
+        "effect": "Allow"
+      },
+      {
+        "_description": "Editors can write documents",
+        "priority": 10,
+        "actor": { "type": "User", "role": "editor" },
+        "action": "Write",
+        "path_pattern": "/documents/**",
+        "effect": "Allow"
+      },
+      {
+        "_description": "All users can read",
+        "priority": 20,
+        "actor": { "type": "User" },
+        "action": "Read",
+        "path_pattern": "/**",
+        "effect": "Allow"
+      },
+      {
+        "_description": "Default deny",
+        "priority": 1000,
+        "actor": { "type": "Any" },
+        "action": "Write",
+        "path_pattern": "/**",
+        "effect": "Deny"
+      }
+    ]
+  }
+}`}</code></pre>
+    </div>
+
+    <div class="card">
+      <h3>Organization Isolation (Multi-Tenancy)</h3>
+      <p>Users can only access their organization's data:</p>
+      <pre><code>{`{
+  "policies": {
+    "rules": [
+      {
+        "priority": 10,
+        "actor": { "type": "User" },
+        "action": "Read",
+        "path_pattern": "/org/{actor.org_id}/**",
+        "effect": "Allow"
+      },
+      {
+        "priority": 10,
+        "actor": { "type": "User" },
+        "action": "Write",
+        "path_pattern": "/org/{actor.org_id}/**",
+        "effect": "Allow"
+      },
+      {
+        "priority": 100,
+        "actor": { "type": "Any" },
+        "action": "Read",
+        "path_pattern": "/**",
+        "effect": "Deny"
+      }
+    ]
+  }
+}`}</code></pre>
+    </div>
+
+    <div class="card">
+      <h3>Public Read, Private Write</h3>
+      <p>Anyone can read, only authenticated users can write:</p>
+      <pre><code>{`{
+  "policies": {
+    "rules": [
+      {
+        "priority": 10,
+        "actor": { "type": "Any" },
+        "action": "Read",
+        "path_pattern": "/**",
+        "effect": "Allow"
+      },
+      {
+        "priority": 10,
+        "actor": { "type": "User" },
+        "action": "Write",
+        "path_pattern": "/**",
+        "effect": "Allow"
+      },
+      {
+        "priority": 100,
+        "actor": { "type": "Anonymous" },
+        "action": "Write",
+        "path_pattern": "/**",
+        "effect": "Deny"
+      }
+    ]
+  }
+}`}</code></pre>
+    </div>
+
+    <div class="card">
+      <h3>Field-Level Permissions</h3>
+      <p>Different permissions for different fields:</p>
+      <pre><code>{`{
+  "policies": {
+    "rules": [
+      {
+        "_description": "Public profile fields - anyone can read",
+        "priority": 5,
+        "actor": { "type": "Any" },
+        "action": "Read",
+        "path_pattern": "/user/*/name",
+        "effect": "Allow"
+      },
+      {
+        "_description": "Private fields - only owner",
+        "priority": 10,
+        "actor": { "type": "User" },
+        "action": "Read",
+        "path_pattern": "/user/{actor.id}/email",
+        "effect": "Allow"
+      },
+      {
+        "_description": "Deny all other email access",
+        "priority": 100,
+        "actor": { "type": "Any" },
+        "action": "Read",
+        "path_pattern": "/user/*/email",
+        "effect": "Deny"
+      }
+    ]
+  }
+}`}</code></pre>
+    </div>
+  </section>
+
+  <section>
+    <h2>Loading Configuration</h2>
+
+    <div class="card">
+      <h3>Rust</h3>
+      <pre><code>{`use swirldb_core::policy::PolicyEngine;
+
+// From JSON string
+let config_json = std::fs::read_to_string("policy.json")?;
+let engine = PolicyEngine::from_json(&config_json)?;
+
+// Evaluate a policy
+let decision = engine.evaluate(&actor, Action::Read, "/user/alice/prefs");
+if decision.is_allowed() {
+    println!("Access granted!");
+} else {
+    println!("Access denied!");
+}`}</code></pre>
+    </div>
+
+    <div class="card">
+      <h3>TypeScript/Browser</h3>
+      <pre><code>{`// Load configuration
+const config = await fetch('/policy.json').then(r => r.json());
+const db = await SwirlDB.withConfig(config);
+
+// Access is automatically checked on all operations
+try {
+  const data = db.data.user.alice.prefs.$value;
+  console.log('Access granted:', data);
+} catch (error) {
+  console.error('Access denied:', error);
+}`}</code></pre>
+    </div>
+  </section>
+
+  <section>
+    <h2>Actor Creation</h2>
+
+    <div class="card">
+      <h3>From JWT Claims</h3>
+      <p>Typically, actors are created from JWT tokens on the server:</p>
+      <pre><code>{`use swirldb_core::policy::Actor;
+use std::collections::HashMap;
+
+// Extract claims from JWT
+let mut claims = HashMap::new();
+claims.insert("type".to_string(), json!("user"));
+claims.insert("sub".to_string(), json!("alice"));
+claims.insert("org_id".to_string(), json!("acme-corp"));
+claims.insert("role".to_string(), json!("admin"));
+
+let actor = Actor::from_jwt_claims(claims)?;
+
+// Now use actor in policy evaluation
+let decision = engine.evaluate(&actor, Action::Write, "/org/acme-corp/docs");`}</code></pre>
+    </div>
+
+    <div class="card">
+      <h3>Anonymous Actor</h3>
+      <p>For unauthenticated requests:</p>
+      <pre><code>{`let actor = Actor::anonymous();
+
+// This actor will only match:
+// { "type": "Anonymous" }
+// { "type": "Any" }`}</code></pre>
+    </div>
+  </section>
+
+  <section>
+    <h2>Best Practices</h2>
+
+    <div class="card">
+      <h3>Priority Guidelines</h3>
+      <ul>
+        <li><strong>1-10:</strong> Highest priority, admin overrides</li>
+        <li><strong>10-50:</strong> Specific permissions (user/org/role-based)</li>
+        <li><strong>100-500:</strong> General permissions</li>
+        <li><strong>1000+:</strong> Default deny rules</li>
+      </ul>
+      <p>Always use default deny at the end with high priority number.</p>
+    </div>
+
+    <div class="card">
+      <h3>Path Organization</h3>
+      <ul>
+        <li>Use consistent path hierarchies: <code>/user/{"{id}"}/resource</code></li>
+        <li>Put tenant/org ID early in path: <code>/org/{"{org_id}"}/data</code></li>
+        <li>Group related data: <code>/team/{"{id}"}/projects/**</code></li>
+        <li>Use descriptive segments: <code>/documents/public/**</code></li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h3>Security</h3>
+      <ul>
+        <li><strong>Deny by default:</strong> Always end with a catch-all deny rule</li>
+        <li><strong>Server-side enforcement:</strong> Never trust client-side policy checks</li>
+        <li><strong>Validate JWT:</strong> Always verify token signature before creating actor</li>
+        <li><strong>Test thoroughly:</strong> Unit test all policy rules with various actors</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <h2>Full Configuration Example</h2>
+
+    <div class="card">
+      <pre><code>{`{
+  "policies": {
+    "rules": [
+      {
+        "_description": "Admins can do everything",
+        "priority": 1,
+        "actor": { "type": "User", "role": "admin" },
+        "action": "Write",
+        "path_pattern": "/**",
+        "effect": "Allow"
+      },
+      {
+        "_description": "Admins can read everything",
+        "priority": 1,
+        "actor": { "type": "User", "role": "admin" },
+        "action": "Read",
+        "path_pattern": "/**",
+        "effect": "Allow"
+      },
+      {
+        "_description": "Users can read their own data",
+        "priority": 10,
+        "actor": { "type": "User" },
+        "action": "Read",
+        "path_pattern": "/user/{actor.id}/**",
+        "effect": "Allow"
+      },
+      {
+        "_description": "Users can write their own data",
+        "priority": 10,
+        "actor": { "type": "User" },
+        "action": "Write",
+        "path_pattern": "/user/{actor.id}/**",
+        "effect": "Allow"
+      },
+      {
+        "_description": "Users can read org data",
+        "priority": 20,
+        "actor": { "type": "User" },
+        "action": "Read",
+        "path_pattern": "/org/{actor.org_id}/**",
+        "effect": "Allow"
+      },
+      {
+        "_description": "Editors can write org documents",
+        "priority": 20,
+        "actor": { "type": "User", "role": "editor" },
+        "action": "Write",
+        "path_pattern": "/org/{actor.org_id}/documents/**",
+        "effect": "Allow"
+      },
+      {
+        "_description": "Public data readable by all",
+        "priority": 50,
+        "actor": { "type": "Any" },
+        "action": "Read",
+        "path_pattern": "/public/**",
+        "effect": "Allow"
+      },
+      {
+        "_description": "Default deny reads",
+        "priority": 1000,
+        "actor": { "type": "Any" },
+        "action": "Read",
+        "path_pattern": "/**",
+        "effect": "Deny"
+      },
+      {
+        "_description": "Default deny writes",
+        "priority": 1000,
+        "actor": { "type": "Any" },
+        "action": "Write",
+        "path_pattern": "/**",
+        "effect": "Deny"
+      }
+    ]
+  }
+}`}</code></pre>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .card {
+    background: white;
+    border: 1px solid #e1e1e1;
+    border-radius: 8px;
+    padding: 1.5rem;
+    margin: 1rem 0;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  }
+
+  .card.highlight {
+    border-left: 4px solid #667eea;
+    background: #f9f9ff;
+    padding: 2rem;
+  }
+
+  .philosophy {
+    margin: 2rem 0;
+  }
+
+  ul {
+    margin-left: 2rem;
+    margin-top: 0.5rem;
+  }
+
+  li {
+    margin: 0.5rem 0;
+  }
+
+  section {
+    margin: 3rem 0;
+  }
+</style>

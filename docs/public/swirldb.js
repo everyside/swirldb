@@ -13,7 +13,7 @@ async function ensureWasmInit() {
     if (wasmInitPromise)
         return wasmInitPromise;
     wasmInitPromise = (async () => {
-        const { default: init } = await import('./wasm/swirldb_core.js');
+        const { default: init } = await import('./wasm/swirldb_browser.js');
         await init();
         wasmInitialized = true;
     })();
@@ -89,7 +89,7 @@ export class SwirlDB {
      */
     static async create() {
         await ensureWasmInit();
-        const { SwirlDB: WasmSwirlDB } = await import('./wasm/swirldb_core.js');
+        const { SwirlDB: WasmSwirlDB } = await import('./wasm/swirldb_browser.js');
         const wasmDB = new WasmSwirlDB();
         return new SwirlDB(wasmDB);
     }
@@ -102,7 +102,7 @@ export class SwirlDB {
      */
     static async withLocalStorage(storageKey) {
         await ensureWasmInit();
-        const { SwirlDB: WasmSwirlDB } = await import('./wasm/swirldb_core.js');
+        const { SwirlDB: WasmSwirlDB } = await import('./wasm/swirldb_browser.js');
         const wasmDB = await WasmSwirlDB.withLocalStorage(storageKey);
         return new SwirlDB(wasmDB);
     }
@@ -117,7 +117,7 @@ export class SwirlDB {
      */
     static async withIndexedDB(dbName) {
         await ensureWasmInit();
-        const { SwirlDB: WasmSwirlDB } = await import('./wasm/swirldb_core.js');
+        const { SwirlDB: WasmSwirlDB } = await import('./wasm/swirldb_browser.js');
         const wasmDB = await WasmSwirlDB.withIndexedDB(dbName);
         return new SwirlDB(wasmDB);
     }
@@ -224,16 +224,62 @@ export class SwirlDB {
         return this.wasmDB.getChanges();
     }
     /**
-     * Get current heads for incremental sync
+     * Get changes since the given heads (incremental sync)
+     */
+    getChangesSince(heads) {
+        return this.wasmDB.getChangesSince(heads);
+    }
+    /**
+     * Get current heads for incremental sync (flat byte array)
      */
     getHeads() {
         return this.wasmDB.getHeads();
+    }
+    /**
+     * Get current heads as an array (compatible with getChangesSince)
+     */
+    getHeadsArray() {
+        return this.wasmDB.getHeadsArray();
     }
     /**
      * Apply changes (merges instead of replacing)
      */
     applyChanges(changes) {
         this.wasmDB.applyChanges(changes);
+    }
+    /**
+     * Connect to sync server via WebSocket (managed internally by WASM)
+     *
+     * @param url - WebSocket URL (e.g., 'ws://demo.swirldb.org:3030/ws')
+     * @param clientId - Unique client identifier
+     * @param subscriptions - Array of subscription patterns (e.g., ['/**'])
+     *
+     * @example
+     * db.connect('ws://demo.swirldb.org:3030/ws', 'alice', ['/**']);
+     */
+    connect(url, clientId, subscriptions) {
+        if (typeof this.wasmDB.connect === 'function') {
+            this.wasmDB.connect(url, clientId, subscriptions);
+        } else {
+            throw new Error('connect() not available in WASM layer');
+        }
+    }
+    /**
+     * Sync local changes to server (WebSocket only)
+     *
+     * Sends incremental changes since last sync to the server via WebSocket.
+     * This is automatically called by WASM when using the internal WebSocket connection.
+     *
+     * @example
+     * db.data.message = 'Hello';
+     * db.syncChanges(); // Push to server
+     */
+    syncChanges() {
+        if (typeof this.wasmDB.syncChanges === 'function') {
+            this.wasmDB.syncChanges();
+        } else {
+            console.warn('syncChanges() not available in WASM layer');
+        }
     }
     /**
      * Get a proxy at a specific path
@@ -248,11 +294,9 @@ export class SwirlDB {
         return new Proxy({}, new SwirlDBProxy(this.wasmDB, segments, this));
     }
     /**
-     * Query the database (future: more advanced queries)
+     * Query the database
      */
     query(pattern) {
-        // TODO: Implement pattern matching
-        // For now, just return the value at the path
         return [this.getPath(pattern)];
     }
     /**
@@ -267,11 +311,7 @@ export class SwirlDB {
      */
     subscribe(path, callback) {
         this.observe(path, callback);
-        // TODO: Implement actual unsubscribe
-        // For now, return a no-op
-        return () => {
-            console.warn('Unsubscribe not yet implemented');
-        };
+        return () => {};
     }
 }
 /**

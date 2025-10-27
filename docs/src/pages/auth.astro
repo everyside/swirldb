@@ -1,0 +1,448 @@
+---
+import Layout from '../layouts/Layout.astro';
+---
+
+<Layout title="Authentication" description="Authentication providers for SwirlDB - pluggable identity and access control">
+  <h1>Authentication</h1>
+
+  <p>
+    SwirlDB provides pluggable authentication through the <code>AuthProvider</code> trait.
+    All auth providers work on all platforms (browser + server) and integrate with the policy engine
+    for fine-grained access control.
+  </p>
+
+  <section class="philosophy">
+    <h2>Authentication Architecture</h2>
+    <div class="card highlight">
+      <h3>Actor-Based Identity</h3>
+      <p>Authentication providers return an <code>Actor</code> representing the current user, app, or server:</p>
+      <pre><code>{`trait AuthProvider {
+    fn get_actor(&self) -> Actor;
+    fn set_actor(&mut self, actor: Actor);
+}
+
+pub struct Actor {
+    pub actor_type: ActorType,  // User | App | Server
+    pub id: String,
+    pub org_id: Option<String>,
+    pub team_id: Option<String>,
+    pub app_id: Option<String>,
+    pub role: Option<String>,
+    pub claims: HashMap<String, serde_json::Value>,
+}`}</code></pre>
+    </div>
+  </section>
+
+  <section>
+    <h2>Built-in Providers</h2>
+
+    <div class="card">
+      <h3>AnonymousAuth (Default)</h3>
+      <p>
+        Always returns an anonymous actor. Use for public-facing apps or when authentication
+        is handled externally.
+      </p>
+      <pre><code>{`// Rust
+use swirldb_core::auth::AnonymousAuth;
+
+let auth = AnonymousAuth::new();
+let actor = auth.get_actor();
+
+assert_eq!(actor.actor_type, ActorType::User);
+assert_eq!(actor.id, "anonymous");
+
+// TypeScript
+const auth = new AnonymousAuth();
+const actor = auth.getActor();`}</code></pre>
+      <p><strong>Use case:</strong> Public apps, unauthenticated access, guest users</p>
+    </div>
+
+    <div class="card">
+      <h3>StaticAuth</h3>
+      <p>
+        Fixed user ID. Suitable for development, single-user apps, or when identity is determined at startup.
+      </p>
+      <pre><code>{`// Rust - Simple user ID
+use swirldb_core::auth::StaticAuth;
+
+let auth = StaticAuth::new("alice");
+
+// Rust - With metadata
+let auth = StaticAuth::with_metadata(
+    "alice",
+    Some("acme-corp".to_string()),  // org_id
+    Some("engineering".to_string()), // team_id
+    Some("admin".to_string()),       // role
+);
+
+// Rust - App actor
+let auth = StaticAuth::app("my-app-id");
+
+// Rust - Server actor
+let auth = StaticAuth::server("server-01");
+
+// TypeScript/Browser - Generate ID on first load
+let userId = localStorage.getItem('userId');
+if (!userId) {
+    userId = crypto.randomUUID();
+    localStorage.setItem('userId', userId);
+}
+const auth = StaticAuth.new(userId);`}</code></pre>
+      <p><strong>Use case:</strong> Development, single-user apps, CLI tools, embedded devices</p>
+    </div>
+
+    <div class="card">
+      <h3>JwtAuth</h3>
+      <p>
+        Decodes JWT claims to extract actor identity. <strong>Important:</strong> This only decodes
+        the JWT, it does NOT validate signatures. Signature validation should be done server-side.
+      </p>
+      <pre><code>{`// Rust - From pre-validated token
+use swirldb_core::auth::JwtAuth;
+
+let token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...";
+let auth = JwtAuth::from_token(token)?;
+let actor = auth.get_actor();
+
+// Rust - From pre-parsed claims
+let claims = HashMap::from([
+    ("type".to_string(), json!("user")),
+    ("sub".to_string(), json!("alice")),
+    ("org_id".to_string(), json!("acme-corp")),
+]);
+let auth = JwtAuth::from_claims(claims, token)?;
+
+// Rust - Refresh token
+auth.refresh_token(new_token)?;
+
+// TypeScript/Browser - Fetch JWT from server
+const response = await fetch('/api/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ username, password })
+});
+const { token } = await response.json();
+const auth = JwtAuth.fromToken(token);
+
+// Store token for future sessions
+localStorage.setItem('auth-token', token);`}</code></pre>
+      <p><strong>JWT Claims Mapping:</strong></p>
+      <ul>
+        <li><code>type</code> → <code>actor_type</code> (user, app, server)</li>
+        <li><code>sub</code> → <code>id</code> (subject/user ID)</li>
+        <li><code>org_id</code> → <code>org_id</code></li>
+        <li><code>team_id</code> → <code>team_id</code></li>
+        <li><code>app_id</code> → <code>app_id</code></li>
+        <li><code>role</code> → <code>role</code></li>
+        <li>All other claims stored in <code>claims</code> map</li>
+      </ul>
+      <p><strong>Use case:</strong> Multi-user apps, SaaS platforms, API authentication</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Browser Usage Patterns</h2>
+
+    <div class="card highlight">
+      <h3>Persistent Anonymous Identity</h3>
+      <pre><code>{`import { SwirlDB, StaticAuth } from '@swirldb/js';
+
+// Generate stable anonymous ID
+let userId = localStorage.getItem('anon-user-id');
+if (!userId) {
+    userId = crypto.randomUUID();
+    localStorage.setItem('anon-user-id', userId);
+}
+
+const auth = StaticAuth.new(userId);
+const db = await SwirlDB.withLocalStorage('my-app', { auth });
+
+// User has stable identity across sessions
+console.log('User ID:', auth.getActor().id);`}</code></pre>
+    </div>
+
+    <div class="card highlight">
+      <h3>JWT Authentication Flow</h3>
+      <pre><code>{`// 1. Check for stored token
+let token = localStorage.getItem('auth-token');
+let auth;
+
+if (token) {
+    // Try to use existing token
+    try {
+        auth = JwtAuth.fromToken(token);
+
+        // TODO: Check if token is expired (client-side check)
+        // Server should validate signature + expiration
+    } catch (e) {
+        console.error('Invalid token:', e);
+        token = null;
+    }
+}
+
+if (!token) {
+    // 2. No token - redirect to login
+    window.location.href = '/login';
+}
+
+// 3. Create DB with authenticated user
+const db = await SwirlDB.withIndexedDB('my-app', { auth });
+
+// 4. Sync with server using JWT
+db.sync('wss://api.example.com/sync', {
+    headers: {
+        'Authorization': \`Bearer \${auth.token()}\`
+    }
+});`}</code></pre>
+    </div>
+
+    <div class="card">
+      <h3>Token Refresh Strategy</h3>
+      <pre><code>{`// Refresh token before expiration
+async function refreshAuthToken(auth) {
+    const response = await fetch('/api/auth/refresh', {
+        method: 'POST',
+        headers: {
+            'Authorization': \`Bearer \${auth.token()}\`
+        }
+    });
+
+    const { token: newToken } = await response.json();
+
+    // Update auth provider
+    auth.refreshToken(newToken);
+
+    // Update storage
+    localStorage.setItem('auth-token', newToken);
+}
+
+// Refresh every 50 minutes (assuming 1hr token lifetime)
+setInterval(() => refreshAuthToken(auth), 50 * 60 * 1000);`}</code></pre>
+    </div>
+  </section>
+
+  <section>
+    <h2>Server Usage Patterns</h2>
+
+    <div class="card highlight">
+      <h3>Config-Based Authentication</h3>
+      <pre><code>{`use swirldb_core::{SwirlDB, auth::StaticAuth};
+use swirldb_server::storage::RedbAdapter;
+
+// Load from environment or config file
+let server_id = std::env::var("SERVER_ID")
+    .unwrap_or_else(|_| "server-01".to_string());
+
+let auth = StaticAuth::server(&server_id);
+let storage = Arc::new(RedbAdapter::new("./data")?);
+let db = SwirlDB::with_storage_and_auth(storage, "db", auth).await;
+
+// Server actor for internal operations
+println!("Running as: {:?}", db.get_actor());`}</code></pre>
+    </div>
+
+    <div class="card highlight">
+      <h3>JWT Validation (Server-Side)</h3>
+      <pre><code>{`use jsonwebtoken::{decode, Validation, DecodingKey};
+use swirldb_core::auth::JwtAuth;
+
+// Extract JWT from HTTP header
+let token = extract_bearer_token(&req)?;
+
+// STEP 1: Validate signature (critical!)
+let secret = std::env::var("JWT_SECRET")?;
+let key = DecodingKey::from_secret(secret.as_bytes());
+let validation = Validation::default();
+
+let token_data = decode::<HashMap<String, serde_json::Value>>(
+    &token,
+    &key,
+    &validation,
+)?;
+
+// STEP 2: Create auth provider from validated claims
+let auth = JwtAuth::from_claims(token_data.claims, &token)?;
+let actor = auth.get_actor();
+
+// STEP 3: Apply actor to DB operations
+let db = SwirlDB::with_auth(auth);
+db.set_path("user.profile", profile_data)?;`}</code></pre>
+    </div>
+
+    <div class="card">
+      <h3>Per-Request Authentication</h3>
+      <pre><code>{`use axum::{
+    extract::State,
+    headers::{Authorization, authorization::Bearer},
+    TypedHeader,
+};
+
+async fn handle_sync(
+    State(db): State<Arc<SwirlDB>>,
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+) -> Result<Json<SyncResponse>> {
+    // Validate token and get actor
+    let actor = validate_jwt_token(auth.token())?;
+
+    // Clone DB with this actor's identity
+    let user_db = db.with_actor(actor);
+
+    // All operations now scoped to this user
+    let data = user_db.get_path("user.data")?;
+
+    Ok(Json(SyncResponse { data }))
+}`}</code></pre>
+    </div>
+  </section>
+
+  <section>
+    <h2>Integration with Policy Engine</h2>
+
+    <p>
+      Auth providers work seamlessly with SwirlDB's policy engine for fine-grained
+      access control.
+    </p>
+
+    <div class="card">
+      <h3>Actor-Based Policies</h3>
+      <pre><code>{`use swirldb_core::{SwirlDB, auth::JwtAuth, policy::Policy};
+
+// Create DB with JWT auth
+let auth = JwtAuth::from_token(token)?;
+let db = SwirlDB::with_auth(auth);
+
+// Define policies based on actor attributes
+db.add_policy(Policy::new()
+    .path("user.*.private")
+    .allow_read(|actor, path| {
+        // Users can only read their own private data
+        path.starts_with(&format!("user.{}.private", actor.id))
+    })
+);
+
+db.add_policy(Policy::new()
+    .path("org.*")
+    .allow_write(|actor, _| {
+        // Only org admins can write
+        actor.org_id.is_some() && actor.role == Some("admin".to_string())
+    })
+);
+
+// Attempts to access unauthorized data will be denied
+db.get_path("user.alice.private")?;  // OK if actor.id == "alice"
+db.get_path("user.bob.private")?;    // Denied if actor.id == "alice"`}</code></pre>
+    </div>
+
+    <div class="card">
+      <h3>Multi-Tenancy</h3>
+      <pre><code>{`// Enforce org-level data isolation
+db.add_policy(Policy::new()
+    .path("data.*")
+    .allow_all(|actor, path| {
+        // All operations scoped to actor's org
+        if let Some(org_id) = &actor.org_id {
+            path.starts_with(&format!("data.{}", org_id))
+        } else {
+            false
+        }
+    })
+);
+
+// Alice (org: acme-corp) can access:
+db.get_path("data.acme-corp.projects")?;  // ✅ Allowed
+db.get_path("data.competitor-corp.projects")?;  // ❌ Denied`}</code></pre>
+    </div>
+  </section>
+
+  <section>
+    <h2>Security Best Practices</h2>
+
+    <div class="card">
+      <h3>JWT Signature Validation</h3>
+      <ul>
+        <li><strong>Always validate server-side:</strong> JwtAuth only decodes, does not validate signatures</li>
+        <li><strong>Use strong secrets:</strong> At least 256 bits (32 bytes) for HS256</li>
+        <li><strong>Check expiration:</strong> Verify <code>exp</code> claim before accepting token</li>
+        <li><strong>Validate issuer:</strong> Check <code>iss</code> claim matches your server</li>
+        <li><strong>Use short lifetimes:</strong> Issue tokens valid for 15-60 minutes, refresh frequently</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h3>Token Storage</h3>
+      <ul>
+        <li><strong>Browser:</strong> Store in <code>localStorage</code> for persistence, or <code>sessionStorage</code> for session-only</li>
+        <li><strong>Avoid cookies:</strong> Unless using httpOnly cookies with CSRF protection</li>
+        <li><strong>Clear on logout:</strong> Remove tokens from storage when user logs out</li>
+        <li><strong>Refresh strategy:</strong> Implement token refresh before expiration</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h3>Anonymous Users</h3>
+      <ul>
+        <li><strong>Generate stable IDs:</strong> Use <code>crypto.randomUUID()</code> and store in localStorage</li>
+        <li><strong>Rate limiting:</strong> Apply stricter limits to anonymous users</li>
+        <li><strong>Upgrade path:</strong> Allow anonymous users to register and keep their data</li>
+        <li><strong>Privacy:</strong> Don't assume anonymous means no PII - still apply data protection</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h3>Server Configuration</h3>
+      <ul>
+        <li><strong>Environment variables:</strong> Store secrets in env vars, never in code</li>
+        <li><strong>Key rotation:</strong> Plan for periodic secret rotation</li>
+        <li><strong>Audit logging:</strong> Log authentication failures and unusual patterns</li>
+        <li><strong>Rate limiting:</strong> Protect auth endpoints from brute force attacks</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <h2>Future Enhancements</h2>
+    <ul>
+      <li>OAuth 2.0 provider (Google, GitHub, etc.)</li>
+      <li>OpenID Connect (OIDC) integration</li>
+      <li>Multi-factor authentication (MFA) support</li>
+      <li>WebAuthn / FIDO2 for passwordless auth</li>
+      <li>Session management with automatic timeout</li>
+      <li>Device fingerprinting for anomaly detection</li>
+      <li>Custom claim validation rules</li>
+      <li>Actor delegation and impersonation (admin tools)</li>
+    </ul>
+  </section>
+</Layout>
+
+<style>
+  .card {
+    background: white;
+    border: 1px solid #e1e1e1;
+    border-radius: 8px;
+    padding: 1.5rem;
+    margin: 1rem 0;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  }
+
+  .card.highlight {
+    border-left: 4px solid #667eea;
+    background: #f9f9ff;
+    padding: 2rem;
+  }
+
+  .philosophy {
+    margin: 2rem 0;
+  }
+
+  ul {
+    margin-left: 2rem;
+    margin-top: 0.5rem;
+  }
+
+  li {
+    margin: 0.5rem 0;
+  }
+
+  section {
+    margin: 3rem 0;
+  }
+</style>

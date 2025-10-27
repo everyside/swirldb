@@ -1,22 +1,29 @@
-// Core module - always available
+// Copyright 2025 Everyside Innovations, LLC
+// SPDX-License-Identifier: Apache-2.0
+
+// Core CRDT engine - platform-agnostic
 pub mod core;
 
-// Storage adapters module
+// Storage traits - pluggable storage backends
 pub mod storage;
+
+// Encryption providers - pluggable encryption strategies
+pub mod encryption;
 
 // Sync protocol module
 pub mod sync;
 
+// Network protocol - binary message encoding/decoding
+pub mod protocol;
+
+// Policy engine - platform-agnostic authorization
+pub mod policy;
+
+// Auth providers - pluggable authentication
+pub mod auth;
+
 // Re-export automerge types for convenience
 pub use automerge;
 
-// Browser WASM bindings - only when wasm feature is enabled
-#[cfg(feature = "wasm")]
-mod browser;
-
-#[cfg(feature = "wasm")]
-pub use browser::SwirlDB;
-
-// For non-WASM targets, re-export the core directly
-#[cfg(not(feature = "wasm"))]
+// Re-export core SwirlDB for convenience
 pub use core::SwirlDB;
