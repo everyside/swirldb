@@ -15,7 +15,8 @@ mod storage;
 use anyhow::Result;
 use axum::{
     extract::{
-        ws::{Message as WsMessage, WebSocket, WebSocketUpgrade}, State as AxumState,
+        ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
+        State as AxumState,
     },
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -23,11 +24,11 @@ use axum::{
     Json, Router,
 };
 use futures::{SinkExt, StreamExt};
-use swirldb_core::protocol::Message;
 use state::{ServerState, ServerStats};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::{env, fs, io::BufReader, time::Duration};
+use swirldb_core::protocol::Message;
 use tokio::time::interval;
 use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
@@ -38,7 +39,8 @@ async fn main() -> Result<()> {
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
-            env::var("RUST_LOG").unwrap_or_else(|_| "swirldb_server=info,tower_http=debug".to_string()),
+            env::var("RUST_LOG")
+                .unwrap_or_else(|_| "swirldb_server=info,tower_http=debug".to_string()),
         )
         .init();
 
@@ -89,7 +91,10 @@ async fn main() -> Result<()> {
             let tls_config = load_tls_config(&cert_path, &key_path)?;
 
             info!("🌐 Secure WebSocket server listening on wss://{}", addr);
-            info!("📊 HTTPS endpoints available on https://localhost:{}", ws_port);
+            info!(
+                "📊 HTTPS endpoints available on https://localhost:{}",
+                ws_port
+            );
             info!("✅ Server ready for secure connections");
 
             axum_server::bind_rustls(addr, tls_config)
@@ -99,10 +104,15 @@ async fn main() -> Result<()> {
         _ => {
             // No TLS - start plain HTTP/WS server
             info!("⚠️  Starting server WITHOUT TLS (development mode)");
-            info!("   Set TLS_CERT_PATH and TLS_KEY_PATH environment variables to enable HTTPS/WSS");
+            info!(
+                "   Set TLS_CERT_PATH and TLS_KEY_PATH environment variables to enable HTTPS/WSS"
+            );
 
             info!("🌐 WebSocket server listening on ws://{}", addr);
-            info!("📊 HTTP endpoints available on http://localhost:{}", ws_port);
+            info!(
+                "📊 HTTP endpoints available on http://localhost:{}",
+                ws_port
+            );
             info!("✅ Server ready for connections");
 
             let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -114,14 +124,17 @@ async fn main() -> Result<()> {
 }
 
 /// Load TLS configuration from certificate and key files
-fn load_tls_config(cert_path: &str, key_path: &str) -> Result<axum_server::tls_rustls::RustlsConfig> {
+fn load_tls_config(
+    cert_path: &str,
+    key_path: &str,
+) -> Result<axum_server::tls_rustls::RustlsConfig> {
     use rustls::pki_types::CertificateDer;
 
     // Read certificate file
     let cert_file = fs::File::open(cert_path)?;
     let mut cert_reader = BufReader::new(cert_file);
-    let certs: Vec<CertificateDer> = rustls_pemfile::certs(&mut cert_reader)
-        .collect::<Result<Vec<_>, _>>()?;
+    let certs: Vec<CertificateDer> =
+        rustls_pemfile::certs(&mut cert_reader).collect::<Result<Vec<_>, _>>()?;
 
     if certs.is_empty() {
         anyhow::bail!("No certificates found in {}", cert_path);
@@ -143,7 +156,9 @@ fn load_tls_config(cert_path: &str, key_path: &str) -> Result<axum_server::tls_r
     // Enable HTTP/2 and HTTP/1.1
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
-    Ok(axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(config)))
+    Ok(axum_server::tls_rustls::RustlsConfig::from_config(
+        Arc::new(config),
+    ))
 }
 
 /// WebSocket upgrade handler
@@ -423,7 +438,10 @@ async fn heartbeat_task(state: ServerState) {
 
     loop {
         ticker.tick().await;
-        info!("Heartbeat tick - {} active connections", state.get_connection_count());
+        info!(
+            "Heartbeat tick - {} active connections",
+            state.get_connection_count()
+        );
     }
 }
 

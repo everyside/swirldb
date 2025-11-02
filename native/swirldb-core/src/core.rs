@@ -1,12 +1,15 @@
 // Copyright 2025 Everyside Innovations, LLC
 // SPDX-License-Identifier: Apache-2.0
 
-use automerge::{AutoCommit, ScalarValue, ROOT, ObjId, ReadDoc, transaction::Transactable, ObjType, Value as AutoValue};
-use std::sync::{Arc, Mutex};
-use anyhow::{Result, anyhow};
+use crate::auth::{AnonymousAuth, AuthProvider};
+use crate::policy::{Action, PolicyEngine};
+use anyhow::{anyhow, Result};
+use automerge::{
+    transaction::Transactable, AutoCommit, ObjId, ObjType, ReadDoc, ScalarValue,
+    Value as AutoValue, ROOT,
+};
 use serde_json::Value as JsonValue;
-use crate::policy::{PolicyEngine, Action};
-use crate::auth::{AuthProvider, AnonymousAuth};
+use std::sync::{Arc, Mutex};
 
 /// Storage adapter trait - all storage implementations implement this
 ///
@@ -68,9 +71,7 @@ impl SwirlDB {
     pub async fn with_storage(storage: Arc<dyn DocumentStorage>, storage_key: &str) -> Self {
         // Try to load existing state from storage
         let doc = match storage.load(storage_key).await {
-            Ok(Some(bytes)) => {
-                AutoCommit::load(&bytes).unwrap_or_else(|_| AutoCommit::new())
-            }
+            Ok(Some(bytes)) => AutoCommit::load(&bytes).unwrap_or_else(|_| AutoCommit::new()),
             _ => AutoCommit::new(),
         };
 
@@ -108,8 +109,8 @@ impl SwirlDB {
     /// Note: This does NOT validate the JWT signature - validate server-side first!
     pub fn authenticate_jwt(&self, token: &str) -> Result<()> {
         use crate::auth::JwtAuth;
-        let jwt_auth = JwtAuth::from_token(token)
-            .map_err(|e| anyhow!("JWT authentication failed: {}", e))?;
+        let jwt_auth =
+            JwtAuth::from_token(token).map_err(|e| anyhow!("JWT authentication failed: {}", e))?;
         self.set_auth_provider(Box::new(jwt_auth));
         Ok(())
     }
@@ -314,13 +315,21 @@ impl SwirlDB {
     /// - Apps read `db.data.messages.$value` (normal array read)
     /// - Optimization happens entirely in this function and `automerge_to_json()`
     ///
-    fn insert_value(&self, doc: &mut AutoCommit, parent: &ObjId, key: &str, value: &JsonValue) -> Result<()> {
+    fn insert_value(
+        &self,
+        doc: &mut AutoCommit,
+        parent: &ObjId,
+        key: &str,
+        value: &JsonValue,
+    ) -> Result<()> {
         // Array Optimization: Smart diffing for existing optimized arrays
         if let JsonValue::Array(new_arr) = value {
             // Check if this is a record-like array that qualifies for optimization
             let should_optimize = new_arr.iter().all(|item| {
                 if let JsonValue::Object(obj) = item {
-                    obj.contains_key("id") || obj.contains_key("timestamp") || obj.contains_key("_key")
+                    obj.contains_key("id")
+                        || obj.contains_key("timestamp")
+                        || obj.contains_key("_key")
                 } else {
                     false
                 }
@@ -328,7 +337,11 @@ impl SwirlDB {
 
             if should_optimize && !new_arr.is_empty() {
                 // Check if there's already an optimized array (stored as a map) at this location
-                if let Ok(Some((automerge::Value::Object(automerge::ObjType::Map), existing_obj_id))) = doc.get(parent, key) {
+                if let Ok(Some((
+                    automerge::Value::Object(automerge::ObjType::Map),
+                    existing_obj_id,
+                ))) = doc.get(parent, key)
+                {
                     // Existing optimized array found - perform smart diff!
                     // Only sync changed/added/removed items instead of the entire array
                     self.update_array_as_map(doc, &existing_obj_id, new_arr)?;
@@ -342,11 +355,11 @@ impl SwirlDB {
             JsonValue::Null => {
                 doc.put(parent, key, ScalarValue::Null)
                     .map_err(|e| anyhow!("Failed to set null: {:?}", e))?;
-            },
+            }
             JsonValue::Bool(b) => {
                 doc.put(parent, key, ScalarValue::Boolean(*b))
                     .map_err(|e| anyhow!("Failed to set boolean: {:?}", e))?;
-            },
+            }
             JsonValue::Number(n) => {
                 if let Some(i) = n.as_i64() {
                     doc.put(parent, key, ScalarValue::Int(i))
@@ -358,17 +371,19 @@ impl SwirlDB {
                     doc.put(parent, key, ScalarValue::F64(f))
                         .map_err(|e| anyhow!("Failed to set float: {:?}", e))?;
                 }
-            },
+            }
             JsonValue::String(s) => {
                 doc.put(parent, key, ScalarValue::Str(s.clone().into()))
                     .map_err(|e| anyhow!("Failed to set string: {:?}", e))?;
-            },
+            }
             JsonValue::Array(arr) => {
                 // Check if array contains record-like objects (optimize for CRDT efficiency)
                 let should_convert_to_map = arr.iter().all(|item| {
                     if let JsonValue::Object(obj) = item {
                         // Has id, timestamp, or _key field
-                        obj.contains_key("id") || obj.contains_key("timestamp") || obj.contains_key("_key")
+                        obj.contains_key("id")
+                            || obj.contains_key("timestamp")
+                            || obj.contains_key("_key")
                     } else {
                         false
                     }
@@ -376,20 +391,25 @@ impl SwirlDB {
 
                 if should_convert_to_map && !arr.is_empty() {
                     // Store as Map with stable keys for efficient incremental sync
-                    let map_id = doc.put_object(parent, key, ObjType::Map)
+                    let map_id = doc
+                        .put_object(parent, key, ObjType::Map)
                         .map_err(|e| anyhow!("Failed to create map: {:?}", e))?;
 
                     for item in arr.iter() {
                         if let JsonValue::Object(obj) = item {
                             // Extract or generate stable key
-                            let item_key = if let Some(id) = obj.get("id").and_then(|v| v.as_str()) {
+                            let item_key = if let Some(id) = obj.get("id").and_then(|v| v.as_str())
+                            {
                                 id.to_string()
                             } else if let Some(key) = obj.get("_key").and_then(|v| v.as_str()) {
                                 key.to_string()
                             } else if let Some(ts) = obj.get("timestamp").and_then(|v| v.as_i64()) {
                                 // Generate key from timestamp + random suffix
                                 use std::time::{SystemTime, UNIX_EPOCH};
-                                let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos();
+                                let nanos = SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap()
+                                    .subsec_nanos();
                                 format!("{}-{:x}", ts, nanos)
                             } else {
                                 // Fallback: current timestamp + random
@@ -401,24 +421,34 @@ impl SwirlDB {
                             // Add _key field to the object if not present
                             let mut item_with_key = obj.clone();
                             if !item_with_key.contains_key("_key") {
-                                item_with_key.insert("_key".to_string(), JsonValue::String(item_key.clone()));
+                                item_with_key.insert(
+                                    "_key".to_string(),
+                                    JsonValue::String(item_key.clone()),
+                                );
                             }
 
                             // Insert as map entry
-                            self.insert_value(doc, &map_id, &item_key, &JsonValue::Object(item_with_key))?;
+                            self.insert_value(
+                                doc,
+                                &map_id,
+                                &item_key,
+                                &JsonValue::Object(item_with_key),
+                            )?;
                         }
                     }
                 } else {
                     // Regular array: store as List
-                    let list_id = doc.put_object(parent, key, ObjType::List)
+                    let list_id = doc
+                        .put_object(parent, key, ObjType::List)
                         .map_err(|e| anyhow!("Failed to create list: {:?}", e))?;
                     for (i, item) in arr.iter().enumerate() {
                         self.insert_value_at_index(doc, &list_id, i, item)?;
                     }
                 }
-            },
+            }
             JsonValue::Object(obj) => {
-                let map_id = doc.put_object(parent, key, ObjType::Map)
+                let map_id = doc
+                    .put_object(parent, key, ObjType::Map)
                     .map_err(|e| anyhow!("Failed to create map: {:?}", e))?;
                 for (k, v) in obj.iter() {
                     self.insert_value(doc, &map_id, k, v)?;
@@ -429,16 +459,22 @@ impl SwirlDB {
     }
 
     /// Insert a JSON value at a specific index in an Automerge list
-    fn insert_value_at_index(&self, doc: &mut AutoCommit, list_id: &ObjId, index: usize, value: &JsonValue) -> Result<()> {
+    fn insert_value_at_index(
+        &self,
+        doc: &mut AutoCommit,
+        list_id: &ObjId,
+        index: usize,
+        value: &JsonValue,
+    ) -> Result<()> {
         match value {
             JsonValue::Null => {
                 doc.insert(list_id, index, ScalarValue::Null)
                     .map_err(|e| anyhow!("Failed to insert null: {:?}", e))?;
-            },
+            }
             JsonValue::Bool(b) => {
                 doc.insert(list_id, index, ScalarValue::Boolean(*b))
                     .map_err(|e| anyhow!("Failed to insert boolean: {:?}", e))?;
-            },
+            }
             JsonValue::Number(n) => {
                 if let Some(i) = n.as_i64() {
                     doc.insert(list_id, index, ScalarValue::Int(i))
@@ -450,20 +486,22 @@ impl SwirlDB {
                     doc.insert(list_id, index, ScalarValue::F64(f))
                         .map_err(|e| anyhow!("Failed to insert float: {:?}", e))?;
                 }
-            },
+            }
             JsonValue::String(s) => {
                 doc.insert(list_id, index, ScalarValue::Str(s.clone().into()))
                     .map_err(|e| anyhow!("Failed to insert string: {:?}", e))?;
-            },
+            }
             JsonValue::Array(arr) => {
-                let nested_list = doc.insert_object(list_id, index, ObjType::List)
+                let nested_list = doc
+                    .insert_object(list_id, index, ObjType::List)
                     .map_err(|e| anyhow!("Failed to insert list: {:?}", e))?;
                 for (i, item) in arr.iter().enumerate() {
                     self.insert_value_at_index(doc, &nested_list, i, item)?;
                 }
-            },
+            }
             JsonValue::Object(obj) => {
-                let nested_map = doc.insert_object(list_id, index, ObjType::Map)
+                let nested_map = doc
+                    .insert_object(list_id, index, ObjType::Map)
                     .map_err(|e| anyhow!("Failed to insert map: {:?}", e))?;
                 for (k, v) in obj.iter() {
                     self.insert_value(doc, &nested_map, k, v)?;
@@ -493,7 +531,12 @@ impl SwirlDB {
     ///    - If item exists but content changed: update it (modified item)
     ///    - If item exists and content unchanged: skip it (zero overhead)
     ///
-    fn update_array_as_map(&self, doc: &mut AutoCommit, map_obj_id: &ObjId, new_arr: &[JsonValue]) -> Result<()> {
+    fn update_array_as_map(
+        &self,
+        doc: &mut AutoCommit,
+        map_obj_id: &ObjId,
+        new_arr: &[JsonValue],
+    ) -> Result<()> {
         use std::collections::{HashMap, HashSet};
 
         // Build index of new items by their stable key
@@ -506,7 +549,10 @@ impl SwirlDB {
                     key.to_string()
                 } else if let Some(ts) = obj.get("timestamp").and_then(|v| v.as_i64()) {
                     use std::time::{SystemTime, UNIX_EPOCH};
-                    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().subsec_nanos();
+                    let nanos = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .subsec_nanos();
                     format!("{}-{:x}", ts, nanos)
                 } else {
                     use std::time::{SystemTime, UNIX_EPOCH};
@@ -538,9 +584,12 @@ impl SwirlDB {
                 }
 
                 // Check if item already exists and is unchanged
-                let needs_update = if let Ok(Some((existing_val, existing_obj_id))) = doc.get(map_obj_id, item_key.as_str()) {
+                let needs_update = if let Ok(Some((existing_val, existing_obj_id))) =
+                    doc.get(map_obj_id, item_key.as_str())
+                {
                     // Compare JSON values
-                    let existing_json = self.automerge_to_json(doc, &existing_val, &existing_obj_id);
+                    let existing_json =
+                        self.automerge_to_json(doc, &existing_val, &existing_obj_id);
                     existing_json != JsonValue::Object(item_with_key.clone())
                 } else {
                     // Item doesn't exist, needs insert
@@ -549,7 +598,12 @@ impl SwirlDB {
 
                 if needs_update {
                     // Update or insert the item
-                    self.insert_value(doc, map_obj_id, item_key, &JsonValue::Object(item_with_key))?;
+                    self.insert_value(
+                        doc,
+                        map_obj_id,
+                        item_key,
+                        &JsonValue::Object(item_with_key),
+                    )?;
                 }
             }
         }
@@ -573,25 +627,23 @@ impl SwirlDB {
                     ScalarValue::Boolean(b) => JsonValue::Bool(*b),
                     ScalarValue::Int(i) => JsonValue::Number((*i).into()),
                     ScalarValue::Uint(u) => JsonValue::Number((*u).into()),
-                    ScalarValue::F64(f) => {
-                        serde_json::Number::from_f64(*f)
-                            .map(JsonValue::Number)
-                            .unwrap_or(JsonValue::Null)
-                    },
+                    ScalarValue::F64(f) => serde_json::Number::from_f64(*f)
+                        .map(JsonValue::Number)
+                        .unwrap_or(JsonValue::Null),
                     ScalarValue::Str(s) => JsonValue::String(s.to_string()),
                     ScalarValue::Bytes(b) => {
                         // Convert bytes to base64 string
                         use base64::Engine;
                         JsonValue::String(base64::engine::general_purpose::STANDARD.encode(b))
-                    },
+                    }
                     ScalarValue::Timestamp(ts) => JsonValue::Number((*ts).into()),
                     ScalarValue::Counter(_c) => {
                         // Counter is a specialized CRDT type - for now just convert to null
                         JsonValue::Null
-                    },
+                    }
                     _ => JsonValue::Null,
                 }
-            },
+            }
             Value::Object(obj_type) => {
                 // For objects, use the obj_id parameter to traverse
                 match obj_type {
@@ -602,7 +654,7 @@ impl SwirlDB {
                             if let Ok(Some((val, nested_obj_id))) = doc.get(obj_id, &key) {
                                 json_obj.insert(
                                     key.to_string(),
-                                    self.automerge_to_json(doc, &val, &nested_obj_id)
+                                    self.automerge_to_json(doc, &val, &nested_obj_id),
                                 );
                             }
                         }
@@ -622,7 +674,8 @@ impl SwirlDB {
 
                         if is_array_as_map {
                             // Convert back to array
-                            let mut items: Vec<JsonValue> = json_obj.into_values()
+                            let mut items: Vec<JsonValue> = json_obj
+                                .into_values()
                                 .filter_map(|mut v| {
                                     if let JsonValue::Object(ref mut obj) = v {
                                         // Remove internal _key field before returning
@@ -646,20 +699,18 @@ impl SwirlDB {
                             // Regular map
                             JsonValue::Object(json_obj)
                         }
-                    },
+                    }
                     automerge::ObjType::List | automerge::ObjType::Text => {
                         let mut json_arr = Vec::new();
                         // Use obj_id directly - it's the ID of this list
                         let len = doc.length(obj_id);
                         for i in 0..len {
                             if let Ok(Some((val, nested_obj_id))) = doc.get(obj_id, i) {
-                                json_arr.push(
-                                    self.automerge_to_json(doc, &val, &nested_obj_id)
-                                );
+                                json_arr.push(self.automerge_to_json(doc, &val, &nested_obj_id));
                             }
                         }
                         JsonValue::Array(json_arr)
-                    },
+                    }
                 }
             }
         }
@@ -682,8 +733,7 @@ impl SwirlDB {
 
     /// Load state from bytes
     pub fn load_state(&self, bytes: &[u8]) -> Result<()> {
-        let doc = AutoCommit::load(bytes)
-            .map_err(|e| anyhow!("Failed to load state: {:?}", e))?;
+        let doc = AutoCommit::load(bytes).map_err(|e| anyhow!("Failed to load state: {:?}", e))?;
 
         let mut doc_guard = self.doc.lock().unwrap();
         *doc_guard = doc;
@@ -699,7 +749,10 @@ impl SwirlDB {
     pub fn get_changes(&self) -> Vec<Vec<u8>> {
         let mut doc = self.doc.lock().unwrap();
         let changes = doc.get_changes(&[]);
-        changes.into_iter().map(|c| c.raw_bytes().to_vec()).collect()
+        changes
+            .into_iter()
+            .map(|c| c.raw_bytes().to_vec())
+            .collect()
     }
 
     /// Get changes since specific heads as bytes
@@ -710,7 +763,8 @@ impl SwirlDB {
 
         // Convert byte vectors to ChangeHash
         // Note: ChangeHash is a newtype around [u8; 32]
-        let head_hashes: Vec<automerge::ChangeHash> = heads.iter()
+        let head_hashes: Vec<automerge::ChangeHash> = heads
+            .iter()
             .filter_map(|h| {
                 if h.len() == 32 {
                     let mut arr = [0u8; 32];
@@ -726,7 +780,10 @@ impl SwirlDB {
             .collect();
 
         let changes = doc.get_changes(&head_hashes);
-        changes.into_iter().map(|c| c.raw_bytes().to_vec()).collect()
+        changes
+            .into_iter()
+            .map(|c| c.raw_bytes().to_vec())
+            .collect()
     }
 
     /// Apply changes from another document (MERGES instead of replacing)
@@ -765,7 +822,8 @@ impl SwirlDB {
         // ChangeHash is a newtype around [u8; 32]
         // Since as_bytes() is not public, we use unsafe transmute
         // This is safe because ChangeHash is repr(transparent) over [u8; 32]
-        heads.into_iter()
+        heads
+            .into_iter()
             .map(|h| {
                 // Safety: ChangeHash is a newtype around [u8; 32]
                 // We can safely transmute it to get the bytes
@@ -853,7 +911,9 @@ fn resolve_path(doc: &mut AutoCommit, path: &[String], create: bool) -> Option<O
                 current = obj_id;
             }
             None if create => {
-                let new_obj = doc.put_object(&current, key.as_str(), automerge::ObjType::Map).ok()?;
+                let new_obj = doc
+                    .put_object(&current, key.as_str(), automerge::ObjType::Map)
+                    .ok()?;
                 current = new_obj;
             }
             _ => return None,
@@ -915,7 +975,8 @@ mod tests {
     #[test]
     fn test_set_and_get() {
         let db = SwirlDB::new();
-        db.set_path("user.name", ScalarValue::Str("Alice".into())).unwrap();
+        db.set_path("user.name", ScalarValue::Str("Alice".into()))
+            .unwrap();
 
         let value = db.get_path("user.name");
         assert!(matches!(value, Some(ScalarValue::Str(_))));
@@ -933,7 +994,8 @@ mod tests {
     #[test]
     fn test_save_and_load() {
         let db1 = SwirlDB::new();
-        db1.set_path("test", ScalarValue::Str("value".into())).unwrap();
+        db1.set_path("test", ScalarValue::Str("value".into()))
+            .unwrap();
 
         let bytes = db1.save_state();
 

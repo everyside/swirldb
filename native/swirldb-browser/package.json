@@ -5,7 +5,11 @@
   "private": true,
   "scripts": {
     "build:wasm": "wasm-pack build --target web && rm -rf ../../packages/browser-wasm/* && cp -r pkg/* ../../packages/browser-wasm/ && cp -r pkg/* ../../packages/swirldb-js/wasm/",
-    "build:wasm:dev": "wasm-pack build --target web --dev && rm -rf ../../packages/browser-wasm/* && cp -r pkg/* ../../packages/browser-wasm/ && cp -r pkg/* ../../packages/swirldb-js/wasm/"
+    "build:wasm:dev": "wasm-pack build --target web --dev && rm -rf ../../packages/browser-wasm/* && cp -r pkg/* ../../packages/browser-wasm/ && cp -r pkg/* ../../packages/swirldb-js/wasm/",
+    "test": "npm run test:node",
+    "test:node": "wasm-pack test --node",
+    "test:chrome": "wasm-pack test --headless --chrome",
+    "test:firefox": "wasm-pack test --headless --firefox"
   },
   "license": "Apache-2.0"
 }

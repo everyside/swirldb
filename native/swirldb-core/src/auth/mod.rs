@@ -27,10 +27,10 @@ pub trait AuthProvider: Send + Sync {
 
 // Implementation modules
 mod anonymous;
-mod static_auth;
 mod jwt;
+mod static_auth;
 
 // Re-exports
 pub use anonymous::AnonymousAuth;
-pub use static_auth::StaticAuth;
 pub use jwt::JwtAuth;
+pub use static_auth::StaticAuth;

@@ -1,32 +1,36 @@
 // Copyright 2025 Everyside Innovations, LLC
 // SPDX-License-Identifier: Apache-2.0
 
-use wasm_bindgen::prelude::*;
-use wasm_bindgen::closure::Closure;
-use wasm_bindgen_futures::future_to_promise;
-use js_sys::{Function, Uint8Array, Promise};
 use automerge::ScalarValue;
-use swirldb_core::core::SwirlDB as CoreSwirlDB;
-use swirldb_core::policy::PolicyEngine;
-use swirldb_core::protocol::Message;
+use js_sys::{Function, Promise, Uint8Array};
+use serde_wasm_bindgen::from_value;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
-use serde_wasm_bindgen::from_value;
-use web_sys::{WebSocket, MessageEvent, CloseEvent, ErrorEvent, BinaryType};
+use swirldb_core::core::SwirlDB as CoreSwirlDB;
+use swirldb_core::policy::PolicyEngine;
+use swirldb_core::protocol::Message;
+use wasm_bindgen::closure::Closure;
+use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures::future_to_promise;
+use web_sys::{BinaryType, CloseEvent, ErrorEvent, MessageEvent, WebSocket};
 
 mod storage;
-use storage::{LocalDocumentStorage, IndexedDBAdapter};
+use storage::{IndexedDBAdapter, LocalDocumentStorage};
 
 thread_local! {
-    static OBSERVERS: RefCell<Vec<(usize, String, Function, Option<ScalarValue>)>> = RefCell::new(Vec::new());
-    static NEXT_ID: RefCell<usize> = RefCell::new(0);
+    #[allow(clippy::type_complexity)]
+    static OBSERVERS: RefCell<Vec<(usize, String, Function, Option<ScalarValue>)>> = const { RefCell::new(Vec::new()) };
+    static NEXT_ID: RefCell<usize> = const { RefCell::new(0) };
+    #[allow(clippy::missing_const_for_thread_local)]
     static CONNECTIONS: RefCell<std::collections::HashMap<usize, ConnectionState>> = RefCell::new(std::collections::HashMap::new());
 }
 
 /// Connection state for protocol handling
 struct ConnectionState {
+    #[allow(dead_code)]
     client_id: String,
+    #[allow(dead_code)]
     subscriptions: Vec<String>,
     last_synced_heads: Vec<Vec<u8>>,
     websocket: Option<WebSocket>,
@@ -71,10 +75,10 @@ fn fire_observers_for_paths(db_id: usize, core: &swirldb_core::SwirlDB, affected
                 // Match if observer path is a prefix of affected path, or vice versa
                 // e.g., observer="messages" matches affected="messages.msg_123"
                 // Also handles glob patterns like "/**"
-                affected.starts_with(path.as_str()) ||
-                path.starts_with(affected.as_str()) ||
-                affected == "/**" ||
-                path == "/**"
+                affected.starts_with(path.as_str())
+                    || path.starts_with(affected.as_str())
+                    || affected == "/**"
+                    || path == "/**"
             });
 
             if is_affected {
@@ -128,7 +132,7 @@ pub struct SwirlDB {
 impl SwirlDB {
     /// Create a new SwirlDB instance with default in-memory storage
     #[wasm_bindgen(constructor)]
-    pub fn new() -> SwirlDB {
+    pub fn new() -> Self {
         console_error_panic_hook::set_once();
         let id = NEXT_ID.with(|next_id| {
             let id = *next_id.borrow();
@@ -136,7 +140,7 @@ impl SwirlDB {
             id
         });
 
-        SwirlDB {
+        Self {
             core: Rc::new(CoreSwirlDB::new()),
             id,
         }
@@ -186,7 +190,8 @@ impl SwirlDB {
                 id
             });
 
-            let storage = IndexedDBAdapter::new(&db_name).await
+            let storage = IndexedDBAdapter::new(&db_name)
+                .await
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
             let core = CoreSwirlDB::with_storage(Arc::new(storage), "db").await;
@@ -197,7 +202,6 @@ impl SwirlDB {
             }))
         })
     }
-
 
     /// Set a value at the given dot-separated path
     #[wasm_bindgen(js_name = setPath)]
@@ -271,9 +275,9 @@ impl SwirlDB {
                 let json_str = value.to_string();
                 match js_sys::JSON::parse(&json_str) {
                     Ok(js_val) => js_val,
-                    Err(_) => JsValue::NULL
+                    Err(_) => JsValue::NULL,
                 }
-            },
+            }
             None => JsValue::NULL,
         }
     }
@@ -325,9 +329,7 @@ impl SwirlDB {
     /// ```
     #[wasm_bindgen(js_name = applyChanges)]
     pub fn apply_changes(&mut self, changes: Vec<Uint8Array>) -> Result<(), JsValue> {
-        let change_vecs: Vec<Vec<u8>> = changes.into_iter()
-            .map(|arr| arr.to_vec())
-            .collect();
+        let change_vecs: Vec<Vec<u8>> = changes.into_iter().map(|arr| arr.to_vec()).collect();
 
         self.core
             .apply_changes(change_vecs)
@@ -343,7 +345,8 @@ impl SwirlDB {
     /// This returns the complete change history that can be sent to other peers
     #[wasm_bindgen(js_name = getChanges)]
     pub fn get_changes(&self) -> Vec<Uint8Array> {
-        self.core.get_changes()
+        self.core
+            .get_changes()
             .into_iter()
             .map(|bytes| Uint8Array::from(&bytes[..]))
             .collect()
@@ -361,11 +364,10 @@ impl SwirlDB {
     /// ```
     #[wasm_bindgen(js_name = getChangesSince)]
     pub fn get_changes_since(&self, heads: Vec<Uint8Array>) -> Vec<Uint8Array> {
-        let head_vecs: Vec<Vec<u8>> = heads.into_iter()
-            .map(|arr| arr.to_vec())
-            .collect();
+        let head_vecs: Vec<Vec<u8>> = heads.into_iter().map(|arr| arr.to_vec()).collect();
 
-        self.core.get_changes_since(&head_vecs)
+        self.core
+            .get_changes_since(&head_vecs)
             .into_iter()
             .map(|bytes| Uint8Array::from(&bytes[..]))
             .collect()
@@ -395,7 +397,8 @@ impl SwirlDB {
     /// ```
     #[wasm_bindgen(js_name = getHeadsArray)]
     pub fn get_heads_array(&self) -> Vec<Uint8Array> {
-        self.core.get_heads()
+        self.core
+            .get_heads()
             .into_iter()
             .map(|bytes| Uint8Array::from(&bytes[..]))
             .collect()
@@ -409,12 +412,9 @@ impl SwirlDB {
         let current_value = self.core.get_path(&path);
 
         OBSERVERS.with(|observers| {
-            observers.borrow_mut().push((
-                self.id,
-                path,
-                callback,
-                current_value,
-            ));
+            observers
+                .borrow_mut()
+                .push((self.id, path, callback, current_value));
         });
 
         Ok(())
@@ -449,8 +449,8 @@ impl SwirlDB {
     /// ```
     #[wasm_bindgen(js_name = loadPolicyConfig)]
     pub fn load_policy_config(&self, json_str: String) -> Result<(), JsValue> {
-        let _engine = PolicyEngine::from_json(&json_str)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let _engine =
+            PolicyEngine::from_json(&json_str).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         // We need to modify the core instance, which requires interior mutability
         // Since core is Rc, we can't modify it directly
@@ -478,8 +478,8 @@ impl SwirlDB {
             id
         });
 
-        let engine = PolicyEngine::from_json(&json_str)
-            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        let engine =
+            PolicyEngine::from_json(&json_str).map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         let core = CoreSwirlDB::new().with_policy(engine);
 
@@ -508,7 +508,8 @@ impl SwirlDB {
     /// ```
     #[wasm_bindgen(js_name = authenticateJWT)]
     pub fn authenticate_jwt(&self, token: String) -> Result<(), JsValue> {
-        self.core.authenticate_jwt(&token)
+        self.core
+            .authenticate_jwt(&token)
             .map_err(|e| JsValue::from_str(&e.to_string()))
     }
 
@@ -530,7 +531,8 @@ impl SwirlDB {
     pub fn persist(&self) -> Promise {
         let core = Rc::clone(&self.core);
         future_to_promise(async move {
-            core.persist().await
+            core.persist()
+                .await
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
             Ok(JsValue::UNDEFINED)
         })
@@ -584,7 +586,12 @@ impl SwirlDB {
     /// db.data.messages = [...messages, newMessage];
     /// ```
     #[wasm_bindgen(js_name = connect)]
-    pub fn connect(&self, url: String, client_id: String, subscriptions: Vec<String>) -> Result<(), JsValue> {
+    pub fn connect(
+        &self,
+        url: String,
+        client_id: String,
+        subscriptions: Vec<String>,
+    ) -> Result<(), JsValue> {
         let ws = WebSocket::new(&url)
             .map_err(|e| JsValue::from_str(&format!("Failed to create WebSocket: {:?}", e)))?;
 
@@ -619,7 +626,6 @@ impl SwirlDB {
         ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
 
         // Setup onmessage handler
-        let ws_clone = ws.clone();
         let onmessage = Closure::wrap(Box::new(move |event: MessageEvent| {
             if let Ok(array_buffer) = event.data().dyn_into::<js_sys::ArrayBuffer>() {
                 let bytes = js_sys::Uint8Array::new(&array_buffer).to_vec();
@@ -634,39 +640,72 @@ impl SwirlDB {
                                     Message::Sync { heads, changes } => {
                                         // Apply changes from initial sync
                                         if !changes.is_empty() {
-                                            let total_bytes: usize = changes.iter().map(|c| c.len()).sum();
-                                            web_sys::console::log_1(&format!("📥 SYNC: {} changes ({} bytes) from server",
-                                                changes.len(), total_bytes).into());
+                                            let total_bytes: usize =
+                                                changes.iter().map(|c| c.len()).sum();
+                                            web_sys::console::log_1(
+                                                &format!(
+                                                    "📥 SYNC: {} changes ({} bytes) from server",
+                                                    changes.len(),
+                                                    total_bytes
+                                                )
+                                                .into(),
+                                            );
 
                                             if let Err(e) = core.apply_changes(changes) {
-                                                web_sys::console::error_1(&format!("Failed to apply changes: {}", e).into());
+                                                web_sys::console::error_1(
+                                                    &format!("Failed to apply changes: {}", e)
+                                                        .into(),
+                                                );
                                             } else {
                                                 // Fire all observers after initial sync (no affected_paths in Sync)
                                                 fire_all_observers(db_id, &core);
                                             }
                                         } else {
-                                            web_sys::console::log_1(&"📥 SYNC: Already up to date".into());
+                                            web_sys::console::log_1(
+                                                &"📥 SYNC: Already up to date".into(),
+                                            );
                                         }
                                         // Update heads
                                         state.last_synced_heads.clear();
                                         let mut offset = 0;
                                         while offset + 32 <= heads.len() {
-                                            state.last_synced_heads.push(heads[offset..offset+32].to_vec());
+                                            state
+                                                .last_synced_heads
+                                                .push(heads[offset..offset + 32].to_vec());
                                             offset += 32;
                                         }
                                     }
-                                    Message::Broadcast { from_client_id, changes, affected_paths } => {
+                                    Message::Broadcast {
+                                        from_client_id,
+                                        changes,
+                                        affected_paths,
+                                    } => {
                                         if !changes.is_empty() {
                                             // Calculate total bytes
-                                            let total_bytes: usize = changes.iter().map(|c| c.len()).sum();
-                                            web_sys::console::log_1(&format!("📥 RECV: {} changes ({} bytes) from {}",
-                                                changes.len(), total_bytes, from_client_id).into());
+                                            let total_bytes: usize =
+                                                changes.iter().map(|c| c.len()).sum();
+                                            web_sys::console::log_1(
+                                                &format!(
+                                                    "📥 RECV: {} changes ({} bytes) from {}",
+                                                    changes.len(),
+                                                    total_bytes,
+                                                    from_client_id
+                                                )
+                                                .into(),
+                                            );
 
                                             if let Err(e) = core.apply_changes(changes) {
-                                                web_sys::console::error_1(&format!("Failed to apply changes: {}", e).into());
+                                                web_sys::console::error_1(
+                                                    &format!("Failed to apply changes: {}", e)
+                                                        .into(),
+                                                );
                                             } else {
                                                 // Fire observers for affected paths only
-                                                fire_observers_for_paths(db_id, &core, &affected_paths);
+                                                fire_observers_for_paths(
+                                                    db_id,
+                                                    &core,
+                                                    &affected_paths,
+                                                );
                                             }
                                         }
                                     }
@@ -675,15 +714,22 @@ impl SwirlDB {
                                         state.last_synced_heads.clear();
                                         let mut offset = 0;
                                         while offset + 32 <= heads.len() {
-                                            state.last_synced_heads.push(heads[offset..offset+32].to_vec());
+                                            state
+                                                .last_synced_heads
+                                                .push(heads[offset..offset + 32].to_vec());
                                             offset += 32;
                                         }
                                     }
-                                    Message::SubscribeAck { added: _, denied: _ } => {
+                                    Message::SubscribeAck {
+                                        added: _,
+                                        denied: _,
+                                    } => {
                                         // Subscription confirmed
                                     }
                                     Message::Error { message } => {
-                                        web_sys::console::error_1(&format!("Server error: {}", message).into());
+                                        web_sys::console::error_1(
+                                            &format!("Server error: {}", message).into(),
+                                        );
                                     }
                                     _ => {}
                                 }
@@ -691,7 +737,9 @@ impl SwirlDB {
                         });
                     }
                     Err(e) => {
-                        web_sys::console::error_1(&format!("Failed to decode message: {}", e).into());
+                        web_sys::console::error_1(
+                            &format!("Failed to decode message: {}", e).into(),
+                        );
                     }
                 }
             }
@@ -746,9 +794,20 @@ impl SwirlDB {
 
                 // Calculate total bytes
                 let total_bytes: usize = changes.iter().map(|c| c.len()).sum();
-                let sync_mode = if state.last_synced_heads.is_empty() { "full" } else { "delta" };
-                web_sys::console::log_1(&format!("📤 SEND: {} changes ({} bytes, {})",
-                    changes.len(), total_bytes, sync_mode).into());
+                let sync_mode = if state.last_synced_heads.is_empty() {
+                    "full"
+                } else {
+                    "delta"
+                };
+                web_sys::console::log_1(
+                    &format!(
+                        "📤 SEND: {} changes ({} bytes, {})",
+                        changes.len(),
+                        total_bytes,
+                        sync_mode
+                    )
+                    .into(),
+                );
 
                 // Get current heads
                 let heads = self.core.get_heads();
@@ -769,6 +828,12 @@ impl SwirlDB {
                 }
             }
         });
+    }
+}
+
+impl Default for SwirlDB {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -819,5 +884,38 @@ fn scalar_values_equal(a: &ScalarValue, b: &ScalarValue) -> bool {
         (ScalarValue::Int(a), ScalarValue::Int(b)) => a == b,
         (ScalarValue::Uint(a), ScalarValue::Uint(b)) => a == b,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasm_bindgen_test::*;
+
+    #[wasm_bindgen_test]
+    fn test_can_instantiate() {
+        let _db = SwirlDB::new();
+        // If we get here without panicking, instantiation works
+    }
+
+    #[wasm_bindgen_test]
+    fn test_scalar_values_equal() {
+        assert!(scalar_values_equal(&ScalarValue::Null, &ScalarValue::Null));
+        assert!(scalar_values_equal(
+            &ScalarValue::Boolean(true),
+            &ScalarValue::Boolean(true)
+        ));
+        assert!(!scalar_values_equal(
+            &ScalarValue::Boolean(true),
+            &ScalarValue::Boolean(false)
+        ));
+        assert!(scalar_values_equal(
+            &ScalarValue::Int(42),
+            &ScalarValue::Int(42)
+        ));
+        assert!(!scalar_values_equal(
+            &ScalarValue::Int(42),
+            &ScalarValue::Int(43)
+        ));
     }
 }

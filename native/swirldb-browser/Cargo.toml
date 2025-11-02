@@ -58,5 +58,8 @@ anyhow = "1.0"
 # uuid is pulled in by automerge, but needs WASM-specific features
 uuid = { version = "1.18", features = ["v4", "js", "serde"] }
 
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-O", "--enable-bulk-memory", "--enable-nontrapping-float-to-int"]

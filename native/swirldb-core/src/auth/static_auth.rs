@@ -1,9 +1,9 @@
 // Copyright 2025 Everyside Innovations, LLC
 // SPDX-License-Identifier: Apache-2.0
 
+use super::AuthProvider;
 use crate::policy::{Actor, ActorType};
 use std::collections::HashMap;
-use super::AuthProvider;
 
 /// Static auth provider - uses a fixed user ID
 ///

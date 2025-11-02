@@ -248,10 +248,22 @@ impl Actor {
             .to_string();
 
         // Extract optional fields
-        let org_id = claims.get("org_id").and_then(|v| v.as_str()).map(String::from);
-        let team_id = claims.get("team_id").and_then(|v| v.as_str()).map(String::from);
-        let app_id = claims.get("app_id").and_then(|v| v.as_str()).map(String::from);
-        let role = claims.get("role").and_then(|v| v.as_str()).map(String::from);
+        let org_id = claims
+            .get("org_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let team_id = claims
+            .get("team_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let app_id = claims
+            .get("app_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let role = claims
+            .get("role")
+            .and_then(|v| v.as_str())
+            .map(String::from);
 
         Ok(Self {
             actor_type,
@@ -529,25 +541,53 @@ mod tests {
             claims: HashMap::new(),
         };
 
-        assert!(PathPatternMatcher::matches("/config/version", "/config/version", &actor));
-        assert!(!PathPatternMatcher::matches("/config/version", "/config/other", &actor));
+        assert!(PathPatternMatcher::matches(
+            "/config/version",
+            "/config/version",
+            &actor
+        ));
+        assert!(!PathPatternMatcher::matches(
+            "/config/version",
+            "/config/other",
+            &actor
+        ));
     }
 
     #[test]
     fn test_path_pattern_single_wildcard() {
         let actor = Actor::anonymous();
 
-        assert!(PathPatternMatcher::matches("/org/*/members", "/org/acme/members", &actor));
-        assert!(!PathPatternMatcher::matches("/org/*/members", "/org/acme/teams/members", &actor));
+        assert!(PathPatternMatcher::matches(
+            "/org/*/members",
+            "/org/acme/members",
+            &actor
+        ));
+        assert!(!PathPatternMatcher::matches(
+            "/org/*/members",
+            "/org/acme/teams/members",
+            &actor
+        ));
     }
 
     #[test]
     fn test_path_pattern_multi_wildcard() {
         let actor = Actor::anonymous();
 
-        assert!(PathPatternMatcher::matches("/user/**", "/user/alice/prefs/theme", &actor));
-        assert!(PathPatternMatcher::matches("/user/**", "/user/alice", &actor));
-        assert!(!PathPatternMatcher::matches("/user/**", "/org/acme", &actor));
+        assert!(PathPatternMatcher::matches(
+            "/user/**",
+            "/user/alice/prefs/theme",
+            &actor
+        ));
+        assert!(PathPatternMatcher::matches(
+            "/user/**",
+            "/user/alice",
+            &actor
+        ));
+        assert!(!PathPatternMatcher::matches(
+            "/user/**",
+            "/org/acme",
+            &actor
+        ));
     }
 
     #[test]

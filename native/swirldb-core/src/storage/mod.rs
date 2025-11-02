@@ -81,7 +81,10 @@ impl DocumentStorageMarker for InMemoryDocStorage {}
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl DocumentStorage for InMemoryDocStorage {
     async fn save(&self, key: &str, data: &[u8]) -> Result<()> {
-        self.data.write().unwrap().insert(key.to_string(), data.to_vec());
+        self.data
+            .write()
+            .unwrap()
+            .insert(key.to_string(), data.to_vec());
         Ok(())
     }
 
@@ -98,4 +101,3 @@ impl DocumentStorage for InMemoryDocStorage {
         Ok(self.data.read().unwrap().keys().cloned().collect())
     }
 }
-

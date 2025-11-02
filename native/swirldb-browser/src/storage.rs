@@ -1,14 +1,13 @@
 // Copyright 2025 Everyside Innovations, LLC
 // SPDX-License-Identifier: Apache-2.0
 
+use anyhow::{anyhow, Result};
+use async_trait::async_trait;
+use swirldb_core::storage::{DocumentStorage, DocumentStorageMarker};
 /// Browser-specific storage adapters
 ///
 /// This module provides LocalStorage and IndexedDB adapters for browser environments
-
 use web_sys::{window, Storage};
-use anyhow::{Result, anyhow};
-use swirldb_core::storage::{DocumentStorage, DocumentStorageMarker};
-use async_trait::async_trait;
 
 /// LocalStorage adapter for browser environments
 ///
@@ -47,27 +46,30 @@ impl LocalDocumentStorage {
 
     fn bytes_to_base64(&self, bytes: &[u8]) -> String {
         // Use built-in base64 encoding
-        use base64::{Engine as _, engine::general_purpose};
+        use base64::{engine::general_purpose, Engine as _};
         general_purpose::STANDARD.encode(bytes)
     }
 
     fn base64_to_bytes(&self, base64: &str) -> Result<Vec<u8>> {
-        use base64::{Engine as _, engine::general_purpose};
-        general_purpose::STANDARD.decode(base64)
+        use base64::{engine::general_purpose, Engine as _};
+        general_purpose::STANDARD
+            .decode(base64)
             .map_err(|e| anyhow!("Failed to decode base64: {}", e))
     }
 }
 
 impl DocumentStorageMarker for LocalDocumentStorage {}
 
-#[async_trait(?Send)]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl DocumentStorage for LocalDocumentStorage {
     async fn save(&self, key: &str, data: &[u8]) -> Result<()> {
         let storage = self.get_storage()?;
         let full_key = self.make_key(key);
         let base64 = self.bytes_to_base64(data);
 
-        storage.set_item(&full_key, &base64)
+        storage
+            .set_item(&full_key, &base64)
             .map_err(|_| anyhow!("Failed to save to localStorage"))?;
 
         Ok(())
@@ -91,7 +93,8 @@ impl DocumentStorage for LocalDocumentStorage {
         let storage = self.get_storage()?;
         let full_key = self.make_key(key);
 
-        storage.remove_item(&full_key)
+        storage
+            .remove_item(&full_key)
             .map_err(|_| anyhow!("Failed to delete from localStorage"))?;
 
         Ok(())
@@ -131,8 +134,7 @@ impl IndexedDBAdapter {
     /// Create a new IndexedDB adapter with the given database name
     pub async fn new(db_name: &str) -> Result<Self> {
         // Verify IndexedDB is available
-        let _idb = Self::get_indexed_db()
-            .ok_or_else(|| anyhow!("IndexedDB not available"))?;
+        let _idb = Self::get_indexed_db().ok_or_else(|| anyhow!("IndexedDB not available"))?;
 
         // Initialize the database
         let adapter = Self {
@@ -150,38 +152,40 @@ impl IndexedDBAdapter {
     async fn init_db(&self) -> Result<()> {
         use wasm_bindgen::JsCast;
 
-        let idb = Self::get_indexed_db()
-            .ok_or_else(|| anyhow!("IndexedDB not available"))?;
+        let idb = Self::get_indexed_db().ok_or_else(|| anyhow!("IndexedDB not available"))?;
 
         // Open database (version 1)
-        let open_request = idb.open_with_u32(&self.db_name, 1)
+        let open_request = idb
+            .open_with_u32(&self.db_name, 1)
             .map_err(|_| anyhow!("Failed to open IndexedDB"))?;
 
         // Set up upgrade handler
-        let onupgradeneeded = wasm_bindgen::closure::Closure::wrap(Box::new(move |event: web_sys::IdbVersionChangeEvent| {
-            if let Some(target) = event.target() {
-                if let Ok(request) = target.dyn_into::<web_sys::IdbOpenDbRequest>() {
-                    if let Ok(db_result) = request.result() {
-                        if let Ok(db) = db_result.dyn_into::<web_sys::IdbDatabase>() {
-                            // Create object store if it doesn't exist
-                            let names = db.object_store_names();
-                            let mut found = false;
-                            for i in 0..names.length() {
-                                if let Some(name) = names.get(i) {
-                                    if name == "swirldb" {
-                                        found = true;
-                                        break;
+        let onupgradeneeded = wasm_bindgen::closure::Closure::wrap(Box::new(
+            move |event: web_sys::IdbVersionChangeEvent| {
+                if let Some(target) = event.target() {
+                    if let Ok(request) = target.dyn_into::<web_sys::IdbOpenDbRequest>() {
+                        if let Ok(db_result) = request.result() {
+                            if let Ok(db) = db_result.dyn_into::<web_sys::IdbDatabase>() {
+                                // Create object store if it doesn't exist
+                                let names = db.object_store_names();
+                                let mut found = false;
+                                for i in 0..names.length() {
+                                    if let Some(name) = names.get(i) {
+                                        if name == "swirldb" {
+                                            found = true;
+                                            break;
+                                        }
                                     }
                                 }
-                            }
-                            if !found {
-                                let _ = db.create_object_store("swirldb");
+                                if !found {
+                                    let _ = db.create_object_store("swirldb");
+                                }
                             }
                         }
                     }
                 }
-            }
-        }) as Box<dyn FnMut(_)>);
+            },
+        ) as Box<dyn FnMut(_)>);
 
         open_request.set_onupgradeneeded(Some(onupgradeneeded.as_ref().unchecked_ref()));
         onupgradeneeded.forget();
@@ -195,15 +199,16 @@ impl IndexedDBAdapter {
     async fn get_db(&self) -> Result<web_sys::IdbDatabase> {
         use wasm_bindgen::JsCast;
 
-        let idb = Self::get_indexed_db()
-            .ok_or_else(|| anyhow!("IndexedDB not available"))?;
+        let idb = Self::get_indexed_db().ok_or_else(|| anyhow!("IndexedDB not available"))?;
 
-        let open_request = idb.open(&self.db_name)
+        let open_request = idb
+            .open(&self.db_name)
             .map_err(|_| anyhow!("Failed to open IndexedDB"))?;
 
         let result = Self::request_to_js_value(&open_request).await?;
 
-        result.dyn_into::<web_sys::IdbDatabase>()
+        result
+            .dyn_into::<web_sys::IdbDatabase>()
             .map_err(|_| anyhow!("Invalid database result"))
     }
 
@@ -212,10 +217,10 @@ impl IndexedDBAdapter {
     // This properly bridges IndexedDB's callback-based API to Rust async/await.
     // We create a Promise that resolves when the request succeeds or rejects when it fails.
     async fn request_to_js_value(request: &web_sys::IdbRequest) -> Result<wasm_bindgen::JsValue> {
+        use std::cell::RefCell;
+        use std::rc::Rc;
         use wasm_bindgen::JsCast;
         use wasm_bindgen_futures::JsFuture;
-        use std::rc::Rc;
-        use std::cell::RefCell;
 
         // Clone the request so we can move it into closures
         let request_clone = request.clone();
@@ -229,13 +234,15 @@ impl IndexedDBAdapter {
             {
                 let resolve = Rc::clone(&resolve);
                 let request = request_clone.clone();
-                let onsuccess = wasm_bindgen::closure::Closure::wrap(Box::new(move |_event: web_sys::Event| {
-                    if let Ok(result) = request.result() {
-                        if let Some(resolve_fn) = resolve.borrow_mut().take() {
-                            let _ = resolve_fn.call1(&wasm_bindgen::JsValue::NULL, &result);
+                let onsuccess =
+                    wasm_bindgen::closure::Closure::wrap(Box::new(move |_event: web_sys::Event| {
+                        if let Ok(result) = request.result() {
+                            if let Some(resolve_fn) = resolve.borrow_mut().take() {
+                                let _ = resolve_fn.call1(&wasm_bindgen::JsValue::NULL, &result);
+                            }
                         }
-                    }
-                }) as Box<dyn FnMut(_)>);
+                    })
+                        as Box<dyn FnMut(_)>);
 
                 request_clone.set_onsuccess(Some(onsuccess.as_ref().unchecked_ref()));
                 onsuccess.forget();
@@ -244,24 +251,30 @@ impl IndexedDBAdapter {
             // Error handler
             {
                 let reject = Rc::clone(&reject);
-                let onerror = wasm_bindgen::closure::Closure::wrap(Box::new(move |_event: web_sys::Event| {
-                    // IndexedDB error occurred - provide a descriptive message
-                    let error_msg = "IndexedDB operation failed";
-                    if let Some(reject_fn) = reject.borrow_mut().take() {
-                        let _ = reject_fn.call1(&wasm_bindgen::JsValue::NULL, &wasm_bindgen::JsValue::from_str(error_msg));
-                    }
-                }) as Box<dyn FnMut(_)>);
+                let onerror =
+                    wasm_bindgen::closure::Closure::wrap(Box::new(move |_event: web_sys::Event| {
+                        // IndexedDB error occurred - provide a descriptive message
+                        let error_msg = "IndexedDB operation failed";
+                        if let Some(reject_fn) = reject.borrow_mut().take() {
+                            let _ = reject_fn.call1(
+                                &wasm_bindgen::JsValue::NULL,
+                                &wasm_bindgen::JsValue::from_str(error_msg),
+                            );
+                        }
+                    })
+                        as Box<dyn FnMut(_)>);
 
                 request_clone.set_onerror(Some(onerror.as_ref().unchecked_ref()));
                 onerror.forget();
             }
         });
 
-        JsFuture::from(promise).await
-            .map_err(|e| {
-                let error_msg = e.as_string().unwrap_or_else(|| "IndexedDB request failed".to_string());
-                anyhow!(error_msg)
-            })
+        JsFuture::from(promise).await.map_err(|e| {
+            let error_msg = e
+                .as_string()
+                .unwrap_or_else(|| "IndexedDB request failed".to_string());
+            anyhow!(error_msg)
+        })
     }
 
     fn bytes_to_js_array(&self, bytes: &[u8]) -> js_sys::Uint8Array {
@@ -275,21 +288,23 @@ impl IndexedDBAdapter {
 
 impl DocumentStorageMarker for IndexedDBAdapter {}
 
-#[async_trait(?Send)]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl DocumentStorage for IndexedDBAdapter {
     async fn save(&self, key: &str, data: &[u8]) -> Result<()> {
         let db = self.get_db().await?;
 
-        let transaction = db.transaction_with_str_and_mode(
-            "swirldb",
-            web_sys::IdbTransactionMode::Readwrite
-        ).map_err(|_| anyhow!("Failed to create transaction"))?;
+        let transaction = db
+            .transaction_with_str_and_mode("swirldb", web_sys::IdbTransactionMode::Readwrite)
+            .map_err(|_| anyhow!("Failed to create transaction"))?;
 
-        let store = transaction.object_store("swirldb")
+        let store = transaction
+            .object_store("swirldb")
             .map_err(|_| anyhow!("Failed to get object store"))?;
 
         let js_array = self.bytes_to_js_array(data);
-        let request = store.put_with_key(&js_array, &wasm_bindgen::JsValue::from_str(key))
+        let request = store
+            .put_with_key(&js_array, &wasm_bindgen::JsValue::from_str(key))
             .map_err(|_| anyhow!("Failed to put data"))?;
 
         Self::request_to_js_value(&request).await?;
@@ -302,13 +317,16 @@ impl DocumentStorage for IndexedDBAdapter {
 
         let db = self.get_db().await?;
 
-        let transaction = db.transaction_with_str("swirldb")
+        let transaction = db
+            .transaction_with_str("swirldb")
             .map_err(|_| anyhow!("Failed to create transaction"))?;
 
-        let store = transaction.object_store("swirldb")
+        let store = transaction
+            .object_store("swirldb")
             .map_err(|_| anyhow!("Failed to get object store"))?;
 
-        let request = store.get(&wasm_bindgen::JsValue::from_str(key))
+        let request = store
+            .get(&wasm_bindgen::JsValue::from_str(key))
             .map_err(|_| anyhow!("Failed to get data"))?;
 
         let result = Self::request_to_js_value(&request).await?;
@@ -317,7 +335,8 @@ impl DocumentStorage for IndexedDBAdapter {
             return Ok(None);
         }
 
-        let array = result.dyn_into::<js_sys::Uint8Array>()
+        let array = result
+            .dyn_into::<js_sys::Uint8Array>()
             .map_err(|_| anyhow!("Invalid data format in IndexedDB"))?;
 
         Ok(Some(self.js_array_to_bytes(array)))
@@ -326,15 +345,16 @@ impl DocumentStorage for IndexedDBAdapter {
     async fn delete(&self, key: &str) -> Result<()> {
         let db = self.get_db().await?;
 
-        let transaction = db.transaction_with_str_and_mode(
-            "swirldb",
-            web_sys::IdbTransactionMode::Readwrite
-        ).map_err(|_| anyhow!("Failed to create transaction"))?;
+        let transaction = db
+            .transaction_with_str_and_mode("swirldb", web_sys::IdbTransactionMode::Readwrite)
+            .map_err(|_| anyhow!("Failed to create transaction"))?;
 
-        let store = transaction.object_store("swirldb")
+        let store = transaction
+            .object_store("swirldb")
             .map_err(|_| anyhow!("Failed to get object store"))?;
 
-        let request = store.delete(&wasm_bindgen::JsValue::from_str(key))
+        let request = store
+            .delete(&wasm_bindgen::JsValue::from_str(key))
             .map_err(|_| anyhow!("Failed to delete data"))?;
 
         Self::request_to_js_value(&request).await?;

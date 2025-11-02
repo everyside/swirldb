@@ -1,16 +1,16 @@
 // Copyright 2025 Everyside Innovations, LLC
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::{anyhow, Result};
-use async_trait::async_trait;
+use super::{EncryptionProvider, EncryptionProviderMarker};
 use aes_gcm::{
     aead::{Aead, KeyInit, OsRng},
     Aes256Gcm,
 };
-use rand::RngCore;
+use anyhow::{anyhow, Result};
+use async_trait::async_trait;
 use hkdf::Hkdf;
+use rand::RngCore;
 use sha2::Sha256;
-use super::{EncryptionProvider, EncryptionProviderMarker};
 
 /// AES-256-GCM encryption provider for document-level encryption
 ///
@@ -88,7 +88,8 @@ impl EncryptionProvider for AesGcmProvider {
             return Err(anyhow!("Ciphertext too short (missing nonce)"));
         }
 
-        let nonce_bytes: [u8; 12] = ciphertext[..12].try_into()
+        let nonce_bytes: [u8; 12] = ciphertext[..12]
+            .try_into()
             .map_err(|_| anyhow!("Invalid nonce length"))?;
         let nonce = &nonce_bytes.into();
         let encrypted_data = &ciphertext[12..];

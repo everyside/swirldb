@@ -1,8 +1,8 @@
 // Copyright 2025 Everyside Innovations, LLC
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::policy::Actor;
 use super::AuthProvider;
+use crate::policy::Actor;
 
 /// Anonymous auth provider - always returns anonymous actor
 #[derive(Debug, Clone)]

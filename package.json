@@ -14,13 +14,19 @@
     "build:wasm": "cd native/swirldb-browser && npm run build:wasm",
     "build:ts": "cd packages/swirldb-js && npm run build",
     "build:server": "cd native/swirldb-server && cargo build --release",
+    "test": "npm run format && npm run lint && npm run test:core && npm run test:server && npm run test:browser",
     "test:core": "cd native/swirldb-core && cargo test",
-    "test:browser": "cd native/swirldb-browser && cargo test --target wasm32-unknown-unknown",
+    "test:browser": "cd native/swirldb-browser && npm test",
     "test:server": "cd native/swirldb-server && cargo test",
     "server": "cd native/swirldb-server && cargo run --release",
     "clean": "cargo clean && rm -rf docs/dist packages/browser-wasm/*",
-    "fmt": "cargo fmt --all",
-    "lint": "cargo clippy --workspace --exclude swirldb-browser --all-targets --all-features -- -D warnings",
-    "lint:fix": "cargo clippy --fix --allow-dirty --allow-staged --workspace --exclude swirldb-browser --all-targets --all-features -- -D warnings"
+    "format": "cargo fmt --all -- --check",
+    "format:fix": "cargo fmt --all",
+    "lint": "npm run lint:core && npm run lint:browser",
+    "lint:core": "cargo clippy --workspace --exclude swirldb-browser --all-targets --all-features -- -D warnings",
+    "lint:browser": "cd native/swirldb-browser && cargo clippy --target wasm32-unknown-unknown --all-features -- -D warnings",
+    "lint:fix": "npm run lint:fix:core && npm run lint:fix:browser",
+    "lint:fix:core": "cargo clippy --fix --allow-dirty --allow-staged --workspace --exclude swirldb-browser --all-targets --all-features -- -D warnings",
+    "lint:fix:browser": "cd native/swirldb-browser && cargo clippy --fix --allow-dirty --allow-staged --target wasm32-unknown-unknown --all-features -- -D warnings"
   }
 }

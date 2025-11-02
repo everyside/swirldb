@@ -45,11 +45,11 @@ pub trait EncryptionProvider: EncryptionProviderMarker {
 }
 
 // Implementation modules
-mod unencrypted;
 mod aes_gcm;
 mod field_level;
+mod unencrypted;
 
 // Re-exports
-pub use unencrypted::UnencryptedProvider;
 pub use aes_gcm::AesGcmProvider;
 pub use field_level::FieldEncryptionProvider;
+pub use unencrypted::UnencryptedProvider;

@@ -1,9 +1,9 @@
 // Copyright 2025 Everyside Innovations, LLC
 // SPDX-License-Identifier: Apache-2.0
 
+use super::AuthProvider;
 use crate::policy::Actor;
 use std::collections::HashMap;
-use super::AuthProvider;
 
 /// JWT identity provider - decodes JWT claims to get actor
 ///
@@ -34,7 +34,10 @@ impl JwtAuth {
     }
 
     /// Create from pre-parsed claims
-    pub fn from_claims(claims: HashMap<String, serde_json::Value>, token: &str) -> Result<Self, String> {
+    pub fn from_claims(
+        claims: HashMap<String, serde_json::Value>,
+        token: &str,
+    ) -> Result<Self, String> {
         let actor = Actor::from_jwt_claims(claims)?;
 
         Ok(Self {
@@ -54,8 +57,8 @@ impl JwtAuth {
         let payload = parts[1];
         let decoded = Self::base64url_decode(payload)?;
 
-        let json_str = String::from_utf8(decoded)
-            .map_err(|_| "Invalid UTF-8 in JWT payload".to_string())?;
+        let json_str =
+            String::from_utf8(decoded).map_err(|_| "Invalid UTF-8 in JWT payload".to_string())?;
 
         let claims: HashMap<String, serde_json::Value> = serde_json::from_str(&json_str)
             .map_err(|e| format!("Failed to parse JWT claims: {}", e))?;
@@ -65,12 +68,10 @@ impl JwtAuth {
 
     /// Base64url decode (RFC 4648 Section 5)
     fn base64url_decode(input: &str) -> Result<Vec<u8>, String> {
-        use base64::{Engine as _, engine::general_purpose};
+        use base64::{engine::general_purpose, Engine as _};
 
         // Convert base64url to standard base64
-        let standard_b64 = input
-            .replace('-', "+")
-            .replace('_', "/");
+        let standard_b64 = input.replace('-', "+").replace('_', "/");
 
         // Add padding if needed
         let padding = match standard_b64.len() % 4 {

@@ -16,9 +16,9 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use swirldb_core::core::SwirlDB;
+use swirldb_core::policy::{Actor, PolicyEngine};
 use swirldb_core::sync::SubscriptionManager;
-use swirldb_core::policy::{PolicyEngine, Actor};
-use tokio::sync::{broadcast, RwLock, Mutex};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::info;
 use uuid::Uuid;
 
@@ -186,7 +186,8 @@ impl ServerState {
             transport,
             subscriptions: added.clone(),
             timestamp: now,
-        }).await;
+        })
+        .await;
 
         Ok((added, denied))
     }
@@ -202,7 +203,8 @@ impl ServerState {
             self.log_activity(ActivityEvent::ClientDisconnected {
                 client_id: client_info.client_id.clone(),
                 timestamp: now_timestamp(),
-            }).await;
+            })
+            .await;
 
             info!("❌ Client {} disconnected", client_info.client_id);
         }
@@ -219,7 +221,8 @@ impl ServerState {
         remove: Vec<String>,
     ) -> Result<(Vec<String>, Vec<String>)> {
         let mut sub_mgr = self.subscriptions.lock().await;
-        let (added, denied) = sub_mgr.update_subscriptions(client_id, add.clone(), remove.clone())?;
+        let (added, denied) =
+            sub_mgr.update_subscriptions(client_id, add.clone(), remove.clone())?;
 
         // Log activity
         self.log_activity(ActivityEvent::SubscriptionUpdated {
@@ -227,7 +230,8 @@ impl ServerState {
             added: added.clone(),
             removed: remove,
             timestamp: now_timestamp(),
-        }).await;
+        })
+        .await;
 
         Ok((added, denied))
     }
@@ -264,8 +268,12 @@ impl ServerState {
         // Broadcast to subscribers (except sender)
         if !subscribers.is_empty() {
             let total_bytes: usize = changes.iter().map(|c| c.len()).sum();
-            info!("📤 BROADCAST: {} changes ({} bytes) to {} subscribers",
-                changes.len(), total_bytes, subscribers.len());
+            info!(
+                "📤 BROADCAST: {} changes ({} bytes) to {} subscribers",
+                changes.len(),
+                total_bytes,
+                subscribers.len()
+            );
 
             let msg = BroadcastMessage {
                 from_client_id: from_client_id.clone(),
@@ -284,7 +292,8 @@ impl ServerState {
             change_count: changes.len(),
             affected_paths,
             timestamp: now_timestamp(),
-        }).await;
+        })
+        .await;
 
         Ok(())
     }

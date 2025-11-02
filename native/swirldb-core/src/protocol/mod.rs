@@ -47,32 +47,32 @@ impl TryFrom<u8> for MessageType {
 pub enum Message {
     Connect {
         client_id: String,
-        subscriptions: Vec<String>,  // Path patterns to subscribe to
+        subscriptions: Vec<String>, // Path patterns to subscribe to
         heads: Vec<u8>,
     },
     Sync {
-        heads: Vec<u8>,  // Server's current heads (for incremental sync)
+        heads: Vec<u8>, // Server's current heads (for incremental sync)
         changes: Vec<Vec<u8>>,
     },
     Subscribe {
-        add: Vec<String>,     // Add these subscription patterns
-        remove: Vec<String>,  // Remove these subscription patterns
+        add: Vec<String>,    // Add these subscription patterns
+        remove: Vec<String>, // Remove these subscription patterns
     },
     SubscribeAck {
-        added: Vec<String>,   // Successfully added subscriptions
-        denied: Vec<String>,  // Subscriptions denied by policy
+        added: Vec<String>,  // Successfully added subscriptions
+        denied: Vec<String>, // Subscriptions denied by policy
     },
     Push {
-        heads: Vec<u8>,  // Client's current heads (for server to know what client has)
+        heads: Vec<u8>, // Client's current heads (for server to know what client has)
         changes: Vec<Vec<u8>>,
     },
     Broadcast {
         from_client_id: String,
         changes: Vec<Vec<u8>>,
-        affected_paths: Vec<String>,  // Paths modified by these changes
+        affected_paths: Vec<String>, // Paths modified by these changes
     },
     PushAck {
-        heads: Vec<u8>,  // Server's new heads after applying changes
+        heads: Vec<u8>, // Server's new heads after applying changes
     },
     Ping,
     Pong,

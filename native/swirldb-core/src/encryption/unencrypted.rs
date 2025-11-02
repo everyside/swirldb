@@ -1,9 +1,9 @@
 // Copyright 2025 Everyside Innovations, LLC
 // SPDX-License-Identifier: Apache-2.0
 
+use super::{EncryptionProvider, EncryptionProviderMarker};
 use anyhow::Result;
 use async_trait::async_trait;
-use super::{EncryptionProvider, EncryptionProviderMarker};
 
 /// Default unencrypted provider (no-op, data passes through unchanged)
 ///

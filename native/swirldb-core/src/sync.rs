@@ -1,6 +1,8 @@
 // Copyright 2025 Everyside Innovations, LLC
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::policy::{Action, Actor, PolicyEngine};
+use anyhow::{anyhow, Result};
 /// Subscription-based sync protocol for SwirlDB
 ///
 /// This module implements efficient delta syncing using Automerge's built-in
@@ -11,10 +13,8 @@
 /// - **Policy-aware**: Subscribe action validated by PolicyEngine
 /// - **Change filtering**: Only send changes affecting subscribed paths
 /// - **Platform-agnostic**: Lives in core, usable in browser and server
-use serde::{Serialize, Deserialize};
-use crate::policy::{PolicyEngine, Actor, Action};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use anyhow::{Result, anyhow};
 
 /// Sync message types for the subscription-based protocol
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,9 +101,9 @@ impl SubscriptionSet {
     pub fn matches_path(&self, path: &str) -> bool {
         use crate::policy::PathPatternMatcher;
 
-        self.patterns.iter().any(|pattern| {
-            PathPatternMatcher::matches(pattern, path, &self.actor)
-        })
+        self.patterns
+            .iter()
+            .any(|pattern| PathPatternMatcher::matches(pattern, path, &self.actor))
     }
 
     /// Get all subscription patterns
@@ -183,7 +183,9 @@ impl SubscriptionManager {
         add: Vec<String>,
         remove: Vec<String>,
     ) -> Result<(Vec<String>, Vec<String>)> {
-        let sub_set = self.subscriptions.get_mut(client_id)
+        let sub_set = self
+            .subscriptions
+            .get_mut(client_id)
             .ok_or_else(|| anyhow!("Client not found: {}", client_id))?;
 
         sub_set.remove_subscriptions(remove);
@@ -210,9 +212,7 @@ impl SubscriptionManager {
     pub fn get_subscribers_for_paths(&self, paths: &[String]) -> Vec<String> {
         self.subscriptions
             .iter()
-            .filter(|(_, sub_set)| {
-                paths.iter().any(|path| sub_set.matches_path(path))
-            })
+            .filter(|(_, sub_set)| paths.iter().any(|path| sub_set.matches_path(path)))
             .map(|(client_id, _)| client_id.clone())
             .collect()
     }
@@ -383,10 +383,10 @@ mod tests {
         // Try to subscribe to allowed and denied patterns
         let (added, denied) = sub_set.add_subscriptions(
             vec![
-                "/user/alice/**".to_string(),  // ✅ Allowed
-                "/public/**".to_string(),        // ✅ Allowed
-                "/user/bob/**".to_string(),      // ❌ Denied (not alice's data)
-                "/admin/**".to_string(),          // ❌ Denied (no rule allows)
+                "/user/alice/**".to_string(), // ✅ Allowed
+                "/public/**".to_string(),     // ✅ Allowed
+                "/user/bob/**".to_string(),   // ❌ Denied (not alice's data)
+                "/admin/**".to_string(),      // ❌ Denied (no rule allows)
             ],
             Some(&policy),
         );
@@ -433,11 +433,13 @@ mod tests {
         assert_eq!(subscribers.len(), 1);
 
         // Update subscriptions
-        let (added, denied) = manager.update_subscriptions(
-            "alice_client",
-            vec!["/org/acme/**".to_string()], // Should be denied
-            vec!["/public/**".to_string()],   // Remove this
-        ).unwrap();
+        let (added, denied) = manager
+            .update_subscriptions(
+                "alice_client",
+                vec!["/org/acme/**".to_string()], // Should be denied
+                vec!["/public/**".to_string()],   // Remove this
+            )
+            .unwrap();
 
         assert_eq!(added.len(), 0);
         assert_eq!(denied.len(), 1);
