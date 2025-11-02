@@ -65,7 +65,7 @@ fn fire_observers_for_paths(db_id: usize, core: &swirldb_core::SwirlDB, affected
     OBSERVERS.with(|observers| {
         let mut observers_ref = observers.borrow_mut();
 
-        for (id, path, callback, last_value) in observers_ref.iter_mut() {
+        for (id, path, callback, _last_value) in observers_ref.iter_mut() {
             if *id != db_id {
                 continue;
             }
@@ -82,15 +82,22 @@ fn fire_observers_for_paths(db_id: usize, core: &swirldb_core::SwirlDB, affected
             });
 
             if is_affected {
-                // Get current value and fire observer
-                let current = core.get_path(path);
-                let js_value = match &current {
-                    Some(v) => scalar_to_js(v),
+                // Get current value (supports arrays/objects, not just scalars)
+                let js_value = match core.get_value(path) {
+                    Some(value) => {
+                        // Convert to JSON string, then parse in JavaScript
+                        let json_str = value.to_string();
+                        match js_sys::JSON::parse(&json_str) {
+                            Ok(js_val) => js_val,
+                            Err(_) => JsValue::NULL,
+                        }
+                    }
                     None => JsValue::NULL,
                 };
 
+                // Always fire observer for broadcast changes (no change detection needed)
+                // We know the data changed because the server sent us changes
                 let _ = callback.call1(&JsValue::NULL, &js_value);
-                *last_value = current;
             }
         }
     });
@@ -106,15 +113,23 @@ fn fire_all_observers(db_id: usize, core: &swirldb_core::SwirlDB) {
                 continue;
             }
 
-            // Get current value and fire observer
-            let current = core.get_path(path);
-            let js_value = match &current {
-                Some(v) => scalar_to_js(v),
+            // Get current value (supports arrays/objects, not just scalars)
+            let js_value = match core.get_value(path) {
+                Some(value) => {
+                    // Convert to JSON string, then parse in JavaScript
+                    let json_str = value.to_string();
+                    match js_sys::JSON::parse(&json_str) {
+                        Ok(js_val) => js_val,
+                        Err(_) => JsValue::NULL,
+                    }
+                }
                 None => JsValue::NULL,
             };
 
             let _ = callback.call1(&JsValue::NULL, &js_value);
-            *last_value = current;
+
+            // Update last_value for change detection (use scalar for comparison)
+            *last_value = core.get_path(path);
         }
     });
 }
@@ -550,23 +565,31 @@ impl SwirlDB {
                     continue;
                 }
 
-                let current = self.core.get_path(path);
+                let current_scalar = self.core.get_path(path);
 
-                // Compare values
-                let changed = match (&*last_value, &current) {
+                // Compare values (scalars only, for change detection)
+                let changed = match (&*last_value, &current_scalar) {
                     (None, None) => false,
                     (Some(_), None) | (None, Some(_)) => true,
                     (Some(a), Some(b)) => !scalar_values_equal(a, b),
                 };
 
                 if changed {
-                    let js_value = match &current {
-                        Some(v) => scalar_to_js(v),
+                    // Get full value (supports arrays/objects) for observer callback
+                    let js_value = match self.core.get_value(path) {
+                        Some(value) => {
+                            // Convert to JSON string, then parse in JavaScript
+                            let json_str = value.to_string();
+                            match js_sys::JSON::parse(&json_str) {
+                                Ok(js_val) => js_val,
+                                Err(_) => JsValue::NULL,
+                            }
+                        }
                         None => JsValue::NULL,
                     };
 
                     let _ = callback.call1(&JsValue::NULL, &js_value);
-                    *last_value = current;
+                    *last_value = current_scalar;
                 }
             }
         });

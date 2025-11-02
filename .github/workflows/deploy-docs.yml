@@ -44,10 +44,23 @@ jobs:
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
-      - name: Build WASM package
+      - name: Install build dependencies
         run: |
           cd native/swirldb-browser
+          npm install
+
+      - name: Build WASM package and TypeScript wrapper
+        run: |
+          cd native/swirldb-browser
+          # Build WASM
           wasm-pack build --target web --out-dir ../../docs/public/wasm
+          # Copy to admin as well
+          cp -r ../../docs/public/wasm/* ../../admin/public/wasm/ 2>/dev/null || mkdir -p ../../admin/public/wasm/ && cp -r ../../docs/public/wasm/* ../../admin/public/wasm/
+          # Build TypeScript wrapper
+          npm run build:wrapper
+          # Copy wrapper to docs and admin
+          cp pkg/swirldb.js ../../docs/public/
+          cp pkg/swirldb.js ../../admin/public/
 
       - name: Install docs dependencies
         run: |

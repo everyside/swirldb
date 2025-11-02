@@ -379,7 +379,8 @@
     const isSecure = window.location.protocol === 'https:';
     const WS_PROTOCOL = isSecure ? 'wss:' : 'ws:';
     const HTTP_PROTOCOL = isSecure ? 'https:' : 'http:';
-    const SERVER_HOST = 'demo.swirldb.org:3030';
+    // Use localhost for local development, demo server for production
+    const SERVER_HOST = window.location.hostname === 'localhost' ? 'localhost:3030' : 'demo.swirldb.org:3030';
 
     function getWebSocketUrl(path) {
       return `${WS_PROTOCOL}//${SERVER_HOST}${path}`;

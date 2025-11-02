@@ -11,7 +11,7 @@
     "docs:preview": "cd docs && pnpm run preview",
     "start": "pnpm run docs",
     "build": "pnpm run build:wasm",
-    "build:wasm": "cd native/swirldb-browser && pnpm run build:wasm",
+    "build:wasm": "cd native/swirldb-browser && pnpm run build",
     "build:server": "cd native/swirldb-server && cargo build --release",
     "test": "pnpm run format && pnpm run lint && pnpm run test:core && pnpm run test:server && pnpm run test:browser",
     "test:core": "cd native/swirldb-core && cargo test",

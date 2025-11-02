@@ -19,10 +19,14 @@ packages/swirldb-js/wasm/*
 !packages/swirldb-js/wasm/.gitkeep
 docs/public/wasm/*
 !docs/public/wasm/.gitkeep
-docs/public/swirldb*.js
-docs/public/swirldb*.d.ts
-admin/public/swirldb*.js
-admin/public/swirldb*.d.ts
+docs/public/swirldb_browser*.js
+docs/public/swirldb_browser*.d.ts
+docs/public/swirldb_core*.js
+docs/public/swirldb_core*.d.ts
+admin/public/swirldb_browser*.js
+admin/public/swirldb_browser*.d.ts
+admin/public/swirldb_core*.js
+admin/public/swirldb_core*.d.ts
 
 # IDE / Editors
 .vscode/

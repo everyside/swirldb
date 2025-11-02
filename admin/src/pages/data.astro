@@ -1045,7 +1045,7 @@
       const list = document.getElementById('namespace-list');
 
       try {
-        const namespaces = adminDB.getPath('namespaces');
+        const namespaces = adminDB.data.namespaces.$value;
 
         if (!namespaces) {
           list.innerHTML = '<li class="browser-list-item" style="padding: 2rem; text-align: center; color: var(--text-muted); cursor: default;">No namespaces</li>';
