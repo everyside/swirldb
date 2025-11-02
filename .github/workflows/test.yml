@@ -46,7 +46,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Install dependencies
+      - name: Install pnpm dependencies
         run: pnpm install
 
       - name: Install browser dependencies
@@ -55,10 +55,42 @@ jobs:
       - name: Check formatting
         run: pnpm run format
 
-      - name: Run lint
+      - name: Lint code
         run: pnpm run lint
 
-  build:
+  test-rust:
+    runs-on: ubuntu-24.04
+    needs: lint
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Run Rust tests (core + server)
+        run: pnpm run test:rust
+
+  test-browser:
     runs-on: ubuntu-24.04
     needs: lint
 
@@ -81,6 +113,7 @@ jobs:
         with:
           node-version: '20'
           cache: 'pnpm'
+          cache-dependency-path: native/swirldb-browser/pnpm-lock.yaml
 
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
@@ -98,91 +131,8 @@ jobs:
       - name: Install browser dependencies
         run: cd native/swirldb-browser && pnpm install
 
-      - name: Build all targets
-        run: |
-          cargo build --workspace --all-targets --all-features
-          cargo build -p swirldb-browser --target wasm32-unknown-unknown --all-features
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-artifacts
-          path: target/
-          retention-days: 1
-
-  test-core:
-    runs-on: ubuntu-24.04
-    needs: build
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: build-artifacts
-          path: target/
-
-      - name: Run core tests
-        run: cd native/swirldb-core && cargo test --no-fail-fast
-
-  test-server:
-    runs-on: ubuntu-24.04
-    needs: build
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: build-artifacts
-          path: target/
-
-      - name: Run server tests
-        run: cd native/swirldb-server && cargo test --no-fail-fast
-
-  test-browser:
-    runs-on: ubuntu-24.04
-    needs: build
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'pnpm'
-          cache-dependency-path: native/swirldb-browser/pnpm-lock.yaml
-
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: build-artifacts
-          path: target/
-
-      - name: Install browser dependencies
-        run: cd native/swirldb-browser && pnpm install
-
-      - name: Run browser tests (Chrome headless)
-        run: cd native/swirldb-browser && pnpm run test:chrome
+      - name: Run browser tests
+        run: pnpm run test:browser
