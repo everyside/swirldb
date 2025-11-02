@@ -12,7 +12,7 @@ Cross-platform CRDT database built on Automerge. Runs in browsers via WebAssembl
 ## Design
 
 - **CRDT-based**: Built on Automerge for automatic conflict resolution
-- **Cross-platform**: Browser WASM and native Rust server with different optimizations
+- **Cross-platform**: Browser WASM (~489KB gzipped) and native Rust server with different optimizations
 - **Pluggable storage**: In-memory, LocalStorage, IndexedDB, or redb
 - **Real-time sync**: WebSocket-based synchronization server
 - **Observable**: Field-level change tracking via observers
