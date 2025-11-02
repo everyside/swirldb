@@ -327,13 +327,11 @@ impl SwirlDB {
 
             if should_optimize && !new_arr.is_empty() {
                 // Check if there's already an optimized array (stored as a map) at this location
-                if let Ok(Some((existing_val, existing_obj_id))) = doc.get(parent, key) {
-                    if let automerge::Value::Object(automerge::ObjType::Map) = existing_val {
-                        // Existing optimized array found - perform smart diff!
-                        // Only sync changed/added/removed items instead of the entire array
-                        self.update_array_as_map(doc, &existing_obj_id, new_arr)?;
-                        return Ok(());
-                    }
+                if let Ok(Some((automerge::Value::Object(automerge::ObjType::Map), existing_obj_id))) = doc.get(parent, key) {
+                    // Existing optimized array found - perform smart diff!
+                    // Only sync changed/added/removed items instead of the entire array
+                    self.update_array_as_map(doc, &existing_obj_id, new_arr)?;
+                    return Ok(());
                 }
                 // Fall through to normal array-to-map conversion for new arrays
             }
@@ -562,6 +560,7 @@ impl SwirlDB {
     ///
     /// The obj_id parameter is the ID of the object if value is Value::Object,
     /// and comes from the second element of the tuple returned by doc.get()
+    #[allow(clippy::only_used_in_recursion)]
     fn automerge_to_json(&self, doc: &AutoCommit, value: &AutoValue, obj_id: &ObjId) -> JsonValue {
         use automerge::Value;
 

@@ -9,7 +9,6 @@
 /// - Pluggable storage (redb, memory, etc.)
 /// - Binary protocol for minimal overhead
 /// - Lock-free data structures for scalability
-
 mod state;
 mod storage;
 
@@ -51,7 +50,7 @@ async fn main() -> Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(3030);
 
-    let http_port = env::var("HTTP_PORT")
+    let _http_port = env::var("HTTP_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(3031);

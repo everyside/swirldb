@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = [
+    "native/swirldb-core",
+    "native/swirldb-server",
+    "native/swirldb-browser",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+authors = ["Everyside Innovations, LLC"]
+license = "Apache-2.0"

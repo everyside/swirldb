@@ -5,7 +5,6 @@
 ///
 /// Wire format is designed for minimal overhead with length-prefixed messages.
 /// All multi-byte integers are big-endian (network byte order).
-
 use anyhow::{anyhow, Context, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
@@ -151,8 +150,6 @@ impl Message {
             MessageType::Ping => Ok(Self::Ping),
 
             MessageType::Pong => Ok(Self::Pong),
-
-            _ => Err(anyhow!("Cannot decode message type: {:?}", msg_type)),
         }
     }
 
@@ -224,8 +221,6 @@ impl Message {
                 buf.put_u8(MessageType::Error as u8);
                 write_string(&mut buf, message);
             }
-
-            _ => {}
         }
 
         buf.to_vec()

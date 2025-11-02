@@ -11,7 +11,6 @@
 /// - **Policy-aware**: Subscribe action validated by PolicyEngine
 /// - **Change filtering**: Only send changes affecting subscribed paths
 /// - **Platform-agnostic**: Lives in core, usable in browser and server
-
 use serde::{Serialize, Deserialize};
 use crate::policy::{PolicyEngine, Actor, Action};
 use std::collections::HashMap;

@@ -6,7 +6,6 @@
 /// Server storage uses DocumentStorage from core for saving/loading state.
 /// With the global CRDT design, we no longer need separate ChangeLog adapters.
 /// Change history is maintained by Automerge and accessed via SwirlDB methods.
-
 use serde::{Deserialize, Serialize};
 
 // Re-export core storage traits
