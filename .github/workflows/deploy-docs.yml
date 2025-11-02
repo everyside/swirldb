@@ -104,8 +104,10 @@ jobs:
 
       - name: Deploy to server
         run: |
-          scp -i ~/.ssh/deploy_key swirldb-server ubuntu@demo.swirldb.org:/home/ubuntu/swirldb-server
-          ssh -i ~/.ssh/deploy_key ubuntu@demo.swirldb.org "sudo systemctl restart swirldb"
+          # Upload to temp location first (can't overwrite running binary)
+          scp -i ~/.ssh/deploy_key swirldb-server ubuntu@demo.swirldb.org:/home/ubuntu/swirldb-server.new
+          # Backup old (if exists), replace with new, and restart
+          ssh -i ~/.ssh/deploy_key ubuntu@demo.swirldb.org "test -f /home/ubuntu/swirldb-server && mv /home/ubuntu/swirldb-server /home/ubuntu/swirldb-server.backup || true && mv /home/ubuntu/swirldb-server.new /home/ubuntu/swirldb-server && sudo systemctl restart swirldb"
 
       - name: Verify deployment
         run: |
