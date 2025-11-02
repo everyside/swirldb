@@ -10,7 +10,7 @@ pub struct AnonymousAuth;
 
 impl AnonymousAuth {
     pub fn new() -> Self {
-        AnonymousAuth
+        Self
     }
 }
 

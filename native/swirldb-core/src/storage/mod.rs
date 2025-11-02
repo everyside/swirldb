@@ -63,7 +63,7 @@ pub struct InMemoryDocStorage {
 
 impl InMemoryDocStorage {
     pub fn new() -> Self {
-        InMemoryDocStorage {
+        Self {
             data: RwLock::new(HashMap::new()),
         }
     }

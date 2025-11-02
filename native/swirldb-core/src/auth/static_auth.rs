@@ -17,7 +17,7 @@ pub struct StaticAuth {
 impl StaticAuth {
     /// Create with a specific user ID
     pub fn new(user_id: &str) -> Self {
-        StaticAuth {
+        Self {
             actor: Actor {
                 actor_type: ActorType::User,
                 id: user_id.to_string(),
@@ -37,7 +37,7 @@ impl StaticAuth {
         team_id: Option<String>,
         role: Option<String>,
     ) -> Self {
-        StaticAuth {
+        Self {
             actor: Actor {
                 actor_type: ActorType::User,
                 id: user_id.to_string(),
@@ -52,7 +52,7 @@ impl StaticAuth {
 
     /// Create for an app actor
     pub fn app(app_id: &str) -> Self {
-        StaticAuth {
+        Self {
             actor: Actor {
                 actor_type: ActorType::App,
                 id: app_id.to_string(),
@@ -67,7 +67,7 @@ impl StaticAuth {
 
     /// Create for a server actor
     pub fn server(server_id: &str) -> Self {
-        StaticAuth {
+        Self {
             actor: Actor {
                 actor_type: ActorType::Server,
                 id: server_id.to_string(),

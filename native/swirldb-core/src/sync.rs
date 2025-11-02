@@ -278,6 +278,12 @@ pub struct SyncState {
     pub last_sync: Option<u64>,
 }
 
+impl Default for SyncState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SyncState {
     pub fn new() -> Self {
         Self {

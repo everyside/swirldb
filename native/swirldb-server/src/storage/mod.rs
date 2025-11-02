@@ -10,7 +10,6 @@
 use serde::{Deserialize, Serialize};
 
 // Re-export core storage traits
-pub use swirldb_core::storage::DocumentStorage;
 
 /// Storage statistics (server-specific helper)
 #[derive(Debug, Clone, Serialize, Deserialize)]

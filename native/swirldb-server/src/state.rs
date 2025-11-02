@@ -20,7 +20,7 @@ use swirldb_core::core::SwirlDB;
 use swirldb_core::sync::SubscriptionManager;
 use swirldb_core::policy::{PolicyEngine, Actor};
 use tokio::sync::{broadcast, RwLock, Mutex};
-use tracing::{error, info, warn};
+use tracing::info;
 use uuid::Uuid;
 
 /// Maximum number of messages to buffer in broadcast channel
@@ -236,7 +236,7 @@ impl ServerState {
     ) -> Result<()> {
         // Apply changes to global DB
         {
-            let mut db = self.db.write().await;
+            let db = self.db.write().await;
             db.apply_changes(changes.clone())?;
         }
 

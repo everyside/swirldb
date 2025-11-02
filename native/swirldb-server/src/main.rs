@@ -16,19 +16,17 @@ mod storage;
 use anyhow::Result;
 use axum::{
     extract::{
-        ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
-        Query, State as AxumState,
+        ws::{Message as WsMessage, WebSocket, WebSocketUpgrade}, State as AxumState,
     },
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::get,
     Json, Router,
 };
 use futures::{SinkExt, StreamExt};
 use swirldb_core::protocol::Message;
 use state::{ServerState, ServerStats};
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::{env, fs, io::BufReader, time::Duration};
 use tokio::time::interval;
@@ -118,7 +116,7 @@ async fn main() -> Result<()> {
 
 /// Load TLS configuration from certificate and key files
 fn load_tls_config(cert_path: &str, key_path: &str) -> Result<axum_server::tls_rustls::RustlsConfig> {
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use rustls::pki_types::CertificateDer;
 
     // Read certificate file
     let cert_file = fs::File::open(cert_path)?;
@@ -375,7 +373,7 @@ async fn handle_websocket(socket: WebSocket, state: ServerState) {
                             continue;
                         }
 
-                        if let Some(_) = &client_info {
+                        if client_info.is_some() {
                             let broadcast_msg = Message::Broadcast {
                                 from_client_id: msg.from_client_id,
                                 changes: msg.changes,

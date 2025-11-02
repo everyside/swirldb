@@ -27,7 +27,7 @@ impl JwtAuth {
         let claims = Self::decode_claims(token)?;
         let actor = Actor::from_jwt_claims(claims)?;
 
-        Ok(JwtAuth {
+        Ok(Self {
             actor,
             token: token.to_string(),
         })
@@ -37,7 +37,7 @@ impl JwtAuth {
     pub fn from_claims(claims: HashMap<String, serde_json::Value>, token: &str) -> Result<Self, String> {
         let actor = Actor::from_jwt_claims(claims)?;
 
-        Ok(JwtAuth {
+        Ok(Self {
             actor,
             token: token.to_string(),
         })

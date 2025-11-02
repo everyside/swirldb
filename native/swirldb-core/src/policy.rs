@@ -219,7 +219,7 @@ pub enum ActorType {
 impl Actor {
     /// Create an anonymous actor (no JWT)
     pub fn anonymous() -> Self {
-        Actor {
+        Self {
             actor_type: ActorType::Anonymous,
             id: "anonymous".to_string(),
             org_id: None,
@@ -253,7 +253,7 @@ impl Actor {
         let app_id = claims.get("app_id").and_then(|v| v.as_str()).map(String::from);
         let role = claims.get("role").and_then(|v| v.as_str()).map(String::from);
 
-        Ok(Actor {
+        Ok(Self {
             actor_type,
             id,
             org_id,
@@ -388,7 +388,7 @@ pub struct PolicyEngine {
 
 impl PolicyEngine {
     pub fn new(config: SwirlDBConfig) -> Self {
-        PolicyEngine { config }
+        Self { config }
     }
 
     /// Parse config from JSON string

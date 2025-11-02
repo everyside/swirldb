@@ -28,18 +28,18 @@ impl TryFrom<u8> for MessageType {
     type Error = anyhow::Error;
 
     fn try_from(value: u8) -> Result<Self> {
-        match value {
-            0x01 => Ok(MessageType::Connect),
-            0x02 => Ok(MessageType::Sync),
-            0x03 => Ok(MessageType::Push),
-            0x04 => Ok(MessageType::Broadcast),
-            0x05 => Ok(MessageType::PushAck),
-            0x06 => Ok(MessageType::SubscribeAck),
-            0x10 => Ok(MessageType::Ping),
-            0x11 => Ok(MessageType::Pong),
-            0xFF => Ok(MessageType::Error),
-            _ => Err(anyhow!("Unknown message type: 0x{:02x}", value)),
-        }
+        Ok(match value {
+            0x01 => Self::Connect,
+            0x02 => Self::Sync,
+            0x03 => Self::Push,
+            0x04 => Self::Broadcast,
+            0x05 => Self::PushAck,
+            0x06 => Self::SubscribeAck,
+            0x10 => Self::Ping,
+            0x11 => Self::Pong,
+            0xFF => Self::Error,
+            _ => return Err(anyhow!("Unknown message type: 0x{:02x}", value)),
+        })
     }
 }
 
@@ -102,7 +102,7 @@ impl Message {
                     Vec::new()
                 };
 
-                Ok(Message::Connect {
+                Ok(Self::Connect {
                     client_id,
                     subscriptions,
                     heads,
@@ -112,26 +112,26 @@ impl Message {
             MessageType::Push => {
                 let heads = read_bytes(&mut buf)?;
                 let changes = read_changes(&mut buf)?;
-                Ok(Message::Push { heads, changes })
+                Ok(Self::Push { heads, changes })
             }
 
             MessageType::Sync => {
                 let heads = read_bytes(&mut buf)?;
                 let changes = read_changes(&mut buf)?;
-                Ok(Message::Sync { heads, changes })
+                Ok(Self::Sync { heads, changes })
             }
 
             MessageType::SubscribeAck => {
                 let added = read_string_array(&mut buf)?;
                 let denied = read_string_array(&mut buf)?;
-                Ok(Message::SubscribeAck { added, denied })
+                Ok(Self::SubscribeAck { added, denied })
             }
 
             MessageType::Broadcast => {
                 let from_client_id = read_string(&mut buf)?;
                 let changes = read_changes(&mut buf)?;
                 let affected_paths = read_string_array(&mut buf)?;
-                Ok(Message::Broadcast {
+                Ok(Self::Broadcast {
                     from_client_id,
                     changes,
                     affected_paths,
@@ -140,17 +140,17 @@ impl Message {
 
             MessageType::PushAck => {
                 let heads = read_bytes(&mut buf)?;
-                Ok(Message::PushAck { heads })
+                Ok(Self::PushAck { heads })
             }
 
             MessageType::Error => {
                 let message = read_string(&mut buf)?;
-                Ok(Message::Error { message })
+                Ok(Self::Error { message })
             }
 
-            MessageType::Ping => Ok(Message::Ping),
+            MessageType::Ping => Ok(Self::Ping),
 
-            MessageType::Pong => Ok(Message::Pong),
+            MessageType::Pong => Ok(Self::Pong),
 
             _ => Err(anyhow!("Cannot decode message type: {:?}", msg_type)),
         }
@@ -161,7 +161,7 @@ impl Message {
         let mut buf = BytesMut::new();
 
         match self {
-            Message::Connect {
+            Self::Connect {
                 client_id,
                 subscriptions,
                 heads,
@@ -172,31 +172,31 @@ impl Message {
                 write_bytes(&mut buf, heads);
             }
 
-            Message::Sync { heads, changes } => {
+            Self::Sync { heads, changes } => {
                 buf.put_u8(MessageType::Sync as u8);
                 write_bytes(&mut buf, heads);
                 write_changes(&mut buf, changes);
             }
 
-            Message::Subscribe { add, remove } => {
+            Self::Subscribe { add, remove } => {
                 buf.put_u8(MessageType::Connect as u8); // TODO: Add Subscribe type
                 write_string_array(&mut buf, add);
                 write_string_array(&mut buf, remove);
             }
 
-            Message::SubscribeAck { added, denied } => {
+            Self::SubscribeAck { added, denied } => {
                 buf.put_u8(MessageType::SubscribeAck as u8);
                 write_string_array(&mut buf, added);
                 write_string_array(&mut buf, denied);
             }
 
-            Message::Push { heads, changes } => {
+            Self::Push { heads, changes } => {
                 buf.put_u8(MessageType::Push as u8);
                 write_bytes(&mut buf, heads);
                 write_changes(&mut buf, changes);
             }
 
-            Message::Broadcast {
+            Self::Broadcast {
                 from_client_id,
                 changes,
                 affected_paths,
@@ -207,20 +207,20 @@ impl Message {
                 write_string_array(&mut buf, affected_paths);
             }
 
-            Message::PushAck { heads } => {
+            Self::PushAck { heads } => {
                 buf.put_u8(MessageType::PushAck as u8);
                 write_bytes(&mut buf, heads);
             }
 
-            Message::Ping => {
+            Self::Ping => {
                 buf.put_u8(MessageType::Ping as u8);
             }
 
-            Message::Pong => {
+            Self::Pong => {
                 buf.put_u8(MessageType::Pong as u8);
             }
 
-            Message::Error { message } => {
+            Self::Error { message } => {
                 buf.put_u8(MessageType::Error as u8);
                 write_string(&mut buf, message);
             }

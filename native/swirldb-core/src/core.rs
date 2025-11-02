@@ -42,7 +42,7 @@ pub struct SwirlDB {
 impl SwirlDB {
     /// Create a new SwirlDB instance with default in-memory storage
     pub fn new() -> Self {
-        SwirlDB {
+        Self {
             doc: Arc::new(Mutex::new(AutoCommit::new())),
             observers: Arc::new(Mutex::new(Vec::new())),
             storage: Arc::new(crate::storage::InMemoryDocStorage::new()),
@@ -74,7 +74,7 @@ impl SwirlDB {
             _ => AutoCommit::new(),
         };
 
-        SwirlDB {
+        Self {
             doc: Arc::new(Mutex::new(doc)),
             observers: Arc::new(Mutex::new(Vec::new())),
             storage,
@@ -850,7 +850,7 @@ fn resolve_path(doc: &mut AutoCommit, path: &[String], create: bool) -> Option<O
 
         match result {
             Some((_, obj_id)) => {
-                current = obj_id.into();
+                current = obj_id;
             }
             None if create => {
                 let new_obj = doc.put_object(&current, key.as_str(), automerge::ObjType::Map).ok()?;
@@ -885,7 +885,7 @@ fn resolve_path_read(doc: &AutoCommit, path: &[String]) -> Option<ObjId> {
 
         match result {
             Some((_, obj_id)) => {
-                current = obj_id.into();
+                current = obj_id;
             }
             None => return None,
         }
