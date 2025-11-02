@@ -33,6 +33,11 @@ Cross-platform CRDT database built on Automerge. Runs in browsers via WebAssembl
 
 See [BUILD.md](./BUILD.md) for build instructions.
 
+## Prerequisites
+
+- **Rust** - Install from [rustup.rs](https://rustup.rs)
+- **pnpm** - Install with `npm install -g pnpm` or `brew install pnpm`
+
 ## Quick Start
 
 ### Browser (WASM)
@@ -40,7 +45,7 @@ See [BUILD.md](./BUILD.md) for build instructions.
 **1. Build the WASM package:**
 ```bash
 # From repository root
-npm run build:wasm
+pnpm run build:wasm
 ```
 
 **2. Use in your application:**
@@ -77,7 +82,7 @@ const db = await SwirlDB.create();
 ### Build WASM for Browser
 
 ```bash
-npm run build:wasm
+pnpm run build:wasm
 ```
 
 ### Build Server
@@ -90,8 +95,7 @@ cargo build --release
 ### Run Tests
 
 ```bash
-cd native/swirldb-core
-cargo test
+pnpm test
 ```
 
 See [BUILD.md](./BUILD.md) for detailed build instructions.

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 // Re-export core storage traits
 
 /// Storage statistics (server-specific helper)
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageStats {
     pub connection_count: usize,

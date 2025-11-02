@@ -446,6 +446,7 @@ async fn heartbeat_task(state: ServerState) {
 }
 
 /// Error wrapper for Axum handlers
+#[allow(dead_code)]
 struct AppError(anyhow::Error);
 
 impl IntoResponse for AppError {
