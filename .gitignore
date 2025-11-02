@@ -17,6 +17,12 @@ packages/browser-wasm/*
 !packages/browser-wasm/.gitkeep
 packages/swirldb-js/wasm/*
 !packages/swirldb-js/wasm/.gitkeep
+docs/public/wasm/*
+!docs/public/wasm/.gitkeep
+docs/public/swirldb*.js
+docs/public/swirldb*.d.ts
+admin/public/swirldb*.js
+admin/public/swirldb*.d.ts
 
 # IDE / Editors
 .vscode/
