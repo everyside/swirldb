@@ -99,10 +99,13 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
       - name: Build server binary
-        run: |
-          cd native/swirldb-server
-          cargo build --release
+        run: pnpm run build:server
 
       - name: Setup SSH
         run: |
@@ -113,7 +116,7 @@ jobs:
 
       - name: Deploy to server
         run: |
-          scp -i ~/.ssh/deploy_key native/swirldb-server/target/release/swirldb-server ubuntu@demo.swirldb.org:/home/ubuntu/swirldb-server
+          scp -i ~/.ssh/deploy_key target/release/swirldb-server ubuntu@demo.swirldb.org:/home/ubuntu/swirldb-server
           ssh -i ~/.ssh/deploy_key ubuntu@demo.swirldb.org "sudo systemctl restart swirldb"
 
       - name: Verify deployment
