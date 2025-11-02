@@ -47,7 +47,7 @@ jobs:
       - name: Install build dependencies
         run: |
           cd native/swirldb-browser
-          npm install
+          pnpm install
 
       - name: Build WASM package and TypeScript wrapper
         run: |
@@ -57,7 +57,7 @@ jobs:
           # Copy to admin as well
           cp -r ../../docs/public/wasm/* ../../admin/public/wasm/ 2>/dev/null || mkdir -p ../../admin/public/wasm/ && cp -r ../../docs/public/wasm/* ../../admin/public/wasm/
           # Build TypeScript wrapper
-          npm run build:wrapper
+          pnpm run build:wrapper
           # Copy wrapper to docs and admin
           cp pkg/swirldb.js ../../docs/public/
           cp pkg/swirldb.js ../../admin/public/
