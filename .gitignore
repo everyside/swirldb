@@ -15,6 +15,8 @@ yarn-error.log*
 *.wasm
 packages/browser-wasm/*
 !packages/browser-wasm/.gitkeep
+packages/swirldb-js/wasm/*
+!packages/swirldb-js/wasm/.gitkeep
 
 # IDE / Editors
 .vscode/
