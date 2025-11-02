@@ -128,9 +128,10 @@ impl SwirlDB {
 
     /// Manually persist the current state to storage
     pub async fn persist(&self) -> Result<()> {
-        let mut doc = self.doc.lock().unwrap();
-        let bytes = doc.save();
-        drop(doc);
+        let bytes = {
+            let mut doc = self.doc.lock().unwrap();
+            doc.save()
+        };
         self.storage.save(&self.storage_key, &bytes).await
     }
 

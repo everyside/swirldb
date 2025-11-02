@@ -31,9 +31,3 @@ uuid = { version = "1.18", features = ["v4", "js"] }  # js feature required for 
 
 [dev-dependencies]
 futures = "0.3"
-
-[profile.release]
-# Optimize for speed
-opt-level = 3
-lto = true
-codegen-units = 1

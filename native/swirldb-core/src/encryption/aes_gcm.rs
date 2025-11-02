@@ -5,7 +5,7 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use aes_gcm::{
     aead::{Aead, KeyInit, OsRng},
-    Aes256Gcm, Nonce,
+    Aes256Gcm,
 };
 use rand::RngCore;
 use hkdf::Hkdf;
@@ -69,7 +69,7 @@ impl EncryptionProvider for AesGcmProvider {
     async fn encrypt(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
         let mut nonce_bytes = [0u8; 12];
         OsRng.fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
+        let nonce = &nonce_bytes.into();
 
         let ciphertext = self
             .cipher
@@ -88,7 +88,9 @@ impl EncryptionProvider for AesGcmProvider {
             return Err(anyhow!("Ciphertext too short (missing nonce)"));
         }
 
-        let nonce = Nonce::from_slice(&ciphertext[..12]);
+        let nonce_bytes: [u8; 12] = ciphertext[..12].try_into()
+            .map_err(|_| anyhow!("Invalid nonce length"))?;
+        let nonce = &nonce_bytes.into();
         let encrypted_data = &ciphertext[12..];
 
         let plaintext = self

@@ -20,8 +20,7 @@
     "server": "cd native/swirldb-server && cargo run --release",
     "clean": "cargo clean && rm -rf docs/dist packages/browser-wasm/*",
     "fmt": "cargo fmt --all",
-    "lint": "cargo clippy --workspace --exclude swirldb-browser --all-targets --all-features -- -W clippy::use_self",
-    "lint:fix": "cargo clippy --fix --allow-dirty --allow-staged --workspace --exclude swirldb-browser --all-targets --all-features -- -W clippy::use_self -A clippy::await-holding-lock",
-    "lint:strict": "cargo clippy --workspace --exclude swirldb-browser --all-targets --all-features -- -D warnings"
+    "lint": "cargo clippy --workspace --exclude swirldb-browser --all-targets --all-features -- -D warnings",
+    "lint:fix": "cargo clippy --fix --allow-dirty --allow-staged --workspace --exclude swirldb-browser --all-targets --all-features -- -D warnings"
   }
 }

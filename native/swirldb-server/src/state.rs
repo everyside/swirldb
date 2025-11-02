@@ -42,6 +42,7 @@ pub enum ActivityEvent {
         client_id: String,
         timestamp: i64,
     },
+    #[allow(dead_code)]
     SubscriptionUpdated {
         client_id: String,
         added: Vec<String>,
@@ -60,10 +61,15 @@ pub enum ActivityEvent {
 #[derive(Debug, Clone)]
 pub struct ClientInfo {
     pub client_id: String,
+    #[allow(dead_code)]
     pub connection_id: Uuid,
+    #[allow(dead_code)]
     pub actor: Actor,
+    #[allow(dead_code)]
     pub transport: String,
+    #[allow(dead_code)]
     pub connected_at: i64,
+    #[allow(dead_code)]
     pub last_seen: i64,
 }
 
@@ -205,6 +211,7 @@ impl ServerState {
     }
 
     /// Update client subscriptions dynamically
+    #[allow(dead_code)]
     pub async fn update_subscriptions(
         &self,
         client_id: &str,
@@ -283,6 +290,7 @@ impl ServerState {
     }
 
     /// Get client info
+    #[allow(dead_code)]
     pub fn get_client(&self, connection_id: &Uuid) -> Option<ClientInfo> {
         self.clients.get(connection_id).map(|r| r.clone())
     }
@@ -303,6 +311,7 @@ impl ServerState {
     }
 
     /// Get recent activity log
+    #[allow(dead_code)]
     pub async fn get_activity_log(&self) -> Vec<ActivityEvent> {
         self.activity_log.read().await.iter().cloned().collect()
     }
