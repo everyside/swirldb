@@ -5,7 +5,6 @@ on:
     workflows: ["Test"]
     types: [completed]
     branches: [main]
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -19,10 +18,18 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Download browser artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: browser-wasm
+          path: browser-wasm
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -36,31 +43,16 @@ jobs:
           cache: 'pnpm'
           cache-dependency-path: docs/pnpm-lock.yaml
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-
-      - name: Install build dependencies
+      - name: Copy WASM artifacts to docs and admin
         run: |
-          cd native/swirldb-browser
-          pnpm install
-
-      - name: Build WASM package and TypeScript wrapper
-        run: |
-          cd native/swirldb-browser
-          # Build WASM
-          wasm-pack build --target web --out-dir ../../docs/public/wasm
-          # Copy to admin as well
-          cp -r ../../docs/public/wasm/* ../../admin/public/wasm/ 2>/dev/null || mkdir -p ../../admin/public/wasm/ && cp -r ../../docs/public/wasm/* ../../admin/public/wasm/
-          # Build TypeScript wrapper
-          pnpm run build:wrapper
-          # Copy wrapper to docs and admin
-          cp pkg/swirldb.js ../../docs/public/
-          cp pkg/swirldb.js ../../admin/public/
+          # Copy to docs
+          mkdir -p docs/public/wasm
+          cp browser-wasm/swirldb_browser* docs/public/wasm/
+          cp browser-wasm/swirldb.js docs/public/
+          # Copy to admin
+          mkdir -p admin/public/wasm
+          cp browser-wasm/swirldb_browser* admin/public/wasm/
+          cp browser-wasm/swirldb.js admin/public/
 
       - name: Install docs dependencies
         run: |
@@ -91,21 +83,17 @@ jobs:
   deploy-server:
     runs-on: ubuntu-24.04
     needs: build
-    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+      - name: Download server binary artifact
+        uses: actions/download-artifact@v4
         with:
-          version: 10
+          name: swirldb-server
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ github.event.workflow_run.id }}
 
-      - name: Build server binary
-        run: pnpm run build:server
+      - name: Make binary executable
+        run: chmod +x swirldb-server
 
       - name: Setup SSH
         run: |
@@ -116,7 +104,7 @@ jobs:
 
       - name: Deploy to server
         run: |
-          scp -i ~/.ssh/deploy_key target/release/swirldb-server ubuntu@demo.swirldb.org:/home/ubuntu/swirldb-server
+          scp -i ~/.ssh/deploy_key swirldb-server ubuntu@demo.swirldb.org:/home/ubuntu/swirldb-server
           ssh -i ~/.ssh/deploy_key ubuntu@demo.swirldb.org "sudo systemctl restart swirldb"
 
       - name: Verify deployment

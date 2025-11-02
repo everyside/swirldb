@@ -136,3 +136,73 @@ jobs:
 
       - name: Run browser tests
         run: pnpm run test:browser
+
+  build-artifacts:
+    runs-on: ubuntu-24.04
+    needs: [test-rust, test-browser]
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Install browser dependencies
+        run: cd native/swirldb-browser && pnpm install
+
+      - name: Build server binary
+        run: pnpm run build:server
+
+      - name: Build browser WASM and TypeScript wrapper
+        run: |
+          cd native/swirldb-browser
+          # Build WASM
+          wasm-pack build --target web --out-dir pkg
+          # Build TypeScript wrapper
+          pnpm run build:wrapper
+
+      - name: Upload server binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: swirldb-server
+          path: target/release/swirldb-server
+          retention-days: 7
+
+      - name: Upload browser artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-wasm
+          path: |
+            native/swirldb-browser/pkg/
+          retention-days: 7
