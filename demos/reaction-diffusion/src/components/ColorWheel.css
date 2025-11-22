@@ -1,0 +1,14 @@
+.color-wheel-popup {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 1rem;
+  margin: 1rem 0;
+}
+
+.color-wheel-canvas {
+  border-radius: 50%;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+  touch-action: none;
+  display: block;
+}
