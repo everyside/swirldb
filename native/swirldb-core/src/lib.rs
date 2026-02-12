@@ -22,6 +22,9 @@ pub mod policy;
 // Auth providers - pluggable authentication
 pub mod auth;
 
+// Path tracking - field-level change tracking
+pub mod paths;
+
 // Re-export automerge types for convenience
 pub use automerge;
 
