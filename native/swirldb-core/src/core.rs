@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::auth::{AnonymousAuth, AuthProvider};
+use crate::paths::PathRegistry;
 use crate::policy::{Action, PolicyEngine};
 use anyhow::{anyhow, Result};
 use automerge::{
@@ -9,7 +10,7 @@ use automerge::{
     Value as AutoValue, ROOT,
 };
 use serde_json::Value as JsonValue;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Storage adapter trait - all storage implementations implement this
 ///
@@ -17,8 +18,17 @@ use std::sync::{Arc, Mutex};
 // Use storage traits from the storage module
 use crate::storage::DocumentStorage;
 
+/// Notification passed to observers when a change occurs
+#[derive(Clone, Debug)]
+pub struct ChangeNotification {
+    /// The new value at the observed path
+    pub value: Option<ScalarValue>,
+    /// List of field paths that changed (e.g., ["user.email", "user.profile.avatar"])
+    pub changed_paths: Vec<String>,
+}
+
 /// Observer callback signature
-pub type ObserverCallback = Box<dyn Fn(Option<ScalarValue>) + Send + Sync>;
+pub type ObserverCallback = Box<dyn Fn(ChangeNotification) + Send + Sync>;
 
 /// Observer entry tracking a path and its callback
 struct Observer {
@@ -40,19 +50,25 @@ pub struct SwirlDB {
     auto_persist: bool,
     policy_engine: Option<Arc<PolicyEngine>>,
     auth_provider: Arc<Mutex<Box<dyn AuthProvider + Send + Sync>>>,
+    path_registry: Arc<RwLock<PathRegistry>>,
 }
 
 impl SwirlDB {
     /// Create a new SwirlDB instance with default in-memory storage
     pub fn new() -> Self {
+        let doc = AutoCommit::new();
+        let path_registry =
+            PathRegistry::from_document(&doc).unwrap_or_else(|_| PathRegistry::new());
+
         Self {
-            doc: Arc::new(Mutex::new(AutoCommit::new())),
+            doc: Arc::new(Mutex::new(doc)),
             observers: Arc::new(Mutex::new(Vec::new())),
             storage: Arc::new(crate::storage::InMemoryDocStorage::new()),
             storage_key: "default".to_string(),
             auto_persist: false,
             policy_engine: None,
             auth_provider: Arc::new(Mutex::new(Box::new(AnonymousAuth::new()))),
+            path_registry: Arc::new(RwLock::new(path_registry)),
         }
     }
 
@@ -75,6 +91,10 @@ impl SwirlDB {
             _ => AutoCommit::new(),
         };
 
+        // Build path registry from document
+        let path_registry =
+            PathRegistry::from_document(&doc).unwrap_or_else(|_| PathRegistry::new());
+
         Self {
             doc: Arc::new(Mutex::new(doc)),
             observers: Arc::new(Mutex::new(Vec::new())),
@@ -83,6 +103,7 @@ impl SwirlDB {
             auto_persist: false,
             policy_engine: None,
             auth_provider: Arc::new(Mutex::new(Box::new(AnonymousAuth::new()))),
+            path_registry: Arc::new(RwLock::new(path_registry)),
         }
     }
 
@@ -174,7 +195,8 @@ impl SwirlDB {
                 .map_err(|e| anyhow!("Failed to set value: {:?}", e))?;
             drop(doc); // Release lock before checking observers
 
-            self.check_observers();
+            // Notify observers with the path that was changed
+            self.check_observers_with_paths(vec![path.to_string()]);
 
             // Note: Auto-persist is now handled at the binding layer (browser.rs)
             // where we have access to the async runtime. The core remains sync
@@ -735,11 +757,19 @@ impl SwirlDB {
     pub fn load_state(&self, bytes: &[u8]) -> Result<()> {
         let doc = AutoCommit::load(bytes).map_err(|e| anyhow!("Failed to load state: {:?}", e))?;
 
+        // Rebuild path registry from new document
+        let registry = PathRegistry::from_document(&doc).unwrap_or_else(|_| PathRegistry::new());
+
         let mut doc_guard = self.doc.lock().unwrap();
         *doc_guard = doc;
         drop(doc_guard);
 
-        self.check_observers();
+        let mut registry_guard = self.path_registry.write().unwrap();
+        *registry_guard = registry;
+        drop(registry_guard);
+
+        // Document replaced - all paths potentially changed
+        self.check_observers_with_paths(vec![]);
         Ok(())
     }
 
@@ -804,8 +834,16 @@ impl SwirlDB {
                 .map_err(|e| anyhow!("Failed to apply change: {:?}", e))?;
         }
 
+        // Rebuild path registry after applying changes
+        let registry = PathRegistry::from_document(&*doc).unwrap_or_else(|_| PathRegistry::new());
         drop(doc);
-        self.check_observers();
+
+        let mut registry_guard = self.path_registry.write().unwrap();
+        *registry_guard = registry;
+        drop(registry_guard);
+
+        // Changes applied - paths may have changed
+        self.check_observers_with_paths(vec![]);
         Ok(())
     }
 
@@ -838,7 +876,7 @@ impl SwirlDB {
     /// The callback will be invoked whenever the value at the path changes
     pub fn observe<F>(&self, path: String, callback: F)
     where
-        F: Fn(Option<ScalarValue>) + Send + Sync + 'static,
+        F: Fn(ChangeNotification) + Send + Sync + 'static,
     {
         let current_value = self.get_path(&path);
 
@@ -855,20 +893,35 @@ impl SwirlDB {
     /// This compares current values with cached values and fires callbacks
     /// for any that have changed
     pub fn check_observers(&self) {
+        self.check_observers_with_paths(vec![]);
+    }
+
+    /// Check observers and notify with specific changed paths
+    fn check_observers_with_paths(&self, changed_paths: Vec<String>) {
         let mut observers = self.observers.lock().unwrap();
 
         for observer in observers.iter_mut() {
             let current = self.get_path(&observer.path);
 
-            // Compare values
-            let changed = match (&observer.last_value, &current) {
+            // Check if value changed
+            let value_changed = match (&observer.last_value, &current) {
                 (None, None) => false,
                 (Some(_), None) | (None, Some(_)) => true,
                 (Some(a), Some(b)) => !scalar_values_equal(a, b),
             };
 
-            if changed {
-                (observer.callback)(current.clone());
+            // Check if any changed path is under this observer's path
+            let child_path_changed = changed_paths.iter().any(|changed_path| {
+                changed_path == &observer.path
+                    || changed_path.starts_with(&format!("{}.", observer.path))
+            });
+
+            if value_changed || child_path_changed {
+                let notification = ChangeNotification {
+                    value: current.clone(),
+                    changed_paths: changed_paths.clone(),
+                };
+                (observer.callback)(notification);
                 observer.last_value = current;
             }
         }
@@ -1039,5 +1092,90 @@ mod tests {
         assert_eq!(first["id"], "1");
         assert_eq!(first["from"], "alice");
         assert_eq!(first["text"], "Hello");
+    }
+
+    #[test]
+    fn test_observer_receives_changed_paths() {
+        use std::sync::{Arc, Mutex};
+
+        let db = SwirlDB::new();
+        let received_paths: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let paths_clone = received_paths.clone();
+
+        // Observe the user path
+        db.observe("user".to_string(), move |notification| {
+            let mut paths = paths_clone.lock().unwrap();
+            paths.extend(notification.changed_paths);
+        });
+
+        // Make a change
+        db.set_path("user.name", ScalarValue::Str("Alice".into()))
+            .unwrap();
+
+        // Verify observer received the changed path
+        let paths = received_paths.lock().unwrap();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], "user.name");
+    }
+
+    #[test]
+    fn test_observer_receives_value_and_paths() {
+        use std::sync::{Arc, Mutex};
+
+        let db = SwirlDB::new();
+        db.set_path("user.name", ScalarValue::Str("Alice".into()))
+            .unwrap();
+
+        let received: Arc<Mutex<Option<ChangeNotification>>> = Arc::new(Mutex::new(None));
+        let received_clone = received.clone();
+
+        // Observe the user.name path
+        db.observe("user.name".to_string(), move |notification| {
+            let mut recv = received_clone.lock().unwrap();
+            *recv = Some(notification);
+        });
+
+        // Update the value
+        db.set_path("user.name", ScalarValue::Str("Bob".into()))
+            .unwrap();
+
+        // Verify observer received both value and paths
+        let recv = received.lock().unwrap();
+        assert!(recv.is_some());
+        let notification = recv.as_ref().unwrap();
+
+        // Check value
+        assert!(matches!(&notification.value, Some(ScalarValue::Str(s)) if s == "Bob"));
+
+        // Check changed paths
+        assert_eq!(notification.changed_paths.len(), 1);
+        assert_eq!(notification.changed_paths[0], "user.name");
+    }
+
+    #[test]
+    fn test_observer_with_nested_path_changes() {
+        use std::sync::{Arc, Mutex};
+
+        let db = SwirlDB::new();
+        db.set_path("user.profile.name", ScalarValue::Str("Alice".into()))
+            .unwrap();
+
+        let received_paths: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let paths_clone = received_paths.clone();
+
+        // Observe the whole user object
+        db.observe("user".to_string(), move |notification| {
+            let mut paths = paths_clone.lock().unwrap();
+            paths.extend(notification.changed_paths.clone());
+        });
+
+        // Change a nested value
+        db.set_path("user.profile.avatar", ScalarValue::Str("avatar.png".into()))
+            .unwrap();
+
+        // Verify observer received the changed path
+        let paths = received_paths.lock().unwrap();
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], "user.profile.avatar");
     }
 }
