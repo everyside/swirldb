@@ -31,3 +31,12 @@ uuid = { version = "1.18", features = ["v4", "js"] }  # js feature required for 
 
 [dev-dependencies]
 futures = "0.3"
+criterion = "0.5"
+
+[[bench]]
+name = "path_performance"
+harness = false
+
+[[bench]]
+name = "real_world_perf"
+harness = false

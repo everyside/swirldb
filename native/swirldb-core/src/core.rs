@@ -10,6 +10,7 @@ use automerge::{
     Value as AutoValue, ROOT,
 };
 use serde_json::Value as JsonValue;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 /// Storage adapter trait - all storage implementations implement this
@@ -979,20 +980,29 @@ impl SwirlDB {
                 (Some(a), Some(b)) => !scalar_values_equal(a, b),
             };
 
-            // Check if any changed path is under this observer's path
-            let child_path_changed = changed_paths.iter().any(|changed_path| {
-                changed_path == &observer.path
-                    || changed_path.starts_with(&format!("{}.", observer.path))
-            });
+            // Early exit if no value change and we have changed_paths to check
+            if !value_changed && !changed_paths.is_empty() {
+                // Check if any changed path affects this observer
+                let affects_observer = changed_paths.iter().any(|changed_path| {
+                    // Observer fires if:
+                    // 1. Exact match: changed_path == observer.path
+                    // 2. Child changed: changed_path is under observer.path
+                    changed_path == &observer.path
+                        || changed_path.starts_with(&format!("{}.", observer.path))
+                });
 
-            if value_changed || child_path_changed {
-                let notification = ChangeNotification {
-                    value: current.clone(),
-                    changed_paths: changed_paths.clone(),
-                };
-                (observer.callback)(notification);
-                observer.last_value = current;
+                if !affects_observer {
+                    continue; // Skip this observer
+                }
             }
+
+            // Observer should fire
+            let notification = ChangeNotification {
+                value: current.clone(),
+                changed_paths: changed_paths.clone(),
+            };
+            (observer.callback)(notification);
+            observer.last_value = current;
         }
     }
 }
