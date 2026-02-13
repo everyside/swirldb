@@ -9,6 +9,7 @@ use std::collections::HashMap;
 ///
 /// This is built by traversing the document and maintained incrementally
 /// as changes occur.
+#[derive(Clone)]
 pub struct PathRegistry {
     /// Object ExId → path mapping
     exid_to_path: HashMap<ObjId, PathBuf>,
@@ -102,6 +103,14 @@ impl PathRegistry {
     /// Look up the numeric index for an array element ExId.
     pub fn get_array_index(&self, exid: &ObjId) -> Option<usize> {
         self.array_elements.get(exid).copied()
+    }
+
+    /// Register a single object at a given path.
+    ///
+    /// Used for incremental updates when new objects are created during set_path.
+    pub fn register(&mut self, obj: ObjId, path: PathBuf) {
+        self.path_to_exid.insert(path.to_string(), obj.clone());
+        self.exid_to_path.insert(obj, path);
     }
 
     /// Get the number of registered objects.

@@ -189,18 +189,25 @@ impl SwirlDB {
         }
 
         let mut doc = self.doc.lock().unwrap();
-        if let Some(parent) = resolve_path(&mut doc, &segments, true) {
+        if let Some(resolved) = resolve_path(&mut doc, &segments, true) {
             let key = segments.last().unwrap();
-            doc.put(&parent, key.as_str(), value)
+            doc.put(&resolved.parent, key.as_str(), value)
                 .map_err(|e| anyhow!("Failed to set value: {:?}", e))?;
-            drop(doc); // Release lock before checking observers
+            drop(doc); // Release lock before updating registry
+
+            // Register any newly created intermediate objects
+            if !resolved.created.is_empty() {
+                let mut registry = self.path_registry.write().unwrap();
+                for (obj_id, obj_path) in &resolved.created {
+                    registry.register(
+                        obj_id.clone(),
+                        crate::paths::PathBuf::from_dot_path(obj_path),
+                    );
+                }
+            }
 
             // Notify observers with the path that was changed
             self.check_observers_with_paths(vec![path.to_string()]);
-
-            // Note: Auto-persist is now handled at the binding layer (browser.rs)
-            // where we have access to the async runtime. The core remains sync
-            // for easier use in non-async contexts.
 
             Ok(())
         } else {
@@ -262,10 +269,21 @@ impl SwirlDB {
         }
 
         let mut doc = self.doc.lock().unwrap();
-        if let Some(parent) = resolve_path(&mut doc, &segments, true) {
+        if let Some(resolved) = resolve_path(&mut doc, &segments, true) {
             let key = segments.last().unwrap();
-            self.insert_value(&mut doc, &parent, key, &value)?;
+            self.insert_value(&mut doc, &resolved.parent, key, &value)?;
             drop(doc);
+
+            // Register any newly created intermediate objects
+            if !resolved.created.is_empty() {
+                let mut registry = self.path_registry.write().unwrap();
+                for (obj_id, obj_path) in &resolved.created {
+                    registry.register(
+                        obj_id.clone(),
+                        crate::paths::PathBuf::from_dot_path(obj_path),
+                    );
+                }
+            }
 
             self.check_observers();
             Ok(())
@@ -820,6 +838,57 @@ impl SwirlDB {
     ///
     /// This is the correct way to sync CRDT state - it merges changes
     /// rather than replacing the entire document like load_state() does
+    /// Extract affected paths from changes without applying them
+    ///
+    /// This is useful for determining which paths will be affected before broadcasting
+    pub fn extract_affected_paths(&self, changes: &[Vec<u8>]) -> Result<Vec<String>> {
+        use crate::paths::PathExtractor;
+        use automerge::{Automerge, Change};
+
+        // Create an empty temporary document to apply changes to
+        // We don't need the current state - we just need to apply changes to generate patches
+        let mut temp_doc = Automerge::new();
+
+        // Get registry - clone the PathRegistry itself
+        // Note: The registry isn't actually used for patch extraction since patches
+        // contain their full paths, but PathExtractor requires it
+        let registry = {
+            let guard = self.path_registry.read().unwrap();
+            (*guard).clone()
+        };
+        let extractor = PathExtractor::new(registry);
+
+        let mut all_paths = Vec::new();
+
+        // Apply each change and extract paths from patches
+        for change_bytes in changes {
+            let change = Change::from_bytes(change_bytes.clone())
+                .map_err(|e| anyhow!("Failed to parse change: {:?}", e))?;
+
+            // Create patch log and apply change with patches
+            let mut patch_log = automerge::patches::PatchLog::active(
+                automerge::patches::TextRepresentation::String(
+                    automerge::TextEncoding::UnicodeCodePoint,
+                ),
+            );
+
+            temp_doc
+                .apply_changes_log_patches([change], &mut patch_log)
+                .map_err(|e| anyhow!("Failed to apply change: {:?}", e))?;
+
+            // Extract paths from patches
+            let patches = temp_doc.make_patches(&mut patch_log);
+            let paths = extractor.extract_paths_from_patches(&patches)?;
+            all_paths.extend(paths);
+        }
+
+        // Deduplicate and sort
+        all_paths.sort();
+        all_paths.dedup();
+
+        Ok(all_paths)
+    }
+
     pub fn apply_changes(&self, changes: Vec<Vec<u8>>) -> Result<()> {
         use automerge::Change;
 
@@ -939,12 +1008,20 @@ fn split_path(dot_path: &str) -> Vec<String> {
     dot_path.split('.').map(|s| s.to_string()).collect()
 }
 
+/// Result of resolving a path, including any intermediate objects created
+struct ResolvedPath {
+    parent: ObjId,
+    /// Newly created intermediate objects: (ObjId, dot-path string)
+    created: Vec<(ObjId, String)>,
+}
+
 /// Resolve a path in the document, optionally creating intermediate maps
-fn resolve_path(doc: &mut AutoCommit, path: &[String], create: bool) -> Option<ObjId> {
+fn resolve_path(doc: &mut AutoCommit, path: &[String], create: bool) -> Option<ResolvedPath> {
     let mut current = ROOT;
+    let mut created = Vec::new();
 
     // Traverse all but the last segment
-    for key in path.iter().take(path.len().saturating_sub(1)) {
+    for (i, key) in path.iter().take(path.len().saturating_sub(1)).enumerate() {
         // Check if current is a List and key is numeric
         let obj_type = doc.object_type(&current).ok()?;
         let result = if obj_type == automerge::ObjType::List {
@@ -967,13 +1044,19 @@ fn resolve_path(doc: &mut AutoCommit, path: &[String], create: bool) -> Option<O
                 let new_obj = doc
                     .put_object(&current, key.as_str(), automerge::ObjType::Map)
                     .ok()?;
+                // Track the path for this newly created object
+                let obj_path = path[..=i].join(".");
+                created.push((new_obj.clone(), obj_path));
                 current = new_obj;
             }
             _ => return None,
         }
     }
 
-    Some(current)
+    Some(ResolvedPath {
+        parent: current,
+        created,
+    })
 }
 
 /// Resolve a path for reading (no mutation)
@@ -1177,5 +1260,121 @@ mod tests {
         let paths = received_paths.lock().unwrap();
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0], "user.profile.avatar");
+    }
+
+    #[test]
+    fn test_extract_affected_paths() {
+        let db = SwirlDB::new();
+
+        // Make some changes
+        db.set_path("user.name", ScalarValue::Str("Alice".into()))
+            .unwrap();
+        db.set_path("user.email", ScalarValue::Str("alice@example.com".into()))
+            .unwrap();
+
+        // Get all changes
+        let changes = db.get_changes();
+
+        // Extract paths from changes
+        let paths = db.extract_affected_paths(&changes).unwrap();
+
+        // Should include both leaf paths and intermediate objects
+        // When we set "user.name", we create both "user" (map) and "user.name" (value)
+        assert_eq!(paths.len(), 3);
+        assert!(paths.contains(&"user".to_string()));
+        assert!(paths.contains(&"user.name".to_string()));
+        assert!(paths.contains(&"user.email".to_string()));
+    }
+
+    #[test]
+    fn test_extract_affected_paths_deduplication() {
+        let db = SwirlDB::new();
+
+        // Make multiple changes to the same path
+        db.set_path("counter", ScalarValue::Int(1)).unwrap();
+        db.set_path("counter", ScalarValue::Int(2)).unwrap();
+        db.set_path("counter", ScalarValue::Int(3)).unwrap();
+
+        // Get all changes
+        let changes = db.get_changes();
+
+        // Extract paths - should be deduplicated
+        let paths = db.extract_affected_paths(&changes).unwrap();
+
+        // Should only have one path, even though we changed it 3 times
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], "counter");
+    }
+
+    #[test]
+    fn test_extract_affected_paths_nested() {
+        let db = SwirlDB::new();
+
+        // Make nested changes
+        db.set_path("user.profile.name", ScalarValue::Str("Alice".into()))
+            .unwrap();
+        db.set_path("user.profile.avatar", ScalarValue::Str("pic.png".into()))
+            .unwrap();
+        db.set_path("user.settings.theme", ScalarValue::Str("dark".into()))
+            .unwrap();
+
+        // Get all changes
+        let changes = db.get_changes();
+
+        // Extract paths
+        let paths = db.extract_affected_paths(&changes).unwrap();
+
+        // Should detect all nested paths including intermediate objects
+        // Creating "user.profile.name" creates: user, user.profile, user.profile.name
+        // Creating "user.profile.avatar" creates: user.profile.avatar (user.profile already exists)
+        // Creating "user.settings.theme" creates: user.settings, user.settings.theme (user already exists)
+        assert!(paths.contains(&"user".to_string()));
+        assert!(paths.contains(&"user.profile".to_string()));
+        assert!(paths.contains(&"user.profile.name".to_string()));
+        assert!(paths.contains(&"user.profile.avatar".to_string()));
+        assert!(paths.contains(&"user.settings".to_string()));
+        assert!(paths.contains(&"user.settings.theme".to_string()));
+    }
+
+    #[test]
+    fn test_registry_updated_on_set_path() {
+        let db = SwirlDB::new();
+
+        // Set a nested path - this creates intermediate "user" and "profile" objects
+        db.set_path("user.profile.name", ScalarValue::Str("Alice".into()))
+            .unwrap();
+
+        // Registry should know about the intermediate objects
+        let registry = db.path_registry.read().unwrap();
+
+        // Should be able to look up the intermediate paths
+        assert!(
+            registry.get_exid("user").is_some(),
+            "registry should contain 'user'"
+        );
+        assert!(
+            registry.get_exid("user.profile").is_some(),
+            "registry should contain 'user.profile'"
+        );
+    }
+
+    #[test]
+    fn test_registry_not_duplicated_on_existing_path() {
+        let db = SwirlDB::new();
+
+        // Create the path
+        db.set_path("user.name", ScalarValue::Str("Alice".into()))
+            .unwrap();
+
+        let count_after_first = db.path_registry.read().unwrap().len();
+
+        // Set another value under same parent - should NOT create new intermediate
+        db.set_path("user.email", ScalarValue::Str("alice@example.com".into()))
+            .unwrap();
+
+        let count_after_second = db.path_registry.read().unwrap().len();
+
+        // Registry size shouldn't grow since "user" already existed
+        assert_eq!(count_after_first, count_after_second);
     }
 }

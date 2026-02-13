@@ -297,9 +297,15 @@ async fn handle_websocket(socket: WebSocket, state: ServerState) {
                                     info!("📥 RECV: {} changes ({} bytes) from {}",
                                         changes.len(), total_bytes, client_id);
 
-                                    // TODO: Extract affected paths from changes
-                                    // For now, use wildcard to broadcast to all
-                                    let affected_paths = vec!["/**".to_string()];
+                                    // Extract affected paths from changes
+                                    let affected_paths = {
+                                        let db = state.db().read().await;
+                                        db.extract_affected_paths(&changes)
+                                            .unwrap_or_else(|e| {
+                                                warn!("Failed to extract paths: {}. Using wildcard.", e);
+                                                vec!["/**".to_string()]
+                                            })
+                                    };
 
                                     // Apply CRDT changes and broadcast to subscribers
                                     match state

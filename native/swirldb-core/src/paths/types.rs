@@ -54,6 +54,22 @@ impl PathBuf {
     pub fn len(&self) -> usize {
         self.segments.len()
     }
+
+    /// Create a PathBuf from a dot-separated path string (e.g., "user.profile").
+    ///
+    /// Note: This only handles key segments. Array indices in paths like
+    /// "items[2].name" are not parsed by this method.
+    pub fn from_dot_path(path: &str) -> Self {
+        if path.is_empty() {
+            return Self::new();
+        }
+        Self {
+            segments: path
+                .split('.')
+                .map(|s| PathSegment::Key(s.to_string()))
+                .collect(),
+        }
+    }
 }
 
 impl fmt::Display for PathBuf {
