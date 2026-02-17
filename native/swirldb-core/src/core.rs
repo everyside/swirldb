@@ -1278,19 +1278,23 @@ mod tests {
 
     #[test]
     fn test_extract_affected_paths() {
-        let db = SwirlDB::new();
+        let sender = SwirlDB::new();
 
-        // Make some changes
-        db.set_path("user.name", ScalarValue::Str("Alice".into()))
+        // Make some changes on the "sender" side
+        sender
+            .set_path("user.name", ScalarValue::Str("Alice".into()))
             .unwrap();
-        db.set_path("user.email", ScalarValue::Str("alice@example.com".into()))
+        sender
+            .set_path("user.email", ScalarValue::Str("alice@example.com".into()))
             .unwrap();
 
-        // Get all changes
-        let changes = db.get_changes();
+        // Get changes (as a client would send them to the server)
+        let changes = sender.get_changes();
 
-        // Extract paths from changes
-        let paths = db.extract_affected_paths(&changes).unwrap();
+        // Extract paths from a fresh "server" db that doesn't have these changes yet
+        // (mirrors production: server receives changes it hasn't seen)
+        let server = SwirlDB::new();
+        let paths = server.extract_affected_paths(&changes).unwrap();
 
         // Should include both leaf paths and intermediate objects
         // When we set "user.name", we create both "user" (map) and "user.name" (value)
@@ -1302,18 +1306,19 @@ mod tests {
 
     #[test]
     fn test_extract_affected_paths_deduplication() {
-        let db = SwirlDB::new();
+        let sender = SwirlDB::new();
 
         // Make multiple changes to the same path
-        db.set_path("counter", ScalarValue::Int(1)).unwrap();
-        db.set_path("counter", ScalarValue::Int(2)).unwrap();
-        db.set_path("counter", ScalarValue::Int(3)).unwrap();
+        sender.set_path("counter", ScalarValue::Int(1)).unwrap();
+        sender.set_path("counter", ScalarValue::Int(2)).unwrap();
+        sender.set_path("counter", ScalarValue::Int(3)).unwrap();
 
-        // Get all changes
-        let changes = db.get_changes();
+        // Get changes
+        let changes = sender.get_changes();
 
-        // Extract paths - should be deduplicated
-        let paths = db.extract_affected_paths(&changes).unwrap();
+        // Extract paths from a fresh db (mirrors server receiving client changes)
+        let server = SwirlDB::new();
+        let paths = server.extract_affected_paths(&changes).unwrap();
 
         // Should only have one path, even though we changed it 3 times
         assert_eq!(paths.len(), 1);
@@ -1322,21 +1327,25 @@ mod tests {
 
     #[test]
     fn test_extract_affected_paths_nested() {
-        let db = SwirlDB::new();
+        let sender = SwirlDB::new();
 
         // Make nested changes
-        db.set_path("user.profile.name", ScalarValue::Str("Alice".into()))
+        sender
+            .set_path("user.profile.name", ScalarValue::Str("Alice".into()))
             .unwrap();
-        db.set_path("user.profile.avatar", ScalarValue::Str("pic.png".into()))
+        sender
+            .set_path("user.profile.avatar", ScalarValue::Str("pic.png".into()))
             .unwrap();
-        db.set_path("user.settings.theme", ScalarValue::Str("dark".into()))
+        sender
+            .set_path("user.settings.theme", ScalarValue::Str("dark".into()))
             .unwrap();
 
-        // Get all changes
-        let changes = db.get_changes();
+        // Get changes
+        let changes = sender.get_changes();
 
-        // Extract paths
-        let paths = db.extract_affected_paths(&changes).unwrap();
+        // Extract paths from a fresh db
+        let server = SwirlDB::new();
+        let paths = server.extract_affected_paths(&changes).unwrap();
 
         // Should detect all nested paths including intermediate objects
         // Creating "user.profile.name" creates: user, user.profile, user.profile.name

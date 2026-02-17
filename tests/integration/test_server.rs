@@ -16,7 +16,9 @@ use axum::{
     Router,
 };
 use futures::{SinkExt, StreamExt};
+use std::sync::Arc;
 use swirldb_core::protocol::Message;
+use swirldb_core::storage::InMemoryDocStorage;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
@@ -45,7 +47,8 @@ impl TestServer {
         let addr = listener.local_addr()?;
         let port = addr.port();
 
-        let state = ServerState::new(policy);
+        let storage = Arc::new(InMemoryDocStorage::new());
+        let state = ServerState::new(policy, storage).await;
 
         let app = Router::new()
             .route("/ws", get(websocket_handler))
