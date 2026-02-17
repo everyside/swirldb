@@ -604,7 +604,7 @@ impl SwirlDB {
     ///
     /// Example:
     /// ```javascript
-    /// db.connect('ws://localhost:3030/ws', 'alice', ['/**']);
+    /// db.connect('ws://localhost:3030/ws', 'alice', ['**']);
     /// // That's it! Now mutations automatically sync:
     /// db.data.messages = [...messages, newMessage];
     /// ```

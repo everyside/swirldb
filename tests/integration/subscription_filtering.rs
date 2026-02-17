@@ -15,17 +15,17 @@ async fn test_subscription_wildcard_filter() {
 
     let server = TestServer::start().await.unwrap();
 
-    // Client 1 subscribes to /user/**
+    // Client 1 subscribes to user.**
     let mut client1 = RustClient::connect(&server.ws_url(), vec!["user.**".to_string()])
         .await
         .unwrap();
 
-    // Client 2 subscribes to /settings/**
+    // Client 2 subscribes to settings.**
     let mut client2 = RustClient::connect(&server.ws_url(), vec!["settings.**".to_string()])
         .await
         .unwrap();
 
-    // Client 1 writes to /user/name (should NOT reach client2)
+    // Client 1 writes to user.name (should NOT reach client2)
     client1
         .set_path("user.name", ScalarValue::Str("Alice".into()))
         .await
@@ -35,9 +35,9 @@ async fn test_subscription_wildcard_filter() {
     let result = client2
         .wait_for_broadcast_timeout(Duration::from_millis(500))
         .await;
-    assert!(result.is_err(), "Client2 should not receive /user updates");
+    assert!(result.is_err(), "Client2 should not receive user updates");
 
-    // Client 2 writes to /settings/theme (should NOT reach client1)
+    // Client 2 writes to settings.theme (should NOT reach client1)
     client2
         .set_path("settings.theme", ScalarValue::Str("dark".into()))
         .await
@@ -49,7 +49,7 @@ async fn test_subscription_wildcard_filter() {
         .await;
     assert!(
         result.is_err(),
-        "Client1 should not receive /settings updates"
+        "Client1 should not receive settings updates"
     );
 
     // Cleanup
@@ -64,7 +64,7 @@ async fn test_subscription_exact_path_match() {
 
     let server = TestServer::start().await.unwrap();
 
-    // Client subscribes to exact path /config/version
+    // Client subscribes to exact path config.version
     let mut client1 = RustClient::connect(&server.ws_url(), vec!["config.version".to_string()])
         .await
         .unwrap();
@@ -73,7 +73,7 @@ async fn test_subscription_exact_path_match() {
         .await
         .unwrap();
 
-    // Client 2 writes to /config/version (client1 should receive)
+    // Client 2 writes to config.version (client1 should receive)
     client2
         .set_path("config.version", ScalarValue::Str("1.0.0".into()))
         .await
@@ -89,7 +89,7 @@ async fn test_subscription_exact_path_match() {
         Some(ScalarValue::Str("1.0.0".into()))
     );
 
-    // Client 2 writes to /config/other (client1 should NOT receive)
+    // Client 2 writes to config.other (client1 should NOT receive)
     client2
         .set_path("config.other", ScalarValue::Str("value".into()))
         .await
@@ -127,7 +127,7 @@ async fn test_multiple_subscription_patterns() {
         .await
         .unwrap();
 
-    // Client 2 writes to /user/name (should reach client1)
+    // Client 2 writes to user.name (should reach client1)
     client2
         .set_path("user.name", ScalarValue::Str("Bob".into()))
         .await
@@ -143,7 +143,7 @@ async fn test_multiple_subscription_patterns() {
         Some(ScalarValue::Str("Bob".into()))
     );
 
-    // Client 2 writes to /settings/lang (should also reach client1)
+    // Client 2 writes to settings.lang (should also reach client1)
     client2
         .set_path("settings.lang", ScalarValue::Str("en".into()))
         .await
@@ -159,7 +159,7 @@ async fn test_multiple_subscription_patterns() {
         Some(ScalarValue::Str("en".into()))
     );
 
-    // Client 2 writes to /data/value (should NOT reach client1)
+    // Client 2 writes to data.value (should NOT reach client1)
     client2
         .set_path("data.value", ScalarValue::Int(42))
         .await
@@ -168,7 +168,7 @@ async fn test_multiple_subscription_patterns() {
     let result = client1
         .wait_for_broadcast_timeout(Duration::from_millis(500))
         .await;
-    assert!(result.is_err(), "Client1 should not receive /data updates");
+    assert!(result.is_err(), "Client1 should not receive data updates");
 
     // Cleanup
     client1.close().await.unwrap();
@@ -182,7 +182,7 @@ async fn test_subscription_nested_paths() {
 
     let server = TestServer::start().await.unwrap();
 
-    // Client subscribes to /org/team/**
+    // Client subscribes to org.team.**
     let mut client1 = RustClient::connect(&server.ws_url(), vec!["org.team.**".to_string()])
         .await
         .unwrap();
@@ -218,7 +218,7 @@ async fn test_subscription_nested_paths() {
         .await;
     assert!(
         result.is_err(),
-        "Client1 should not receive /org/settings updates"
+        "Client1 should not receive org.settings updates"
     );
 
     // Cleanup

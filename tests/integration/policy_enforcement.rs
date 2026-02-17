@@ -14,7 +14,7 @@ use swirldb_core::policy::{
 async fn test_policy_denies_unauthorized_subscription() {
     init_test_logging();
 
-    // Create policy that denies /admin/** to all users
+    // Create policy that denies admin.** to all users
     let config = SwirlDBConfig {
         policies: PoliciesConfig {
             auth: None,
@@ -37,7 +37,7 @@ async fn test_policy_denies_unauthorized_subscription() {
 
     let server = TestServer::start_with_policy(Some(policy)).await.unwrap();
 
-    // Try to subscribe to /admin/** (should be denied)
+    // Try to subscribe to admin.** (should be denied)
     let client = RustClient::connect(&server.ws_url(), vec!["admin.**".to_string()])
         .await
         .unwrap();
@@ -54,7 +54,7 @@ async fn test_policy_denies_unauthorized_subscription() {
 async fn test_policy_allows_authorized_subscription() {
     init_test_logging();
 
-    // Create policy that allows /user/** for all users
+    // Create policy that allows user.** for all users
     let config = SwirlDBConfig {
         policies: PoliciesConfig {
             auth: None,
@@ -77,7 +77,7 @@ async fn test_policy_allows_authorized_subscription() {
 
     let server = TestServer::start_with_policy(Some(policy)).await.unwrap();
 
-    // Subscribe to /user/** (should be allowed)
+    // Subscribe to user.** (should be allowed)
     let client = RustClient::connect(&server.ws_url(), vec!["user.**".to_string()])
         .await
         .unwrap();
@@ -124,7 +124,7 @@ async fn test_policy_mixed_allow_deny() {
 
     let server = TestServer::start_with_policy(Some(policy)).await.unwrap();
 
-    // Subscribe to both /public/** and /private/**
+    // Subscribe to both public.** and private.**
     let client = RustClient::connect(
         &server.ws_url(),
         vec!["public.**".to_string(), "private.**".to_string()],
@@ -132,7 +132,7 @@ async fn test_policy_mixed_allow_deny() {
     .await
     .unwrap();
 
-    // TODO: Verify that /public/** was allowed but /private/** was denied
+    // TODO: Verify that public.** was allowed but private.** was denied
     // by inspecting the SubscribeAck message
 
     assert_eq!(server.connection_count(), 1);
