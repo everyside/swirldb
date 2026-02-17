@@ -7,8 +7,7 @@
 
 use super::{init_test_logging, rust_client::RustClient, test_server::TestServer};
 use swirldb_core::policy::{
-    SwirlDBConfig, PoliciesConfig, PolicyRule, PolicyEngine,
-    ActorPattern, Action, Effect,
+    Action, ActorPattern, Effect, PoliciesConfig, PolicyEngine, PolicyRule, SwirlDBConfig,
 };
 
 #[tokio::test]
@@ -36,9 +35,7 @@ async fn test_policy_denies_unauthorized_subscription() {
 
     let policy = PolicyEngine::new(config);
 
-    let server = TestServer::start_with_policy(Some(policy))
-        .await
-        .unwrap();
+    let server = TestServer::start_with_policy(Some(policy)).await.unwrap();
 
     // Try to subscribe to /admin/** (should be denied)
     let client = RustClient::connect(&server.ws_url(), vec!["admin.**".to_string()])
@@ -78,9 +75,7 @@ async fn test_policy_allows_authorized_subscription() {
 
     let policy = PolicyEngine::new(config);
 
-    let server = TestServer::start_with_policy(Some(policy))
-        .await
-        .unwrap();
+    let server = TestServer::start_with_policy(Some(policy)).await.unwrap();
 
     // Subscribe to /user/** (should be allowed)
     let client = RustClient::connect(&server.ws_url(), vec!["user.**".to_string()])
@@ -127,9 +122,7 @@ async fn test_policy_mixed_allow_deny() {
 
     let policy = PolicyEngine::new(config);
 
-    let server = TestServer::start_with_policy(Some(policy))
-        .await
-        .unwrap();
+    let server = TestServer::start_with_policy(Some(policy)).await.unwrap();
 
     // Subscribe to both /public/** and /private/**
     let client = RustClient::connect(

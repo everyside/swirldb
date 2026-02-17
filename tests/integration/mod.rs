@@ -16,17 +16,17 @@
 //! - Cross-platform serialization
 //! - Browser ↔ Server sync
 
-pub mod test_server;
-pub mod rust_client;
 pub mod browser_client;
+pub mod rust_client;
+pub mod test_server;
 
 // Test modules
-mod multi_client_sync;
 mod browser_sync;
-mod subscription_filtering;
-mod policy_enforcement;
-mod network_resilience;
 mod cross_platform;
+mod multi_client_sync;
+mod network_resilience;
+mod policy_enforcement;
+mod subscription_filtering;
 
 /// Initialize test logging with clean formatting
 ///

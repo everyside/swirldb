@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::mpsc;
+use tokio::sync::{self, mpsc};
 
 #[derive(Debug, Serialize)]
 #[serde(tag = "cmd")]
@@ -22,7 +22,10 @@ enum IpcCommand {
         subscriptions: Vec<String>,
     },
     #[serde(rename = "setPath")]
-    SetPath { path: String, value: serde_json::Value },
+    SetPath {
+        path: String,
+        value: serde_json::Value,
+    },
     #[serde(rename = "getPath")]
     GetPath { path: String },
     #[serde(rename = "waitForBroadcast")]
@@ -50,8 +53,8 @@ enum IpcResponse {
 
 pub struct BrowserTestClient {
     process: Arc<Mutex<Option<Child>>>,
-    stdin: Arc<Mutex<tokio::process::ChildStdin>>,
-    rx: Arc<Mutex<mpsc::UnboundedReceiver<IpcResponse>>>,
+    stdin: Arc<sync::Mutex<tokio::process::ChildStdin>>,
+    rx: Arc<sync::Mutex<mpsc::UnboundedReceiver<IpcResponse>>>,
 }
 
 impl BrowserTestClient {
@@ -94,28 +97,34 @@ impl BrowserTestClient {
 
         let client = BrowserTestClient {
             process: Arc::new(Mutex::new(Some(child))),
-            stdin: Arc::new(Mutex::new(stdin)),
-            rx: Arc::new(Mutex::new(rx)),
+            stdin: Arc::new(sync::Mutex::new(stdin)),
+            rx: Arc::new(sync::Mutex::new(rx)),
         };
 
         // Wait for ready signal
-        client.wait_for_response(|r| matches!(r, IpcResponse::Ready)).await?;
+        client
+            .wait_for_response(|r| matches!(r, IpcResponse::Ready))
+            .await?;
 
         // Send connect command
-        client.send_command(IpcCommand::Connect {
-            ws_url: ws_url.to_string(),
-            subscriptions,
-        }).await?;
+        client
+            .send_command(IpcCommand::Connect {
+                ws_url: ws_url.to_string(),
+                subscriptions,
+            })
+            .await?;
 
         // Wait for connected
-        client.wait_for_response(|r| matches!(r, IpcResponse::Connected)).await?;
+        client
+            .wait_for_response(|r| matches!(r, IpcResponse::Connected))
+            .await?;
 
         Ok(client)
     }
 
     async fn send_command(&self, cmd: IpcCommand) -> Result<()> {
         let json = serde_json::to_string(&cmd)?;
-        let mut stdin = self.stdin.lock().unwrap();
+        let mut stdin = self.stdin.lock().await;
         stdin.write_all(json.as_bytes()).await?;
         stdin.write_all(b"\n").await?;
         stdin.flush().await?;
@@ -134,15 +143,17 @@ impl BrowserTestClient {
                 anyhow::bail!("Timeout waiting for IPC response");
             }
 
-            let mut rx = self.rx.lock().unwrap();
-            match rx.try_recv() {
+            let result = {
+                let mut rx = self.rx.lock().await;
+                rx.try_recv()
+            };
+            match result {
                 Ok(response) => {
                     if predicate(&response) {
                         return Ok(response);
                     }
                 }
                 Err(mpsc::error::TryRecvError::Empty) => {
-                    drop(rx);
                     tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
                 }
                 Err(mpsc::error::TryRecvError::Disconnected) => {
@@ -156,18 +167,24 @@ impl BrowserTestClient {
         self.send_command(IpcCommand::SetPath {
             path: path.to_string(),
             value,
-        }).await?;
+        })
+        .await?;
 
-        self.wait_for_response(|r| matches!(r, IpcResponse::SetComplete)).await?;
+        self.wait_for_response(|r| matches!(r, IpcResponse::SetComplete))
+            .await?;
         Ok(())
     }
 
     pub async fn get_path(&self, path: &str) -> Result<Option<serde_json::Value>> {
         self.send_command(IpcCommand::GetPath {
             path: path.to_string(),
-        }).await?;
+        })
+        .await?;
 
-        match self.wait_for_response(|r| matches!(r, IpcResponse::Value { .. })).await? {
+        match self
+            .wait_for_response(|r| matches!(r, IpcResponse::Value { .. }))
+            .await?
+        {
             IpcResponse::Value { value } => Ok(Some(value)),
             _ => Ok(None),
         }
@@ -175,7 +192,8 @@ impl BrowserTestClient {
 
     pub async fn wait_for_sync(&self) -> Result<()> {
         self.send_command(IpcCommand::WaitForBroadcast).await?;
-        self.wait_for_response(|r| matches!(r, IpcResponse::BroadcastReceived)).await?;
+        self.wait_for_response(|r| matches!(r, IpcResponse::BroadcastReceived))
+            .await?;
         Ok(())
     }
 

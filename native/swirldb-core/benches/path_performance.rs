@@ -1,8 +1,8 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use swirldb_core::core::SwirlDB;
-use swirldb_core::paths::PathRegistry;
 use automerge::transaction::Transactable;
 use automerge::{AutoCommit, ObjType, ROOT};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use swirldb_core::core::SwirlDB;
+use swirldb_core::paths::PathRegistry;
 
 fn create_large_document(num_objects: usize) -> AutoCommit {
     let mut doc = AutoCommit::new();
@@ -18,7 +18,8 @@ fn create_large_document(num_objects: usize) -> AutoCommit {
         // Add some nested structure
         let profile = doc.put_object(&user, "profile", ObjType::Map).unwrap();
         doc.put(&profile, "name", format!("User {}", i)).unwrap();
-        doc.put(&profile, "email", format!("user{}@example.com", i)).unwrap();
+        doc.put(&profile, "email", format!("user{}@example.com", i))
+            .unwrap();
 
         let settings = doc.put_object(&user, "settings", ObjType::Map).unwrap();
         doc.put(&settings, "theme", "dark").unwrap();
@@ -38,9 +39,7 @@ fn bench_registry_build(c: &mut Criterion) {
             BenchmarkId::from_parameter(format!("{}_objects", size * 4)), // *4 because each user has ~4 objects
             size,
             |b, _| {
-                b.iter(|| {
-                    PathRegistry::from_document(black_box(&doc)).unwrap()
-                });
+                b.iter(|| PathRegistry::from_document(black_box(&doc)).unwrap());
             },
         );
     }
@@ -54,20 +53,21 @@ fn bench_path_extraction(c: &mut Criterion) {
     // Create a document with some data
     let db = SwirlDB::new();
     db.set_path("user.profile.name", "Alice".into()).unwrap();
-    db.set_path("user.profile.email", "alice@example.com".into()).unwrap();
+    db.set_path("user.profile.email", "alice@example.com".into())
+        .unwrap();
     db.set_path("user.settings.theme", "dark".into()).unwrap();
 
     // Make some changes
     db.set_path("user.profile.name", "Bob".into()).unwrap();
-    db.set_path("user.profile.avatar", "avatar.png".into()).unwrap();
-    db.set_path("user.settings.notifications", true.into()).unwrap();
+    db.set_path("user.profile.avatar", "avatar.png".into())
+        .unwrap();
+    db.set_path("user.settings.notifications", true.into())
+        .unwrap();
 
     let changes = db.get_changes();
 
     group.bench_function("extract_3_paths", |b| {
-        b.iter(|| {
-            db.extract_affected_paths(black_box(&changes)).unwrap()
-        });
+        b.iter(|| db.extract_affected_paths(black_box(&changes)).unwrap());
     });
 
     group.finish();
@@ -80,12 +80,18 @@ fn bench_incremental_updates(c: &mut Criterion) {
         b.iter(|| {
             let db = SwirlDB::new();
             // This will create intermediate objects and update registry
-            db.set_path("deeply.nested.path.to.value", "data".into()).unwrap();
+            db.set_path("deeply.nested.path.to.value", "data".into())
+                .unwrap();
         });
     });
 
     group.finish();
 }
 
-criterion_group!(benches, bench_registry_build, bench_path_extraction, bench_incremental_updates);
+criterion_group!(
+    benches,
+    bench_registry_build,
+    bench_path_extraction,
+    bench_incremental_updates
+);
 criterion_main!(benches);

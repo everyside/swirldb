@@ -268,10 +268,7 @@ async fn test_late_joiner_gets_full_state() {
 
     // Client 2 should have the data from initial sync
     let value = client2.get_path("existing.data");
-    assert_eq!(
-        value,
-        Some(ScalarValue::Str("Already here".into()))
-    );
+    assert_eq!(value, Some(ScalarValue::Str("Already here".into())));
     info!("✓ Client 2 has existing data: {:?}", value);
 
     // Cleanup

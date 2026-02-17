@@ -37,7 +37,7 @@ async fn test_rust_to_rust_serialization() {
         .await
         .unwrap();
     client1
-        .set_path("types.float", ScalarValue::F64(3.14))
+        .set_path("types.float", ScalarValue::F64(3.15))
         .await
         .unwrap();
     client1
@@ -49,7 +49,9 @@ async fn test_rust_to_rust_serialization() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     for _ in 0..5 {
-        let _ = client2.wait_for_broadcast_timeout(Duration::from_millis(200)).await;
+        let _ = client2
+            .wait_for_broadcast_timeout(Duration::from_millis(200))
+            .await;
     }
 
     // Verify all types transmitted correctly
@@ -61,7 +63,7 @@ async fn test_rust_to_rust_serialization() {
     assert_eq!(client2.get_path("types.uint"), Some(ScalarValue::Uint(100)));
     assert_eq!(
         client2.get_path("types.float"),
-        Some(ScalarValue::F64(3.14))
+        Some(ScalarValue::F64(3.15))
     );
     assert_eq!(
         client2.get_path("types.bool"),
@@ -97,10 +99,7 @@ async fn test_nested_objects_serialization() {
         .await
         .unwrap();
     client1
-        .set_path(
-            "user.settings.theme",
-            ScalarValue::Str("dark".into()),
-        )
+        .set_path("user.settings.theme", ScalarValue::Str("dark".into()))
         .await
         .unwrap();
 
@@ -108,7 +107,9 @@ async fn test_nested_objects_serialization() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     for _ in 0..3 {
-        let _ = client2.wait_for_broadcast_timeout(Duration::from_millis(200)).await;
+        let _ = client2
+            .wait_for_broadcast_timeout(Duration::from_millis(200))
+            .await;
     }
 
     // Verify nested structure
@@ -174,4 +175,3 @@ async fn test_browser_to_rust_serialization() {
     // TODO: Browser creates data → Rust receives → verify identical
     panic!("Not yet implemented");
 }
-

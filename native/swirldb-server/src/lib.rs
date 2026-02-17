@@ -9,4 +9,7 @@ pub mod state;
 pub mod storage;
 
 // Re-export commonly used types
-pub use state::{ServerState, BroadcastMessage, ClientInfo, ActivityEvent, ServerStats, ConnectionInfo, SubscriptionInfo};
+pub use state::{
+    ActivityEvent, BroadcastMessage, ClientInfo, ConnectionInfo, ServerState, ServerStats,
+    SubscriptionInfo,
+};

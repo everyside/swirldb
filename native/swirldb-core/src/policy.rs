@@ -580,16 +580,8 @@ mod tests {
             "user.alice.prefs.theme",
             &actor
         ));
-        assert!(PathPatternMatcher::matches(
-            "user.**",
-            "user.alice",
-            &actor
-        ));
-        assert!(!PathPatternMatcher::matches(
-            "user.**",
-            "org.acme",
-            &actor
-        ));
+        assert!(PathPatternMatcher::matches("user.**", "user.alice", &actor));
+        assert!(!PathPatternMatcher::matches("user.**", "org.acme", &actor));
     }
 
     #[test]

@@ -32,7 +32,9 @@ async fn test_subscription_wildcard_filter() {
         .unwrap();
 
     // Client 2 should NOT receive this (wrong subscription)
-    let result = client2.wait_for_broadcast_timeout(Duration::from_millis(500)).await;
+    let result = client2
+        .wait_for_broadcast_timeout(Duration::from_millis(500))
+        .await;
     assert!(result.is_err(), "Client2 should not receive /user updates");
 
     // Client 2 writes to /settings/theme (should NOT reach client1)
@@ -42,8 +44,13 @@ async fn test_subscription_wildcard_filter() {
         .unwrap();
 
     // Client 1 should NOT receive this
-    let result = client1.wait_for_broadcast_timeout(Duration::from_millis(500)).await;
-    assert!(result.is_err(), "Client1 should not receive /settings updates");
+    let result = client1
+        .wait_for_broadcast_timeout(Duration::from_millis(500))
+        .await;
+    assert!(
+        result.is_err(),
+        "Client1 should not receive /settings updates"
+    );
 
     // Cleanup
     client1.close().await.unwrap();
@@ -88,7 +95,9 @@ async fn test_subscription_exact_path_match() {
         .await
         .unwrap();
 
-    let result = client1.wait_for_broadcast_timeout(Duration::from_millis(500)).await;
+    let result = client1
+        .wait_for_broadcast_timeout(Duration::from_millis(500))
+        .await;
     assert!(
         result.is_err(),
         "Client1 should not receive updates to non-subscribed paths"
@@ -156,7 +165,9 @@ async fn test_multiple_subscription_patterns() {
         .await
         .unwrap();
 
-    let result = client1.wait_for_broadcast_timeout(Duration::from_millis(500)).await;
+    let result = client1
+        .wait_for_broadcast_timeout(Duration::from_millis(500))
+        .await;
     assert!(result.is_err(), "Client1 should not receive /data updates");
 
     // Cleanup
@@ -202,7 +213,9 @@ async fn test_subscription_nested_paths() {
         .await
         .unwrap();
 
-    let result = client1.wait_for_broadcast_timeout(Duration::from_millis(500)).await;
+    let result = client1
+        .wait_for_broadcast_timeout(Duration::from_millis(500))
+        .await;
     assert!(
         result.is_err(),
         "Client1 should not receive /org/settings updates"

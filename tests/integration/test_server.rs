@@ -25,7 +25,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 // Re-export server state types (we'll need to access server internals)
-pub use swirldb_server::state::{ServerState, BroadcastMessage};
+pub use swirldb_server::state::{BroadcastMessage, ServerState};
 
 pub struct TestServer {
     pub port: u16,
@@ -41,7 +41,9 @@ impl TestServer {
     }
 
     /// Start a test server with a custom policy
-    pub async fn start_with_policy(policy: Option<swirldb_core::policy::PolicyEngine>) -> Result<Self> {
+    pub async fn start_with_policy(
+        policy: Option<swirldb_core::policy::PolicyEngine>,
+    ) -> Result<Self> {
         // Bind to port 0 to get a random available port
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;

@@ -107,7 +107,9 @@ async fn test_browser_wasm_serialization() {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     for _ in 0..3 {
-        let _ = rust_client.wait_for_broadcast_timeout(Duration::from_millis(200)).await;
+        let _ = rust_client
+            .wait_for_broadcast_timeout(Duration::from_millis(200))
+            .await;
     }
 
     // Verify Rust received them

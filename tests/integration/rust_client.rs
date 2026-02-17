@@ -11,7 +11,9 @@ use futures::{SinkExt, StreamExt};
 use swirldb_core::core::SwirlDB;
 use swirldb_core::protocol::Message;
 use tokio::net::TcpStream;
-use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{
+    connect_async, tungstenite::Message as WsMessage, MaybeTlsStream, WebSocketStream,
+};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -68,17 +70,15 @@ impl RustClient {
     /// Wait for SubscribeAck
     async fn wait_for_subscribe_ack(&mut self) -> Result<()> {
         while let Some(msg) = self.ws.next().await {
-            match msg? {
-                WsMessage::Binary(data) => {
-                    match Message::decode(&data)? {
-                        Message::SubscribeAck { added, denied } => {
-                            info!("SubscribeAck: {} added, {} denied", added.len(), denied.len());
-                            return Ok(());
-                        }
-                        _ => {}
-                    }
+            if let WsMessage::Binary(data) = msg? {
+                if let Message::SubscribeAck { added, denied } = Message::decode(&data)? {
+                    info!(
+                        "SubscribeAck: {} added, {} denied",
+                        added.len(),
+                        denied.len()
+                    );
+                    return Ok(());
                 }
-                _ => {}
             }
         }
         anyhow::bail!("Connection closed before SubscribeAck")
@@ -87,20 +87,14 @@ impl RustClient {
     /// Wait for initial Sync
     async fn wait_for_sync(&mut self) -> Result<()> {
         while let Some(msg) = self.ws.next().await {
-            match msg? {
-                WsMessage::Binary(data) => {
-                    match Message::decode(&data)? {
-                        Message::Sync { heads: _, changes } => {
-                            if !changes.is_empty() {
-                                self.db.apply_changes(changes)?;
-                                info!("Applied initial sync changes");
-                            }
-                            return Ok(());
-                        }
-                        _ => {}
+            if let WsMessage::Binary(data) = msg? {
+                if let Message::Sync { heads: _, changes } = Message::decode(&data)? {
+                    if !changes.is_empty() {
+                        self.db.apply_changes(changes)?;
+                        info!("Applied initial sync changes");
                     }
+                    return Ok(());
                 }
-                _ => {}
             }
         }
         anyhow::bail!("Connection closed before Sync")
@@ -140,21 +134,22 @@ impl RustClient {
     /// Wait for PushAck from server
     async fn wait_for_push_ack(&mut self) -> Result<()> {
         while let Some(msg) = self.ws.next().await {
-            match msg? {
-                WsMessage::Binary(data) => {
-                    match Message::decode(&data)? {
-                        Message::PushAck { heads: _ } => {
-                            return Ok(());
-                        }
-                        Message::Broadcast { from_client_id: _, changes, affected_paths: _ } => {
-                            // Got a broadcast while waiting for ack
-                            self.db.apply_changes(changes)?;
-                            // Keep waiting for our ack
-                        }
-                        _ => {}
+            if let WsMessage::Binary(data) = msg? {
+                match Message::decode(&data)? {
+                    Message::PushAck { heads: _ } => {
+                        return Ok(());
                     }
+                    Message::Broadcast {
+                        from_client_id: _,
+                        changes,
+                        affected_paths: _,
+                    } => {
+                        // Got a broadcast while waiting for ack
+                        self.db.apply_changes(changes)?;
+                        // Keep waiting for our ack
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
         anyhow::bail!("Connection closed before PushAck")
@@ -166,14 +161,24 @@ impl RustClient {
             match msg? {
                 WsMessage::Binary(data) => {
                     match Message::decode(&data)? {
-                        Message::Broadcast { from_client_id, changes, affected_paths: _ } => {
-                            info!("Received broadcast from {}: {} changes", from_client_id, changes.len());
+                        Message::Broadcast {
+                            from_client_id,
+                            changes,
+                            affected_paths: _,
+                        } => {
+                            info!(
+                                "Received broadcast from {}: {} changes",
+                                from_client_id,
+                                changes.len()
+                            );
                             self.db.apply_changes(changes.clone())?;
                             return Ok(changes);
                         }
                         Message::Ping => {
                             // Respond to ping
-                            self.ws.send(WsMessage::Binary(Message::Pong.encode())).await?;
+                            self.ws
+                                .send(WsMessage::Binary(Message::Pong.encode()))
+                                .await?;
                         }
                         msg => {
                             warn!("Unexpected message while waiting for broadcast: {:?}", msg);
@@ -190,7 +195,10 @@ impl RustClient {
     }
 
     /// Wait for a broadcast with timeout
-    pub async fn wait_for_broadcast_timeout(&mut self, timeout: std::time::Duration) -> Result<Vec<Vec<u8>>> {
+    pub async fn wait_for_broadcast_timeout(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<Vec<u8>>> {
         tokio::time::timeout(timeout, self.wait_for_broadcast()).await?
     }
 

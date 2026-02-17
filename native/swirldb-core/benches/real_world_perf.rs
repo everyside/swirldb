@@ -1,6 +1,6 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use swirldb_core::core::SwirlDB;
 use automerge::ScalarValue;
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use swirldb_core::core::SwirlDB;
 
 /// Create a realistic chat-like document with many messages
 fn create_chat_document(num_messages: usize) -> SwirlDB {
@@ -8,13 +8,16 @@ fn create_chat_document(num_messages: usize) -> SwirlDB {
 
     for i in 0..num_messages {
         let path = format!("messages[{}].id", i);
-        db.set_path(&path, ScalarValue::Str(format!("msg_{}", i).into())).unwrap();
+        db.set_path(&path, ScalarValue::Str(format!("msg_{}", i).into()))
+            .unwrap();
 
         let path = format!("messages[{}].text", i);
-        db.set_path(&path, ScalarValue::Str("Hello world!".into())).unwrap();
+        db.set_path(&path, ScalarValue::Str("Hello world!".into()))
+            .unwrap();
 
         let path = format!("messages[{}].from", i);
-        db.set_path(&path, ScalarValue::Str("alice".into())).unwrap();
+        db.set_path(&path, ScalarValue::Str("alice".into()))
+            .unwrap();
 
         let path = format!("messages[{}].timestamp", i);
         db.set_path(&path, ScalarValue::Int(i as i64)).unwrap();
@@ -33,9 +36,7 @@ fn bench_save_state(c: &mut Criterion) {
             BenchmarkId::from_parameter(format!("{}_messages", size)),
             size,
             |b, _| {
-                b.iter(|| {
-                    black_box(db.save_state())
-                });
+                b.iter(|| black_box(db.save_state()));
             },
         );
     }
@@ -75,9 +76,7 @@ fn bench_get_value(c: &mut Criterion) {
             BenchmarkId::from_parameter(format!("{}_messages", size)),
             size,
             |b, _| {
-                b.iter(|| {
-                    black_box(db.get_value("messages"))
-                });
+                b.iter(|| black_box(db.get_value("messages")));
             },
         );
     }
@@ -157,7 +156,8 @@ fn bench_apply_changes(c: &mut Criterion) {
         // Create a document and make changes
         let db1 = SwirlDB::new();
         for i in 0..*size {
-            db1.set_path(&format!("msg_{}", i), ScalarValue::Str("data".into())).unwrap();
+            db1.set_path(&format!("msg_{}", i), ScalarValue::Str("data".into()))
+                .unwrap();
         }
         let changes = db1.get_changes();
 
@@ -180,7 +180,10 @@ fn bench_deep_path_creation(c: &mut Criterion) {
     let mut group = c.benchmark_group("deep_path_creation");
 
     for depth in [5, 10, 20].iter() {
-        let path = (0..*depth).map(|i| format!("level{}", i)).collect::<Vec<_>>().join(".");
+        let path = (0..*depth)
+            .map(|i| format!("level{}", i))
+            .collect::<Vec<_>>()
+            .join(".");
 
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("{}_levels", depth)),
@@ -188,7 +191,8 @@ fn bench_deep_path_creation(c: &mut Criterion) {
             |b, _| {
                 b.iter(|| {
                     let db = SwirlDB::new();
-                    db.set_path(black_box(&path), ScalarValue::Str("value".into())).unwrap()
+                    db.set_path(black_box(&path), ScalarValue::Str("value".into()))
+                        .unwrap()
                 });
             },
         );
