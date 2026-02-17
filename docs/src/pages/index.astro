@@ -134,12 +134,6 @@ db.data.settings.theme = 'dark'; // Auto-saves`}</code></pre>
     async fn save(&self, key: &str, data: &[u8]) -> Result<()>;
     async fn load(&self, key: &str) -> Result<Option<Vec<u8>>>;
     // ...
-}
-
-trait ChangeLog {
-    async fn append_change(&self, namespace_id: &str, change: Change) -> Result<()>;
-    async fn get_changes_since(&self, namespace_id: &str, since: i64) -> Result<Vec<Change>>;
-    // ...
 }`}</code></pre>
       <p><strong>Browser:</strong> localStorage + IndexedDB implementations</p>
       <p><strong>Server:</strong> redb + memory implementations</p>

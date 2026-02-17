@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>SwirlDB Browser Test</title>
+    <script type="module">
+        import init, { SwirlDB } from '../../native/swirldb-browser/pkg/swirldb_browser.js';
+
+        let db = null;
+        let ws = null;
+
+        window.testAPI = {
+            async connect(wsUrl, subscriptions) {
+                console.log('Connecting to:', wsUrl);
+                await init();
+                db = new SwirlDB();
+
+                return new Promise((resolve, reject) => {
+                    ws = new WebSocket(wsUrl);
+                    ws.binaryType = 'arraybuffer';
+
+                    ws.onopen = () => {
+                        console.log('WebSocket opened');
+                        const heads = db.getHeads();
+                        const clientId = `browser-${Date.now()}`;
+                        const connectMsg = db.encodeConnectMessage(clientId, subscriptions, heads);
+                        ws.send(connectMsg);
+                    };
+
+                    ws.onmessage = (event) => {
+                        try {
+                            const data = new Uint8Array(event.data);
+                            const msg = db.decodeMessage(data);
+                            console.log('Received:', msg.type);
+
+                            if (msg.type === 'SubscribeAck') {
+                                console.log('Subscribe ACK');
+                            } else if (msg.type === 'Sync') {
+                                if (msg.changes && msg.changes.length > 0) {
+                                    db.applyChanges(msg.changes);
+                                }
+                                console.log('Connected');
+                                resolve();
+                            } else if (msg.type === 'Broadcast') {
+                                if (msg.changes && msg.changes.length > 0) {
+                                    db.applyChanges(msg.changes);
+                                }
+                                window.lastBroadcast = msg;
+                            } else if (msg.type === 'PushAck') {
+                                console.log('Push ACK');
+                            }
+                        } catch (err) {
+                            console.error('Error:', err);
+                        }
+                    };
+
+                    ws.onerror = (err) => {
+                        console.error('WebSocket error:', err);
+                        reject(err);
+                    };
+
+                    setTimeout(() => reject(new Error('Connection timeout')), 5000);
+                });
+            },
+
+            setPath(path, value) {
+                db.setPath(path, value);
+                const changes = db.getChanges();
+                const heads = db.getHeads();
+                const pushMsg = db.encodePushMessage(heads, changes);
+                ws.send(pushMsg);
+            },
+
+            getPath(path) {
+                return db.getPath(path);
+            },
+
+            waitForBroadcast(timeout = 2000) {
+                return new Promise((resolve, reject) => {
+                    const start = Date.now();
+                    const check = () => {
+                        if (window.lastBroadcast) {
+                            const msg = window.lastBroadcast;
+                            window.lastBroadcast = null;
+                            resolve(msg);
+                        } else if (Date.now() - start > timeout) {
+                            reject(new Error('Timeout waiting for broadcast'));
+                        } else {
+                            setTimeout(check, 10);
+                        }
+                    };
+                    check();
+                });
+            },
+
+            close() {
+                if (ws) {
+                    ws.close();
+                }
+            }
+        };
+
+        console.log('Browser test API ready');
+    </script>
+</head>
+<body>
+    <h1>SwirlDB Browser Test</h1>
+    <div id="status">Initializing...</div>
+</body>
+</html>

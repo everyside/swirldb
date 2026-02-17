@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use swirldb_core::core::SwirlDB;
 use swirldb_core::policy::{Actor, PolicyEngine};
+use swirldb_core::storage::DocumentStorage;
 use swirldb_core::sync::SubscriptionManager;
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::info;
@@ -80,6 +81,8 @@ pub struct BroadcastMessage {
     pub changes: Vec<Vec<u8>>,
     pub affected_paths: Vec<String>,
     pub exclude_connection: Option<Uuid>,
+    /// List of client_ids that should receive this broadcast (based on subscriptions)
+    pub target_clients: Vec<String>,
 }
 
 /// Global server state - thread-safe and highly concurrent
@@ -111,12 +114,18 @@ pub struct ServerState {
 }
 
 impl ServerState {
-    /// Create new server state with optional policy
-    pub fn new(policy: Option<PolicyEngine>) -> Self {
+    /// Create new server state with optional policy and storage adapter
+    ///
+    /// The storage adapter determines where CRDT state is persisted.
+    /// Pass a RedbAdapter for persistent storage, or InMemoryDocStorage for volatile.
+    pub async fn new(policy: Option<PolicyEngine>, storage: Arc<dyn DocumentStorage>) -> Self {
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CHANNEL_SIZE);
 
+        // Create SwirlDB with the provided storage adapter, loading any existing state
+        let db = SwirlDB::with_storage(storage, "global").await;
+
         Self {
-            db: Arc::new(RwLock::new(SwirlDB::new())),
+            db: Arc::new(RwLock::new(db)),
             subscriptions: Arc::new(Mutex::new(SubscriptionManager::new(policy))),
             broadcast_tx,
             clients: Arc::new(DashMap::new()),
@@ -244,10 +253,11 @@ impl ServerState {
         changes: Vec<Vec<u8>>,
         affected_paths: Vec<String>,
     ) -> Result<()> {
-        // Apply changes to global DB
+        // Apply changes to global DB and persist to storage
         {
             let db = self.db.write().await;
             db.apply_changes(changes.clone())?;
+            db.persist().await?;
         }
 
         // Update metrics
@@ -280,6 +290,7 @@ impl ServerState {
                 changes: changes.clone(),
                 affected_paths: affected_paths.clone(),
                 exclude_connection: Some(from_connection_id),
+                target_clients: subscribers,
             };
 
             // send may fail if no receivers, that's ok
@@ -319,30 +330,87 @@ impl ServerState {
         self.start_time.elapsed().unwrap_or_default().as_secs()
     }
 
-    /// Get recent activity log
-    #[allow(dead_code)]
-    pub async fn get_activity_log(&self) -> Vec<ActivityEvent> {
-        self.activity_log.read().await.iter().cloned().collect()
-    }
-
     /// Get server stats
     pub async fn get_stats(&self) -> ServerStats {
+        let subscription_count = {
+            let sub_mgr = self.subscriptions.lock().await;
+            sub_mgr.client_count()
+        };
         ServerStats {
-            connection_count: self.get_connection_count(),
-            change_count: self.get_change_count().await,
+            active_connections: self.get_connection_count(),
+            subscription_count,
+            total_changes: self.get_change_count().await,
             uptime_seconds: self.get_uptime_seconds(),
             last_activity: *self.last_activity.read().await,
         }
     }
+
+    /// Get all connection info for admin
+    pub async fn get_connections(&self) -> Vec<ConnectionInfo> {
+        let sub_mgr = self.subscriptions.lock().await;
+        self.clients
+            .iter()
+            .map(|entry| {
+                let client = entry.value();
+                let patterns = sub_mgr
+                    .get_client_subscriptions(&client.client_id)
+                    .map(|s| s.patterns().to_vec())
+                    .unwrap_or_default();
+                ConnectionInfo {
+                    client_id: client.client_id.clone(),
+                    subscriptions: patterns,
+                    transport: client.transport.clone(),
+                    connected_at: client.connected_at,
+                    last_seen: client.last_seen,
+                }
+            })
+            .collect()
+    }
+
+    /// Get all subscription info for admin
+    pub async fn get_subscriptions(&self) -> Vec<SubscriptionInfo> {
+        let sub_mgr = self.subscriptions.lock().await;
+        sub_mgr
+            .all_clients()
+            .into_iter()
+            .map(|(client_id, patterns)| SubscriptionInfo {
+                client_id,
+                patterns,
+            })
+            .collect()
+    }
+
+    /// Get recent activity log
+    pub async fn get_activity(&self) -> Vec<ActivityEvent> {
+        self.activity_log.read().await.iter().cloned().collect()
+    }
 }
 
-/// Server statistics
+/// Server statistics (for /admin/stats)
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ServerStats {
-    pub connection_count: usize,
-    pub change_count: usize,
+    pub active_connections: usize,
+    pub subscription_count: usize,
+    pub total_changes: usize,
     pub uptime_seconds: u64,
     pub last_activity: i64,
+}
+
+/// Connection info (for /admin/connections)
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ConnectionInfo {
+    pub client_id: String,
+    pub subscriptions: Vec<String>,
+    pub transport: String,
+    pub connected_at: i64,
+    pub last_seen: i64,
+}
+
+/// Subscription info (for /admin/subscriptions)
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SubscriptionInfo {
+    pub client_id: String,
+    pub patterns: Vec<String>,
 }
 
 /// Get current timestamp in milliseconds

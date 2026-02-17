@@ -7,7 +7,7 @@
     "build:wasm": "wasm-pack build --target web && rm -rf ../../packages/browser-wasm/* && cp -r pkg/* ../../packages/browser-wasm/ && cp -r pkg/* ../../packages/swirldb-js/wasm/",
     "build:wrapper": "esbuild src/wrapper.ts --bundle --format=esm --outfile=pkg/swirldb.js --external:./wasm/swirldb_browser.js --external:./wasm/swirldb_browser_bg.wasm --log-level=warning",
     "build": "pnpm run build:wasm && pnpm run build:wrapper && pnpm run copy:output && echo '✅ Build complete'",
-    "copy:output": "cp pkg/swirldb.js ../../packages/browser-wasm/ && cp pkg/swirldb.js ../../packages/swirldb-js/wasm/ && cp pkg/swirldb.js ../../docs/public/ && cp pkg/swirldb.js ../../admin/public/",
+    "copy:output": "cp pkg/swirldb.js ../../packages/browser-wasm/ && cp pkg/swirldb.js ../../packages/swirldb-js/wasm/ && cp pkg/swirldb.js ../../docs/public/ && cp pkg/swirldb.js ../../admin/public/ && cp -r pkg/* ../../docs/public/wasm/ && cp -r pkg/* ../../admin/public/wasm/",
     "build:wasm:dev": "wasm-pack build --target web --dev && rm -rf ../../packages/browser-wasm/* && cp -r pkg/* ../../packages/browser-wasm/ && cp -r pkg/* ../../packages/swirldb-js/wasm/",
     "test": "pnpm run test:node",
     "test:node": "wasm-pack test --node",

@@ -9,7 +9,7 @@ use anyhow::{anyhow, Result};
 /// change tracking with path-based subscription filtering and policy integration.
 ///
 /// Key concepts:
-/// - **Subscriptions**: Clients subscribe to path patterns (e.g., `/user/{actor.id}/**`)
+/// - **Subscriptions**: Clients subscribe to path patterns (e.g., `user.{actor.id}.**`)
 /// - **Policy-aware**: Subscribe action validated by PolicyEngine
 /// - **Change filtering**: Only send changes affecting subscribed paths
 /// - **Platform-agnostic**: Lives in core, usable in browser and server
@@ -221,6 +221,19 @@ impl SubscriptionManager {
     pub fn get_client_subscriptions(&self, client_id: &str) -> Option<&SubscriptionSet> {
         self.subscriptions.get(client_id)
     }
+
+    /// Get total number of clients with subscriptions
+    pub fn client_count(&self) -> usize {
+        self.subscriptions.len()
+    }
+
+    /// Get all subscriptions as (client_id, patterns) pairs
+    pub fn all_clients(&self) -> Vec<(String, Vec<String>)> {
+        self.subscriptions
+            .iter()
+            .map(|(id, sub_set)| (id.clone(), sub_set.patterns().to_vec()))
+            .collect()
+    }
 }
 
 /// Sync configuration
@@ -335,21 +348,21 @@ mod tests {
                         "priority": 10,
                         "actor": { "type": "User" },
                         "action": "Subscribe",
-                        "path_pattern": "/user/{actor.id}/**",
+                        "path_pattern": "user.{actor.id}.**",
                         "effect": "Allow"
                     },
                     {
                         "priority": 20,
                         "actor": { "type": "User" },
                         "action": "Subscribe",
-                        "path_pattern": "/public/**",
+                        "path_pattern": "public.**",
                         "effect": "Allow"
                     },
                     {
                         "priority": 9999,
                         "actor": { "type": "Any" },
                         "action": "Subscribe",
-                        "path_pattern": "/**",
+                        "path_pattern": "**",
                         "effect": "Deny"
                     }
                 ]
@@ -365,13 +378,13 @@ mod tests {
         let mut sub_set = SubscriptionSet::new(actor);
 
         sub_set.add_subscriptions(
-            vec!["/user/alice/**".to_string(), "/public/**".to_string()],
+            vec!["user.alice.**".to_string(), "public.**".to_string()],
             None,
         );
 
-        assert!(sub_set.matches_path("/user/alice/prefs/theme"));
-        assert!(sub_set.matches_path("/public/config"));
-        assert!(!sub_set.matches_path("/user/bob/prefs/theme"));
+        assert!(sub_set.matches_path("user.alice.prefs.theme"));
+        assert!(sub_set.matches_path("public.config"));
+        assert!(!sub_set.matches_path("user.bob.prefs.theme"));
     }
 
     #[test]
@@ -383,21 +396,21 @@ mod tests {
         // Try to subscribe to allowed and denied patterns
         let (added, denied) = sub_set.add_subscriptions(
             vec![
-                "/user/alice/**".to_string(), // ✅ Allowed
-                "/public/**".to_string(),     // ✅ Allowed
-                "/user/bob/**".to_string(),   // ❌ Denied (not alice's data)
-                "/admin/**".to_string(),      // ❌ Denied (no rule allows)
+                "user.alice.**".to_string(), // ✅ Allowed
+                "public.**".to_string(),     // ✅ Allowed
+                "user.bob.**".to_string(),   // ❌ Denied (not alice's data)
+                "admin.**".to_string(),      // ❌ Denied (no rule allows)
             ],
             Some(&policy),
         );
 
         assert_eq!(added.len(), 2);
-        assert!(added.contains(&"/user/alice/**".to_string()));
-        assert!(added.contains(&"/public/**".to_string()));
+        assert!(added.contains(&"user.alice.**".to_string()));
+        assert!(added.contains(&"public.**".to_string()));
 
         assert_eq!(denied.len(), 2);
-        assert!(denied.contains(&"/user/bob/**".to_string()));
-        assert!(denied.contains(&"/admin/**".to_string()));
+        assert!(denied.contains(&"user.bob.**".to_string()));
+        assert!(denied.contains(&"admin.**".to_string()));
     }
 
     #[test]
@@ -412,9 +425,9 @@ mod tests {
             "alice_client".to_string(),
             actor,
             vec![
-                "/user/alice/**".to_string(),
-                "/public/**".to_string(),
-                "/admin/**".to_string(), // Should be denied
+                "user.alice.**".to_string(),
+                "public.**".to_string(),
+                "admin.**".to_string(), // Should be denied
             ],
         );
 
@@ -422,22 +435,22 @@ mod tests {
         assert_eq!(denied.len(), 1);
 
         // Check subscribers for specific paths
-        let subscribers = manager.get_subscribers_for_path("/user/alice/prefs");
+        let subscribers = manager.get_subscribers_for_path("user.alice.prefs");
         assert_eq!(subscribers.len(), 1);
         assert_eq!(subscribers[0], "alice_client");
 
-        let subscribers = manager.get_subscribers_for_path("/user/bob/prefs");
+        let subscribers = manager.get_subscribers_for_path("user.bob.prefs");
         assert_eq!(subscribers.len(), 0);
 
-        let subscribers = manager.get_subscribers_for_path("/public/data");
+        let subscribers = manager.get_subscribers_for_path("public.data");
         assert_eq!(subscribers.len(), 1);
 
         // Update subscriptions
         let (added, denied) = manager
             .update_subscriptions(
                 "alice_client",
-                vec!["/org/acme/**".to_string()], // Should be denied
-                vec!["/public/**".to_string()],   // Remove this
+                vec!["org.acme.**".to_string()], // Should be denied
+                vec!["public.**".to_string()],   // Remove this
             )
             .unwrap();
 
@@ -445,12 +458,12 @@ mod tests {
         assert_eq!(denied.len(), 1);
 
         // Public should no longer match
-        let subscribers = manager.get_subscribers_for_path("/public/data");
+        let subscribers = manager.get_subscribers_for_path("public.data");
         assert_eq!(subscribers.len(), 0);
 
         // Remove client
         manager.remove_client("alice_client");
-        let subscribers = manager.get_subscribers_for_path("/user/alice/prefs");
+        let subscribers = manager.get_subscribers_for_path("user.alice.prefs");
         assert_eq!(subscribers.len(), 0);
     }
 
@@ -465,26 +478,26 @@ mod tests {
         manager.add_client(
             "alice_client".to_string(),
             alice,
-            vec!["/user/alice/**".to_string(), "/public/**".to_string()],
+            vec!["user.alice.**".to_string(), "public.**".to_string()],
         );
 
         manager.add_client(
             "bob_client".to_string(),
             bob,
-            vec!["/user/bob/**".to_string(), "/public/**".to_string()],
+            vec!["user.bob.**".to_string(), "public.**".to_string()],
         );
 
         // Both should get public updates
-        let subscribers = manager.get_subscribers_for_path("/public/data");
+        let subscribers = manager.get_subscribers_for_path("public.data");
         assert_eq!(subscribers.len(), 2);
 
         // Only alice gets her updates
-        let subscribers = manager.get_subscribers_for_path("/user/alice/prefs");
+        let subscribers = manager.get_subscribers_for_path("user.alice.prefs");
         assert_eq!(subscribers.len(), 1);
         assert_eq!(subscribers[0], "alice_client");
 
         // Only bob gets his updates
-        let subscribers = manager.get_subscribers_for_path("/user/bob/prefs");
+        let subscribers = manager.get_subscribers_for_path("user.bob.prefs");
         assert_eq!(subscribers.len(), 1);
         assert_eq!(subscribers[0], "bob_client");
     }

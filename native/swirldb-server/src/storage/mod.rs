@@ -1,14 +1,17 @@
 // Copyright 2025 Everyside Innovations, LLC
 // SPDX-License-Identifier: Apache-2.0
 
-/// Storage implementations for SwirlDB server
-///
-/// Server storage uses DocumentStorage from core for saving/loading state.
-/// With the global CRDT design, we no longer need separate ChangeLog adapters.
-/// Change history is maintained by Automerge and accessed via SwirlDB methods.
-use serde::{Deserialize, Serialize};
+//! Storage implementations for SwirlDB server
+//!
+//! Server storage uses DocumentStorage from core for saving/loading state.
+//! With the global CRDT design, we no longer need separate ChangeLog adapters.
+//! Change history is maintained by Automerge and accessed via SwirlDB methods.
 
-// Re-export core storage traits
+pub mod redb;
+
+pub use self::redb::RedbAdapter;
+
+use serde::{Deserialize, Serialize};
 
 /// Storage statistics (server-specific helper)
 #[allow(dead_code)]

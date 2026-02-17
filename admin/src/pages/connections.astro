@@ -7,6 +7,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Connections - SwirlDB Admin</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <style>
     * {
       margin: 0;
@@ -317,8 +318,8 @@
         <div class="nav-section">
           <div class="nav-section-title">Data Management</div>
           <a href="/namespaces" class="nav-link">
-            <span class="nav-icon">🗂️</span>
-            Namespaces
+            <span class="nav-icon">📡</span>
+            Subscriptions
           </a>
           <a href="/data" class="nav-link">
             <span class="nav-icon">🔍</span>
@@ -367,7 +368,7 @@
               <thead>
                 <tr>
                   <th>Client ID</th>
-                  <th>Namespace</th>
+                  <th>Subscriptions</th>
                   <th>Transport</th>
                   <th>Connected</th>
                   <th>Last Seen</th>
@@ -388,266 +389,60 @@
     </main>
   </div>
 
-  <script type="module">
-    import { SwirlDB } from '/swirldb.js';
+  <script>
+    const SERVER = 'http://localhost:3030';
 
-    const ADMIN_NAMESPACE = '__admin';
-    let db;
-    let ws = null;
-    let reconnectAttempts = 0;
-    let maxReconnectDelay = 30000;
-    let reconnectTimer = null;
-
-    // Update current time
     function updateTime() {
       document.getElementById('current-time').textContent =
-        new Date().toLocaleString('en-US', {
-          hour: '2-digit',
-          minute: '2-digit',
-          second: '2-digit',
-          hour12: false
-        });
+        new Date().toLocaleString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
     }
     updateTime();
     setInterval(updateTime, 1000);
 
-    function formatRelativeTime(timestamp) {
-      if (!timestamp) return 'Never';
-      const now = Date.now();
-      const diff = now - timestamp;
-      const seconds = Math.floor(diff / 1000);
-
-      if (seconds < 60) return `${seconds}s ago`;
-      if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-      if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-      return new Date(timestamp).toLocaleString();
+    function formatRelativeTime(ts) {
+      if (!ts) return 'Never';
+      const diff = Math.floor((Date.now() - ts) / 1000);
+      if (diff < 60) return `${diff}s ago`;
+      if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+      if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+      return new Date(ts).toLocaleString();
     }
 
-    async function init() {
+    const es = new EventSource(`${SERVER}/admin/events`);
+
+    es.onopen = () => {
+      document.getElementById('status-dot').className = 'status-dot online';
+      document.getElementById('status-text').textContent = 'Connected';
+    };
+
+    es.onerror = () => {
+      document.getElementById('status-dot').className = 'status-dot offline';
+      document.getElementById('status-text').textContent = 'Reconnecting...';
+    };
+
+    es.onmessage = (e) => {
       try {
-        db = await SwirlDB.withLocalStorage('swirldb-admin');
-        console.log('✅ Connections page SwirlDB initialized');
-
-        db.data.connections.$observe(() => {
-          console.log('🔄 Connections observer triggered');
-          updateConnections();
-        });
-
-        // Give localStorage time to load, then render
-        setTimeout(() => {
-          console.log('📊 Initial render with cached data');
-          updateConnections();
-        }, 50);
-
-        await connectToServer();
-      } catch (error) {
-        console.error('❌ Initialization failed:', error);
-        document.getElementById('status-dot').className = 'status-dot offline';
-        document.getElementById('status-text').textContent = 'Connection Failed';
-      }
-    }
-
-    async function connectToServer() {
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
-
-      return new Promise((resolve, reject) => {
-        ws = new WebSocket('ws://localhost:3030/ws');
-        ws.binaryType = 'arraybuffer';
-
-        ws.onopen = () => {
-          console.log('✅ Connected');
-          reconnectAttempts = 0;
-          document.getElementById('status-dot').className = 'status-dot online';
-          document.getElementById('status-text').textContent = 'Connected';
-
-          sendConnectMessage();
-          setTimeout(() => broadcastCRDTState(), 100);
-          resolve();
-        };
-
-        ws.onmessage = (event) => {
-          handleServerMessage(new Uint8Array(event.data));
-        };
-
-        ws.onclose = () => {
-          console.log('👋 Disconnected');
-          document.getElementById('status-dot').className = 'status-dot offline';
-          document.getElementById('status-text').textContent = 'Reconnecting...';
-          scheduleReconnect();
-        };
-
-        ws.onerror = (error) => {
-          console.error('❌ WebSocket error:', error);
-          reject(error);
-        };
-      });
-    }
-
-    function scheduleReconnect() {
-      const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), maxReconnectDelay);
-      reconnectAttempts++;
-      document.getElementById('status-text').textContent = `Reconnecting in ${Math.ceil(delay/1000)}s...`;
-
-      reconnectTimer = setTimeout(async () => {
-        try {
-          await connectToServer();
-        } catch (error) {
-          console.error('❌ Reconnection failed:', error);
-        }
-      }, delay);
-    }
-
-    function sendConnectMessage() {
-      const clientIdBytes = new TextEncoder().encode('admin-connections');
-      const namespaceBytes = new TextEncoder().encode(ADMIN_NAMESPACE);
-      const headsBytes = db.getHeads();
-
-      const size = 1 + 4 + clientIdBytes.length + 4 + namespaceBytes.length + 4 + headsBytes.length;
-      const buffer = new Uint8Array(size);
-      let offset = 0;
-
-      buffer[offset++] = 0x01;
-      writeUint32(buffer, offset, clientIdBytes.length);
-      offset += 4;
-      buffer.set(clientIdBytes, offset);
-      offset += clientIdBytes.length;
-      writeUint32(buffer, offset, namespaceBytes.length);
-      offset += 4;
-      buffer.set(namespaceBytes, offset);
-      offset += namespaceBytes.length;
-      writeUint32(buffer, offset, headsBytes.length);
-      offset += 4;
-      buffer.set(headsBytes, offset);
-
-      ws.send(buffer);
-    }
-
-    function broadcastCRDTState() {
-      const allChanges = db.getChanges();
-      if (allChanges.length === 0) return;
-
-      const namespaceBytes = new TextEncoder().encode(ADMIN_NAMESPACE);
-      let totalSize = 1 + 4 + namespaceBytes.length + 4;
-      for (const change of allChanges) {
-        totalSize += 4 + change.length;
-      }
-
-      const buffer = new Uint8Array(totalSize);
-      let offset = 0;
-
-      buffer[offset++] = 0x03;
-      writeUint32(buffer, offset, namespaceBytes.length);
-      offset += 4;
-      buffer.set(namespaceBytes, offset);
-      offset += namespaceBytes.length;
-      writeUint32(buffer, offset, allChanges.length);
-      offset += 4;
-
-      for (const change of allChanges) {
-        writeUint32(buffer, offset, change.length);
-        offset += 4;
-        buffer.set(change, offset);
-        offset += change.length;
-      }
-
-      ws.send(buffer);
-    }
-
-    function handleServerMessage(buffer) {
-      const msgType = buffer[0];
-      if (msgType === 0x02) handleSync(buffer);
-      else if (msgType === 0x04) handleBroadcast(buffer);
-    }
-
-    function handleSync(buffer) {
-      let offset = 1;
-      const headsLen = readUint32(buffer, offset);
-      offset += 4 + headsLen;
-      applyCRDTChanges(buffer, offset);
-    }
-
-    function handleBroadcast(buffer) {
-      let offset = 1;
-      const clientIdLen = readUint32(buffer, offset);
-      offset += 4 + clientIdLen;
-      applyCRDTChanges(buffer, offset);
-    }
-
-    function applyCRDTChanges(buffer, offset) {
-      const changesCount = readUint32(buffer, offset);
-      offset += 4;
-
-      if (changesCount === 0) return;
-
-      const allChanges = [];
-      for (let i = 0; i < changesCount; i++) {
-        const changeLen = readUint32(buffer, offset);
-        offset += 4;
-        const changeBytes = buffer.slice(offset, offset + changeLen);
-        offset += changeLen;
-        allChanges.push(changeBytes);
-      }
-
-      try {
-        db.applyChanges(allChanges);
-        db.checkObservers();
-      } catch (e) {
-        console.error('❌ Failed to apply changes:', e);
-      }
-    }
-
-    function updateConnections() {
-      try {
-        const connections = db.data.connections.$value;
-        if (!connections) return;
-
-        const connArray = typeof connections === 'string' ? JSON.parse(connections) : connections;
+        const { connections } = JSON.parse(e.data);
         const tbody = document.getElementById('connections-tbody');
 
-        if (!Array.isArray(connArray) || connArray.length === 0) {
-          tbody.innerHTML = `
-            <tr>
-              <td colspan="5" class="empty-state">
-                <div class="empty-state-icon">🔌</div>
-                <div>No active connections</div>
-              </td>
-            </tr>
-          `;
+        if (!connections || connections.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="5" class="empty-state"><div class="empty-state-icon">🔌</div><div>No active connections</div></td></tr>`;
           return;
         }
 
-        tbody.innerHTML = connArray.map(conn => `
+        tbody.innerHTML = connections.map(conn => `
           <tr>
             <td><span class="code">${conn.client_id}</span></td>
-            <td><span class="code">${conn.namespace_id}</span></td>
+            <td>${(conn.subscriptions || []).map(p => `<span class="code">${p}</span>`).join(', ') || 'None'}</td>
             <td><span class="badge badge-info">${conn.transport || 'WebSocket'}</span></td>
             <td>${formatRelativeTime(conn.connected_at)}</td>
             <td>${formatRelativeTime(conn.last_seen)}</td>
           </tr>
         `).join('');
-      } catch (e) {
-        console.error('Error updating connections:', e);
+      } catch (err) {
+        console.error('SSE parse error:', err);
       }
-    }
-
-    function readUint32(buffer, offset) {
-      return (buffer[offset] << 24) |
-             (buffer[offset + 1] << 16) |
-             (buffer[offset + 2] << 8) |
-             buffer[offset + 3];
-    }
-
-    function writeUint32(buffer, offset, value) {
-      buffer[offset] = (value >>> 24) & 0xFF;
-      buffer[offset + 1] = (value >>> 16) & 0xFF;
-      buffer[offset + 2] = (value >>> 8) & 0xFF;
-      buffer[offset + 3] = value & 0xFF;
-    }
-
-    init();
+    };
   </script>
 </body>
 </html>

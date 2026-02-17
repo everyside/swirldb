@@ -74,11 +74,11 @@ fn fire_observers_for_paths(db_id: usize, core: &swirldb_core::SwirlDB, affected
             let is_affected = affected_paths.iter().any(|affected| {
                 // Match if observer path is a prefix of affected path, or vice versa
                 // e.g., observer="messages" matches affected="messages.msg_123"
-                // Also handles glob patterns like "/**"
+                // Also handles glob patterns like "**"
                 affected.starts_with(path.as_str())
                     || path.starts_with(affected.as_str())
-                    || affected == "/**"
-                    || path == "/**"
+                    || affected == "**"
+                    || path == "**"
             });
 
             if is_affected {
@@ -454,7 +454,7 @@ impl SwirlDB {
     ///         priority: 10,
     ///         actor: { type: "User" },
     ///         action: "Write",
-    ///         path_pattern: "/user/{actor.id}/**",
+    ///         path_pattern: "user.{actor.id}.**",
     ///         effect: "Allow"
     ///       }
     ///     ]
@@ -851,6 +851,171 @@ impl SwirlDB {
                 }
             }
         });
+    }
+
+    // ===== Manual Protocol Methods (for testing) =====
+
+    /// Encode a Connect message (for manual WebSocket control)
+    ///
+    /// This is primarily for testing - normally use connect() instead
+    #[wasm_bindgen(js_name = encodeConnectMessage)]
+    pub fn encode_connect_message(
+        &self,
+        client_id: String,
+        subscriptions: Vec<String>,
+        heads: Uint8Array,
+    ) -> Uint8Array {
+        let msg = Message::Connect {
+            client_id,
+            subscriptions,
+            heads: heads.to_vec(),
+        };
+        let encoded = msg.encode();
+        Uint8Array::from(&encoded[..])
+    }
+
+    /// Encode a Push message (for manual WebSocket control)
+    ///
+    /// This is primarily for testing - normally use syncChanges() instead
+    #[wasm_bindgen(js_name = encodePushMessage)]
+    pub fn encode_push_message(&self, heads: Uint8Array, changes: Vec<Uint8Array>) -> Uint8Array {
+        let changes_vec: Vec<Vec<u8>> = changes.into_iter().map(|arr| arr.to_vec()).collect();
+        let msg = Message::Push {
+            heads: heads.to_vec(),
+            changes: changes_vec,
+        };
+        let encoded = msg.encode();
+        Uint8Array::from(&encoded[..])
+    }
+
+    /// Decode a protocol message (for manual WebSocket control)
+    ///
+    /// Returns a JavaScript object with the message type and fields
+    /// This is primarily for testing - normally use connect() instead
+    #[wasm_bindgen(js_name = decodeMessage)]
+    pub fn decode_message(&self, data: Uint8Array) -> Result<JsValue, JsValue> {
+        let bytes = data.to_vec();
+        let msg = Message::decode(&bytes)
+            .map_err(|e| JsValue::from_str(&format!("Failed to decode message: {}", e)))?;
+
+        // Convert Message to a JavaScript-friendly object
+        let result = match msg {
+            Message::Connect {
+                client_id,
+                subscriptions,
+                heads,
+            } => {
+                let obj = js_sys::Object::new();
+                js_sys::Reflect::set(&obj, &"type".into(), &"Connect".into())?;
+                js_sys::Reflect::set(&obj, &"clientId".into(), &client_id.into())?;
+                let subs = subscriptions
+                    .into_iter()
+                    .map(JsValue::from)
+                    .collect::<js_sys::Array>();
+                js_sys::Reflect::set(&obj, &"subscriptions".into(), &subs)?;
+                js_sys::Reflect::set(&obj, &"heads".into(), &Uint8Array::from(&heads[..]))?;
+                obj.into()
+            }
+            Message::SubscribeAck { added, denied } => {
+                let obj = js_sys::Object::new();
+                js_sys::Reflect::set(&obj, &"type".into(), &"SubscribeAck".into())?;
+                let added_arr = added
+                    .into_iter()
+                    .map(JsValue::from)
+                    .collect::<js_sys::Array>();
+                js_sys::Reflect::set(&obj, &"added".into(), &added_arr)?;
+                let denied_arr = denied
+                    .into_iter()
+                    .map(JsValue::from)
+                    .collect::<js_sys::Array>();
+                js_sys::Reflect::set(&obj, &"denied".into(), &denied_arr)?;
+                obj.into()
+            }
+            Message::Sync { heads, changes } => {
+                let obj = js_sys::Object::new();
+                js_sys::Reflect::set(&obj, &"type".into(), &"Sync".into())?;
+                js_sys::Reflect::set(&obj, &"heads".into(), &Uint8Array::from(&heads[..]))?;
+                let changes_arr = changes
+                    .into_iter()
+                    .map(|c| Uint8Array::from(&c[..]))
+                    .map(JsValue::from)
+                    .collect::<js_sys::Array>();
+                js_sys::Reflect::set(&obj, &"changes".into(), &changes_arr)?;
+                obj.into()
+            }
+            Message::Push { heads, changes } => {
+                let obj = js_sys::Object::new();
+                js_sys::Reflect::set(&obj, &"type".into(), &"Push".into())?;
+                js_sys::Reflect::set(&obj, &"heads".into(), &Uint8Array::from(&heads[..]))?;
+                let changes_arr = changes
+                    .into_iter()
+                    .map(|c| Uint8Array::from(&c[..]))
+                    .map(JsValue::from)
+                    .collect::<js_sys::Array>();
+                js_sys::Reflect::set(&obj, &"changes".into(), &changes_arr)?;
+                obj.into()
+            }
+            Message::Broadcast {
+                from_client_id,
+                changes,
+                affected_paths,
+            } => {
+                let obj = js_sys::Object::new();
+                js_sys::Reflect::set(&obj, &"type".into(), &"Broadcast".into())?;
+                js_sys::Reflect::set(&obj, &"fromClientId".into(), &from_client_id.into())?;
+                let changes_arr = changes
+                    .into_iter()
+                    .map(|c| Uint8Array::from(&c[..]))
+                    .map(JsValue::from)
+                    .collect::<js_sys::Array>();
+                js_sys::Reflect::set(&obj, &"changes".into(), &changes_arr)?;
+                let paths_arr = affected_paths
+                    .into_iter()
+                    .map(JsValue::from)
+                    .collect::<js_sys::Array>();
+                js_sys::Reflect::set(&obj, &"affectedPaths".into(), &paths_arr)?;
+                obj.into()
+            }
+            Message::PushAck { heads } => {
+                let obj = js_sys::Object::new();
+                js_sys::Reflect::set(&obj, &"type".into(), &"PushAck".into())?;
+                js_sys::Reflect::set(&obj, &"heads".into(), &Uint8Array::from(&heads[..]))?;
+                obj.into()
+            }
+            Message::Error { message } => {
+                let obj = js_sys::Object::new();
+                js_sys::Reflect::set(&obj, &"type".into(), &"Error".into())?;
+                js_sys::Reflect::set(&obj, &"message".into(), &message.into())?;
+                obj.into()
+            }
+            Message::Subscribe { add, remove } => {
+                let obj = js_sys::Object::new();
+                js_sys::Reflect::set(&obj, &"type".into(), &"Subscribe".into())?;
+                let add_arr = add
+                    .into_iter()
+                    .map(JsValue::from)
+                    .collect::<js_sys::Array>();
+                js_sys::Reflect::set(&obj, &"add".into(), &add_arr)?;
+                let remove_arr = remove
+                    .into_iter()
+                    .map(JsValue::from)
+                    .collect::<js_sys::Array>();
+                js_sys::Reflect::set(&obj, &"remove".into(), &remove_arr)?;
+                obj.into()
+            }
+            Message::Ping => {
+                let obj = js_sys::Object::new();
+                js_sys::Reflect::set(&obj, &"type".into(), &"Ping".into())?;
+                obj.into()
+            }
+            Message::Pong => {
+                let obj = js_sys::Object::new();
+                js_sys::Reflect::set(&obj, &"type".into(), &"Pong".into())?;
+                obj.into()
+            }
+        };
+
+        Ok(result)
     }
 }
 

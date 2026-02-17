@@ -19,16 +19,22 @@ use axum::{
         State as AxumState,
     },
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
     routing::get,
     Json, Router,
 };
 use futures::{SinkExt, StreamExt};
-use state::{ServerState, ServerStats};
+use state::ServerState;
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::{env, fs, io::BufReader, time::Duration};
+use storage::RedbAdapter;
 use swirldb_core::protocol::Message;
+use swirldb_core::storage::{DocumentStorage, InMemoryDocStorage};
 use tokio::time::interval;
 use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
@@ -60,15 +66,41 @@ async fn main() -> Result<()> {
     // TODO: Load policy from config file
     let policy = None;
 
-    // Create server state
-    let server_state = ServerState::new(policy);
+    // Parse storage configuration from environment
+    let storage_type = env::var("STORAGE_TYPE").unwrap_or_else(|_| "redb".to_string());
+    let storage_path =
+        env::var("STORAGE_PATH").unwrap_or_else(|_| "./data/swirldb.redb".to_string());
+
+    let storage: Arc<dyn DocumentStorage> = match storage_type.as_str() {
+        "memory" => {
+            info!("Using in-memory storage (volatile - data lost on restart)");
+            Arc::new(InMemoryDocStorage::new())
+        }
+        "redb" => {
+            // Ensure the parent directory exists
+            if let Some(parent) = std::path::Path::new(&storage_path).parent() {
+                fs::create_dir_all(parent)?;
+            }
+            info!("Using redb persistent storage at: {}", storage_path);
+            Arc::new(RedbAdapter::new(&storage_path)?)
+        }
+        other => {
+            anyhow::bail!(
+                "Unknown STORAGE_TYPE '{}'. Valid values: memory, redb",
+                other
+            );
+        }
+    };
+
+    // Create server state with storage
+    let server_state = ServerState::new(policy, storage).await;
 
     // Build axum router
     let app = Router::new()
         .route("/ws", get(websocket_handler))
         .route("/health", get(health_handler))
         .route("/stats", get(stats_handler))
-        // TODO: Add HTTP sync endpoints with subscription-based protocol
+        .route("/admin/events", get(admin_sse_handler))
         .layer(CorsLayer::permissive())
         .with_state(server_state.clone());
 
@@ -303,7 +335,7 @@ async fn handle_websocket(socket: WebSocket, state: ServerState) {
                                         db.extract_affected_paths(&changes)
                                             .unwrap_or_else(|e| {
                                                 warn!("Failed to extract paths: {}. Using wildcard.", e);
-                                                vec!["/**".to_string()]
+                                                vec!["**".to_string()]
                                             })
                                     };
 
@@ -393,7 +425,12 @@ async fn handle_websocket(socket: WebSocket, state: ServerState) {
                             continue;
                         }
 
-                        if client_info.is_some() {
+                        // Only send to clients that should receive this broadcast (based on subscriptions)
+                        if let Some(ref client_id) = client_info {
+                            if !msg.target_clients.contains(client_id) {
+                                continue;
+                            }
+
                             let broadcast_msg = Message::Broadcast {
                                 from_client_id: msg.from_client_id,
                                 changes: msg.changes,
@@ -429,14 +466,39 @@ async fn health_handler() -> &'static str {
     "OK"
 }
 
-/// Stats endpoint
-async fn stats_handler(AxumState(state): AxumState<ServerState>) -> Json<ServerStats> {
+/// Stats endpoint (legacy, kept for compatibility)
+async fn stats_handler(AxumState(state): AxumState<ServerState>) -> impl IntoResponse {
     let stats = state.get_stats().await;
     Json(stats)
 }
 
-// TODO: Add HTTP sync handlers with subscription-based protocol
-// Old HTTP handlers were namespace-based and need to be rewritten
+/// Admin SSE endpoint - streams stats, connections, subscriptions, and activity
+async fn admin_sse_handler(
+    AxumState(state): AxumState<ServerState>,
+) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    let stream = async_stream::stream! {
+        let mut ticker = interval(Duration::from_secs(2));
+        loop {
+            ticker.tick().await;
+
+            let stats = state.get_stats().await;
+            let connections = state.get_connections().await;
+            let subscriptions = state.get_subscriptions().await;
+            let activity = state.get_activity().await;
+
+            let payload = serde_json::json!({
+                "stats": stats,
+                "connections": connections,
+                "subscriptions": subscriptions,
+                "activity": activity,
+            });
+
+            yield Ok(Event::default().data(payload.to_string()));
+        }
+    };
+
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
 
 /// Heartbeat task - sends pings to all connected clients
 async fn heartbeat_task(state: ServerState) {

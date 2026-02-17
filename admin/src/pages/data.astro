@@ -1,5 +1,5 @@
 ---
-// Data browser page - Query and modify namespace data
+// Data browser page - Browse and edit the global CRDT path tree
 ---
 <!DOCTYPE html>
 <html lang="en">
@@ -7,6 +7,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Data Browser - SwirlDB Admin</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons" />
   <style is:global>
     .material-icons {
@@ -23,11 +24,7 @@
       direction: ltr;
     }
 
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
 
     :root {
       --bg-primary: #0a0e1a;
@@ -51,473 +48,80 @@
       min-height: 100vh;
     }
 
-    .app-container {
-      display: flex;
-      min-height: 100vh;
-    }
+    .app-container { display: flex; min-height: 100vh; }
+    .sidebar { width: 260px; background: var(--bg-secondary); border-right: 1px solid var(--border); display: flex; flex-direction: column; }
+    .sidebar-header { padding: 1.5rem; border-bottom: 1px solid var(--border); }
+    .sidebar-header h1 { font-size: 1.25rem; font-weight: 700; background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; display: flex; align-items: center; gap: 0.5rem; }
+    .sidebar-header h1 .swirl-icon { font-size: 1.75rem; background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; animation: spin 8s linear infinite; }
+    @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(-360deg); } }
+    .sidebar-header .subtitle { font-size: 0.75rem; color: var(--text-muted); margin-top: 0.25rem; }
+    .sync-indicator { font-size: 0.75rem; color: var(--text-muted); display: flex; align-items: center; gap: 0.5rem; }
+    .sync-pulse { width: 6px; height: 6px; background: var(--success); border-radius: 50%; animation: pulse 2s infinite; }
+    .nav-menu { flex: 1; padding: 1rem; }
+    .nav-section { margin-bottom: 1.5rem; }
+    .nav-section-title { font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted); margin-bottom: 0.5rem; padding: 0 0.75rem; }
+    .nav-link { display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem; border-radius: 0.5rem; color: var(--text-secondary); text-decoration: none; transition: all 0.2s; font-size: 0.9rem; margin-bottom: 0.25rem; }
+    .nav-link:hover { background: var(--bg-card); color: var(--text-primary); }
+    .nav-link.active { background: var(--accent); color: white; }
+    .nav-icon { width: 20px; height: 20px; }
+    .main-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    .top-bar { background: var(--bg-secondary); border-bottom: 1px solid var(--border); padding: 1rem 1.5rem; display: flex; justify-content: space-between; align-items: center; }
+    .server-status { display: flex; align-items: center; gap: 1rem; }
+    .page-header { display: flex; align-items: center; gap: 1rem; }
+    .page-header h1 { font-size: 1.5rem; font-weight: 700; }
+    .status-indicator { display: flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem; background: var(--bg-card); border-radius: 0.5rem; font-size: 0.85rem; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; animation: pulse 2s infinite; }
+    .status-dot.online { background: var(--success); }
+    .status-dot.offline { background: var(--danger); }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
 
-    /* Sidebar */
-    .sidebar {
-      width: 260px;
-      background: var(--bg-secondary);
-      border-right: 1px solid var(--border);
-      display: flex;
-      flex-direction: column;
-    }
+    .content-area { flex: 1; overflow: hidden; padding: 1.5rem; display: flex; flex-direction: column; gap: 1rem; }
+    .section { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 0.75rem; }
 
-    .sidebar-header {
-      padding: 1.5rem;
-      border-bottom: 1px solid var(--border);
-    }
-
-    .sidebar-header h1 {
-      font-size: 1.25rem;
-      font-weight: 700;
-      background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-
-    .sidebar-header h1 .swirl-icon {
-      font-size: 1.75rem;
-      background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
-      animation: spin 8s linear infinite;
-    }
-
-    @keyframes spin {
-      from { transform: rotate(0deg); }
-      to { transform: rotate(-360deg); }
-    }
-
-    .sidebar-header .subtitle {
-      font-size: 0.75rem;
-      color: var(--text-muted);
-      margin-top: 0.25rem;
-    }
-
-    .sync-indicator {
-      font-size: 0.75rem;
-      color: var(--text-muted);
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-
-    .sync-pulse {
-      width: 6px;
-      height: 6px;
-      background: var(--success);
-      border-radius: 50%;
-      animation: pulse 2s infinite;
-    }
-
-    .nav-menu {
-      flex: 1;
-      padding: 1rem;
-    }
-
-    .nav-section {
-      margin-bottom: 1.5rem;
-    }
-
-    .nav-section-title {
-      font-size: 0.7rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: var(--text-muted);
-      margin-bottom: 0.5rem;
-      padding: 0 0.75rem;
-    }
-
-    .nav-link {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      padding: 0.75rem;
-      border-radius: 0.5rem;
-      color: var(--text-secondary);
-      text-decoration: none;
-      transition: all 0.2s;
-      font-size: 0.9rem;
-      margin-bottom: 0.25rem;
-    }
-
-    .nav-link:hover {
-      background: var(--bg-card);
-      color: var(--text-primary);
-    }
-
-    .nav-link.active {
-      background: var(--accent);
-      color: white;
-    }
-
-    .nav-icon {
-      width: 20px;
-      height: 20px;
-    }
-
-    /* Main Content */
-    .main-content {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }
-
-    .top-bar {
-      background: var(--bg-secondary);
-      border-bottom: 1px solid var(--border);
-      padding: 1rem 1.5rem;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-
-    .server-status {
-      display: flex;
-      align-items: center;
-      gap: 1rem;
-    }
-
-    .page-header {
-      display: flex;
-      align-items: center;
-      gap: 1rem;
-    }
-
-    .page-header h1 {
-      font-size: 1.5rem;
-      font-weight: 700;
-    }
-
-    .status-indicator {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.5rem 1rem;
-      background: var(--bg-card);
-      border-radius: 0.5rem;
-      font-size: 0.85rem;
-    }
-
-    .status-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      animation: pulse 2s infinite;
-    }
-
-    .status-dot.online {
-      background: var(--success);
-    }
-
-    .status-dot.offline {
-      background: var(--danger);
-    }
-
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.5; }
-    }
-
-    .content-area {
-      flex: 1;
-      overflow-y: auto;
-      padding: 1.5rem;
-      display: grid;
-      grid-template-columns: 300px 1fr;
-      gap: 1.5rem;
-    }
-
-    .section {
+    .json-pane {
       background: var(--bg-secondary);
       border: 1px solid var(--border);
       border-radius: 0.75rem;
-      padding: 1.5rem;
-      height: fit-content;
-    }
-
-    .section-title {
-      font-size: 1.1rem;
-      font-weight: 600;
-      margin-bottom: 1rem;
-    }
-
-    .namespace-list {
-      list-style: none;
-    }
-
-    .namespace-item {
-      padding: 0.75rem;
-      border-radius: 0.5rem;
-      cursor: pointer;
-      transition: all 0.2s;
-      margin-bottom: 0.5rem;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-
-    .namespace-item:hover {
-      background: var(--bg-card);
-    }
-
-    .namespace-item.selected {
-      background: var(--accent);
-      color: white;
-    }
-
-    .namespace-name {
-      font-family: 'SF Mono', Monaco, Consolas, monospace;
-      font-size: 0.85rem;
-    }
-
-    .namespace-badge {
-      font-size: 0.7rem;
-      padding: 0.25rem 0.5rem;
-      background: rgba(255, 255, 255, 0.1);
-      border-radius: 0.25rem;
-    }
-
-    .namespace-item.selected .namespace-badge {
-      background: rgba(255, 255, 255, 0.2);
-    }
-
-    .namespace-meta {
       display: flex;
       flex-direction: column;
-      gap: 0.25rem;
-    }
-
-    .namespace-description {
-      font-size: 0.7rem;
-      color: var(--text-muted);
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    }
-
-    .namespace-item.selected .namespace-description {
-      color: rgba(255, 255, 255, 0.8);
-    }
-
-    .viewer-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 1rem;
-    }
-
-    .viewer-title {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-
-    .namespace-indicator {
-      font-size: 0.75rem;
-      padding: 0.25rem 0.75rem;
-      background: var(--accent);
-      color: white;
-      border-radius: 1rem;
-      font-family: 'SF Mono', Monaco, Consolas, monospace;
-    }
-
-    .loading-indicator {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      font-size: 0.85rem;
-      color: var(--text-muted);
-    }
-
-    .loading-spinner {
-      width: 14px;
-      height: 14px;
-      border: 2px solid var(--border);
-      border-top-color: var(--accent);
-      border-radius: 50%;
-      animation: spin-fast 0.6s linear infinite;
-    }
-
-    @keyframes spin-fast {
-      from { transform: rotate(0deg); }
-      to { transform: rotate(360deg); }
-    }
-
-    .connection-status {
-      font-size: 0.7rem;
-      padding: 0.25rem 0.5rem;
-      border-radius: 0.25rem;
-      display: inline-flex;
-      align-items: center;
-      gap: 0.375rem;
-    }
-
-    .connection-status.connected {
-      background: rgba(16, 185, 129, 0.1);
-      color: var(--success);
-    }
-
-    .connection-status.connecting {
-      background: rgba(245, 158, 11, 0.1);
-      color: var(--warning);
-    }
-
-    .connection-status-dot {
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      background: currentColor;
-    }
-
-    .data-viewer {
-      display: flex;
-      flex-direction: column;
-      gap: 1rem;
-    }
-
-    .viewer-controls {
-      display: flex;
-      gap: 1rem;
-      align-items: center;
-    }
-
-    .form-group {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      gap: 0.5rem;
-    }
-
-    label {
-      font-size: 0.85rem;
-      font-weight: 600;
-      color: var(--text-muted);
-    }
-
-    input, textarea {
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      color: var(--text-primary);
-      padding: 0.75rem;
-      border-radius: 0.5rem;
-      font-size: 0.9rem;
-      font-family: 'SF Mono', Monaco, Consolas, monospace;
-    }
-
-    input:focus, textarea:focus {
-      outline: none;
-      border-color: var(--accent);
-    }
-
-    textarea {
-      resize: vertical;
-      min-height: 100px;
-      font-family: 'SF Mono', Monaco, Consolas, monospace;
-    }
-
-    .btn {
-      padding: 0.75rem 1.5rem;
-      background: var(--accent);
-      color: white;
-      border: none;
-      border-radius: 0.5rem;
-      font-size: 0.9rem;
-      font-weight: 600;
-      cursor: pointer;
-      transition: background 0.2s;
-      white-space: nowrap;
-    }
-
-    .btn:hover {
-      background: var(--accent-hover);
-    }
-
-    .btn-success {
-      background: var(--success);
-    }
-
-    .btn-success:hover {
-      background: #059669;
-    }
-
-    .btn-danger {
-      background: var(--danger);
-    }
-
-    .btn-danger:hover {
-      background: #dc2626;
-    }
-
-    .data-display {
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      border-radius: 0.5rem;
-      padding: 1rem;
-      font-family: 'SF Mono', Monaco, Consolas, monospace;
-      font-size: 0.85rem;
-      overflow-x: auto;
-      white-space: pre-wrap;
-      word-wrap: break-word;
-      max-height: 60vh;
-      overflow-y: auto;
-    }
-
-    .empty-state {
-      text-align: center;
-      padding: 3rem;
-      color: var(--text-muted);
-    }
-
-    .empty-state-icon {
-      font-size: 3rem;
-      margin-bottom: 1rem;
-      opacity: 0.5;
-    }
-
-    .button-group {
-      display: flex;
-      gap: 0.75rem;
-    }
-
-    .alert {
-      padding: 1rem;
-      border-radius: 0.5rem;
-      margin-bottom: 1rem;
-      font-size: 0.9rem;
-    }
-
-    .alert-success {
-      background: rgba(16, 185, 129, 0.1);
-      border: 1px solid var(--success);
-      color: var(--success);
-    }
-
-    .alert-danger {
-      background: rgba(239, 68, 68, 0.1);
-      border: 1px solid var(--danger);
-      color: var(--danger);
-    }
-
-    .alert-info {
-      background: rgba(139, 92, 246, 0.1);
-      border: 1px solid var(--accent);
-      color: var(--accent);
-    }
-
-    /* Column Browser */
-    #dynamic-columns {
-      display: flex;
+      min-height: 180px;
       flex-shrink: 0;
     }
+    .json-pane-header {
+      padding: 0.75rem 1.25rem;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .json-pane-content {
+      flex: 1;
+      overflow: auto;
+      padding: 1rem 1.25rem;
+      font-family: 'SF Mono', Monaco, Consolas, monospace;
+      font-size: 0.8rem;
+      line-height: 1.5;
+      white-space: pre;
+      color: var(--text-secondary);
+      max-height: 250px;
+    }
+    .json-key { color: #a78bfa; }
+    .json-string { color: #10b981; }
+    .json-number { color: #3b82f6; }
+    .json-boolean { color: #ec4899; }
+    .json-null { color: #94a3b8; }
+    .json-truncated { color: #94a3b8; font-style: italic; }
+
+    .alert { padding: 1rem; border-radius: 0.5rem; margin-bottom: 1rem; font-size: 0.9rem; }
+    .alert-success { background: rgba(16, 185, 129, 0.1); border: 1px solid var(--success); color: var(--success); }
+    .alert-danger { background: rgba(239, 68, 68, 0.1); border: 1px solid var(--danger); color: var(--danger); }
+    .alert-info { background: rgba(139, 92, 246, 0.1); border: 1px solid var(--accent); color: var(--accent); }
+
+    /* Column Browser */
+    #dynamic-columns { display: flex; flex-shrink: 0; }
 
     .browser-column {
       width: 280px;
@@ -543,15 +147,10 @@
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      user-select: none;
     }
 
-    .browser-list {
-      list-style: none;
-      flex: 1;
-      overflow-y: auto;
-      margin: 0;
-      padding: 0;
-    }
+    .browser-list { list-style: none; flex: 1; overflow-y: auto; margin: 0; padding: 0; user-select: none; }
 
     .browser-list-item {
       padding: 0.875rem 1rem;
@@ -569,92 +168,20 @@
       overflow: hidden;
       list-style: none;
     }
+    .browser-list-item:hover { background: rgba(139, 92, 246, 0.12); border-left-color: var(--accent); }
+    .browser-list-item.selected { background: var(--accent); color: white; border-left-color: white; }
+    .browser-list-item .item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; gap: 0.625rem; font-weight: 500; letter-spacing: -0.01em; }
+    .browser-list-item .item-icon { font-size: 20px; flex-shrink: 0; opacity: 0.7; color: var(--text-secondary); line-height: 1; display: flex; align-items: center; }
+    .browser-list-item:hover .item-icon { opacity: 0.9; }
+    .browser-list-item.selected .item-icon { opacity: 1; color: white; }
+    .browser-list-item .item-type { font-size: 0.6875rem; padding: 0.25rem 0.5rem; border-radius: 0.375rem; font-family: 'SF Mono', Monaco, Consolas, monospace; flex-shrink: 0; font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; opacity: 0.85; }
 
-    .browser-list-item:hover {
-      background: rgba(139, 92, 246, 0.12);
-      border-left-color: var(--accent);
-    }
-
-    .browser-list-item.selected {
-      background: var(--accent);
-      color: white;
-      border-left-color: white;
-    }
-
-    .browser-list-item .item-name {
-      flex: 1;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      display: flex;
-      align-items: center;
-      gap: 0.625rem;
-      font-weight: 500;
-      letter-spacing: -0.01em;
-    }
-
-    .browser-list-item .item-icon {
-      font-size: 20px;
-      flex-shrink: 0;
-      opacity: 0.7;
-      color: var(--text-secondary);
-      line-height: 1;
-      display: flex;
-      align-items: center;
-    }
-
-    .browser-list-item:hover .item-icon {
-      opacity: 0.9;
-    }
-
-    .browser-list-item.selected .item-icon {
-      opacity: 1;
-      color: white;
-    }
-
-    .browser-list-item .item-type {
-      font-size: 0.6875rem;
-      padding: 0.25rem 0.5rem;
-      border-radius: 0.375rem;
-      font-family: 'SF Mono', Monaco, Consolas, monospace;
-      flex-shrink: 0;
-      font-weight: 600;
-      letter-spacing: 0.02em;
-      text-transform: uppercase;
-      opacity: 0.85;
-    }
-
-    /* Type badge colors */
-    .browser-list-item .item-type[data-type="string"] {
-      background: rgba(16, 185, 129, 0.15);
-      color: #10b981;
-    }
-
-    .browser-list-item .item-type[data-type="number"] {
-      background: rgba(59, 130, 246, 0.15);
-      color: #3b82f6;
-    }
-
-    .browser-list-item .item-type[data-type="object"] {
-      background: rgba(139, 92, 246, 0.15);
-      color: #a78bfa;
-    }
-
-    .browser-list-item .item-type[data-type="array"] {
-      background: rgba(245, 158, 11, 0.15);
-      color: #f59e0b;
-    }
-
-    .browser-list-item .item-type[data-type="boolean"] {
-      background: rgba(236, 72, 153, 0.15);
-      color: #ec4899;
-    }
-
-    .browser-list-item.selected .item-type {
-      background: rgba(255, 255, 255, 0.25);
-      color: white;
-      opacity: 1;
-    }
+    .browser-list-item .item-type[data-type="string"] { background: rgba(16, 185, 129, 0.15); color: #10b981; }
+    .browser-list-item .item-type[data-type="number"] { background: rgba(59, 130, 246, 0.15); color: #3b82f6; }
+    .browser-list-item .item-type[data-type="object"] { background: rgba(139, 92, 246, 0.15); color: #a78bfa; }
+    .browser-list-item .item-type[data-type="array"] { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
+    .browser-list-item .item-type[data-type="boolean"] { background: rgba(236, 72, 153, 0.15); color: #ec4899; }
+    .browser-list-item.selected .item-type { background: rgba(255, 255, 255, 0.25); color: white; opacity: 1; }
 
     .browser-value-display {
       padding: 1.5rem;
@@ -668,68 +195,33 @@
       word-wrap: break-word;
     }
 
-    .value-editor {
-      display: flex;
-      flex-direction: column;
-      gap: 1rem;
-    }
-
+    .value-editor { display: flex; flex-direction: column; gap: 1rem; }
     .value-editor-input {
       width: 100%;
       padding: 0.75rem;
       background: var(--bg-secondary);
       border: 1px solid var(--border);
       border-radius: 0.375rem;
-      color: var(--text);
+      color: var(--text-primary);
       font-family: 'SF Mono', Monaco, Consolas, monospace;
       font-size: 0.875rem;
       resize: vertical;
       min-height: 3rem;
     }
-
-    .value-editor-input:focus {
-      outline: none;
-      border-color: var(--accent);
-    }
-
-    .value-editor-actions {
-      display: flex;
-      gap: 0.5rem;
-      align-items: center;
-    }
-
+    .value-editor-input:focus { outline: none; border-color: var(--accent); }
+    .value-editor-actions { display: flex; gap: 0.5rem; align-items: center; }
     .btn-save {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.5rem 1rem;
-      background: var(--accent);
-      color: white;
-      border: none;
-      border-radius: 0.375rem;
-      cursor: pointer;
-      font-size: 0.875rem;
-      font-weight: 500;
-      transition: all 0.2s;
+      display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.5rem 1rem;
+      background: var(--accent); color: white; border: none; border-radius: 0.375rem;
+      cursor: pointer; font-size: 0.875rem; font-weight: 500; transition: all 0.2s;
     }
-
-    .btn-save:hover {
-      background: #7c3aed;
-    }
-
-    .btn-save:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-    }
-
-    .btn-save .material-icons {
-      font-size: 18px;
-    }
+    .btn-save:hover { background: #7c3aed; }
+    .btn-save:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-save .material-icons { font-size: 18px; }
   </style>
 </head>
 <body>
   <div class="app-container">
-    <!-- Sidebar -->
     <nav class="sidebar">
       <div class="sidebar-header">
         <h1><span class="swirl-icon">🌀</span> SwirlDB</h1>
@@ -752,8 +244,8 @@
         <div class="nav-section">
           <div class="nav-section-title">Data Management</div>
           <a href="/namespaces" class="nav-link">
-            <span class="nav-icon">🗂️</span>
-            Namespaces
+            <span class="nav-icon">📡</span>
+            Subscriptions
           </a>
           <a href="/data" class="nav-link active">
             <span class="nav-icon">🔍</span>
@@ -775,12 +267,15 @@
       </div>
     </nav>
 
-    <!-- Main Content -->
     <main class="main-content">
       <div class="top-bar">
         <div class="server-status">
           <div class="page-header">
             <h1>🔍 Data Browser</h1>
+            <span class="sync-indicator">
+              <span class="sync-pulse"></span>
+              <span>Live updates</span>
+            </span>
           </div>
           <div class="status-indicator">
             <span class="status-dot online" id="status-dot"></span>
@@ -796,46 +291,44 @@
       </div>
 
       <div class="content-area">
-        <!-- Column-based Data Browser -->
-        <div class="data-viewer" style="grid-column: 1 / -1;">
-          <div class="section" style="padding: 0; display: flex; flex-direction: column; height: 75vh;">
-            <!-- Header -->
-            <div style="padding: 1.5rem; border-bottom: 1px solid var(--border);">
-              <div id="alert-container"></div>
-              <div class="viewer-header">
-                <div class="viewer-title">
-                  <h2 class="section-title" style="margin: 0;">🔍 Data Browser</h2>
-                  <span id="current-namespace-indicator" style="display: none;" class="namespace-indicator"></span>
-                  <span id="connection-status" class="connection-status" style="display: none;">
-                    <span class="connection-status-dot"></span>
-                    <span id="connection-status-text">Connected</span>
-                  </span>
-                </div>
-                <span id="loading-indicator" class="loading-indicator" style="display: none;">
-                  <span class="loading-spinner"></span>
-                  <span>Loading...</span>
-                </span>
-              </div>
-              <div style="margin-top: 0.75rem; font-size: 0.85rem; color: var(--text-muted);" id="current-path-display">
-                <strong>Path:</strong> <span style="font-family: 'SF Mono', Monaco, Consolas, monospace;" id="current-path">/</span>
-              </div>
+        <div class="section" style="padding: 0; display: flex; flex-direction: column; max-height: calc(100vh - 360px); min-height: 200px;">
+          <!-- Header -->
+          <div style="padding: 1.5rem; border-bottom: 1px solid var(--border);">
+            <div id="alert-container"></div>
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <h2 style="font-size: 1.1rem; font-weight: 600; margin: 0;">🔍 Data Browser</h2>
+              <span id="loading-indicator" style="display: none; font-size: 0.85rem; color: var(--text-muted);">Loading...</span>
+            </div>
+            <div style="margin-top: 0.75rem; font-size: 0.85rem; color: var(--text-muted);">
+              <strong>Path:</strong> <span style="font-family: 'SF Mono', Monaco, Consolas, monospace;" id="current-path">/</span>
+            </div>
+          </div>
+
+          <!-- Multi-column browser -->
+          <div style="flex: 1; display: flex; overflow-x: auto; overflow-y: hidden;">
+            <!-- Root keys column -->
+            <div class="browser-column">
+              <div class="browser-column-header">Root</div>
+              <ul class="browser-list" id="root-list">
+                <li class="browser-list-item" style="padding: 2rem; text-align: center; color: var(--text-muted); cursor: default;">
+                  Loading...
+                </li>
+              </ul>
             </div>
 
-            <!-- Multi-column browser -->
-            <div style="flex: 1; display: flex; overflow-x: auto; overflow-y: hidden;">
-              <!-- Column 1: Namespaces -->
-              <div class="browser-column">
-                <div class="browser-column-header">Namespaces</div>
-                <ul class="browser-list" id="namespace-list">
-                  <li class="browser-list-item" style="padding: 2rem; text-align: center; color: var(--text-muted);">
-                    Loading...
-                  </li>
-                </ul>
-              </div>
+            <!-- Dynamic columns added here -->
+            <div id="dynamic-columns"></div>
+          </div>
+        </div>
 
-              <!-- Dynamic columns will be added here -->
-              <div id="dynamic-columns"></div>
-            </div>
+        <!-- JSON Tree Pane -->
+        <div class="json-pane">
+          <div class="json-pane-header">
+            <span>JSON Tree <span style="font-weight: 400; font-size: 0.75rem;">(3 levels)</span></span>
+            <span id="json-pane-path" style="font-family: 'SF Mono', Monaco, Consolas, monospace; font-size: 0.75rem; color: var(--accent);"></span>
+          </div>
+          <div class="json-pane-content" id="json-pane-content">
+            <span class="json-truncated">Select a node to view its JSON tree</span>
           </div>
         </div>
       </div>
@@ -843,18 +336,14 @@
   </div>
 
   <script type="module">
-    console.log('🔵 Script block executing...');
     import { SwirlDB } from '/swirldb.js';
-    console.log('🟢 SwirlDB imported:', SwirlDB);
 
-    // State
-    let selectedNamespace = null;
-    let namespaceDBs = new Map(); // Map<namespaceId, { db, ws }>
-    let namespacesData = [];
-    let currentPath = []; // Track current browsing path: ['namespace', 'key1', 'key2', ...]
-    let adminDB = null;
+    let db;
+    let currentPath = [];
+    let reconnectAttempts = 0;
+    let maxReconnectDelay = 30000;
+    let reconnectTimer = null;
 
-    // Update current time
     function updateTime() {
       document.getElementById('current-time').textContent =
         new Date().toLocaleString('en-US', {
@@ -867,39 +356,31 @@
     updateTime();
     setInterval(updateTime, 1000);
 
-    // Show alert
     window.showAlert = function(message, type = 'info') {
       const container = document.getElementById('alert-container');
       const alert = document.createElement('div');
       alert.className = `alert alert-${type}`;
       alert.textContent = message;
       container.appendChild(alert);
-
-      setTimeout(() => {
-        alert.remove();
-      }, 5000);
+      setTimeout(() => alert.remove(), 5000);
     };
 
-    // Standard component for rendering list items
-    function createListItem(options) {
-      const { name, type, value, onClick, selected = false } = options;
+    // Icon mapping for Material Icons
+    const iconMap = {
+      'array': 'view_list',
+      'object': 'data_object',
+      'string': 'text_fields',
+      'number': 'tag',
+      'boolean': 'check_circle'
+    };
 
-      // Icon mapping for Material Icons
-      const iconMap = {
-        'namespace': 'storage',
-        'array': 'view_list',
-        'object': 'data_object',
-        'string': 'text_fields',
-        'number': 'tag',
-        'boolean': 'check_circle'
-      };
-
+    function createListItem({ name, type, value, onClick, selected = false }) {
       const icon = iconMap[type] || 'code';
       const arraySize = type === 'array' && Array.isArray(value) ? ` [${value.length}]` : '';
       const selectedClass = selected ? 'selected' : '';
 
       return `
-        <li class="browser-list-item ${selectedClass}" ${onClick ? `onclick="${onClick}"` : ''}>
+        <li class="browser-list-item ${selectedClass}" data-key="${name}" ${onClick ? `onclick="${onClick}"` : ''}>
           <div class="item-name">
             <span class="material-icons item-icon">${icon}</span>
             <span>${name}${arraySize}</span>
@@ -908,536 +389,265 @@
       `;
     }
 
-    // Auto-scroll the columns container to the right
     function scrollColumnsToRight() {
       const container = document.querySelector('[style*="overflow-x: auto"]');
       if (container) {
-        setTimeout(() => {
-          container.scrollLeft = container.scrollWidth;
-        }, 50); // Small delay to ensure DOM is updated
+        setTimeout(() => { container.scrollLeft = container.scrollWidth; }, 50);
       }
     }
 
-    // Initialize
-    async function init() {
-      console.log('🚀 Starting init...');
+    function updatePathDisplay() {
+      document.getElementById('current-path').textContent =
+        currentPath.length > 0 ? '/ ' + currentPath.join(' / ') : '/';
+    }
+
+    // Render syntax-highlighted JSON tree, truncated at maxDepth
+    function renderJsonTree(value, maxDepth = 3, indent = 0) {
+      const pad = '  '.repeat(indent);
+      const padInner = '  '.repeat(indent + 1);
+
+      if (value === null) return '<span class="json-null">null</span>';
+      if (value === undefined) return '<span class="json-null">undefined</span>';
+
+      const type = typeof value;
+
+      if (type === 'string') {
+        const escaped = value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+        const truncated = escaped.length > 120 ? escaped.slice(0, 120) + '...' : escaped;
+        return `<span class="json-string">"${truncated}"</span>`;
+      }
+      if (type === 'number') return `<span class="json-number">${value}</span>`;
+      if (type === 'boolean') return `<span class="json-boolean">${value}</span>`;
+
+      if (indent >= maxDepth) {
+        if (Array.isArray(value)) return `<span class="json-truncated">[...${value.length} items]</span>`;
+        if (type === 'object') return `<span class="json-truncated">{...${Object.keys(value).length} keys}</span>`;
+      }
+
+      if (Array.isArray(value)) {
+        if (value.length === 0) return '[]';
+        const items = value.slice(0, 50).map((v, i) =>
+          `${padInner}${renderJsonTree(v, maxDepth, indent + 1)}`
+        );
+        if (value.length > 50) items.push(`${padInner}<span class="json-truncated">...${value.length - 50} more</span>`);
+        return `[\n${items.join(',\n')}\n${pad}]`;
+      }
+
+      if (type === 'object') {
+        const keys = Object.keys(value);
+        if (keys.length === 0) return '{}';
+        const entries = keys.slice(0, 50).map(k => {
+          const escapedKey = k.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+          return `${padInner}<span class="json-key">"${escapedKey}"</span>: ${renderJsonTree(value[k], maxDepth, indent + 1)}`;
+        });
+        if (keys.length > 50) entries.push(`${padInner}<span class="json-truncated">...${keys.length - 50} more</span>`);
+        return `{\n${entries.join(',\n')}\n${pad}}`;
+      }
+
+      return String(value);
+    }
+
+    // Walk a dot-path manually to handle array indices and id-based keys
+    // db.wasmDB.getValue("messages.2") fails, so we get the root and walk
+    function getValueAtPath(dotPath) {
+      const segments = dotPath.split('.');
+      let value = db.wasmDB.getValue(segments[0]);
+      for (let i = 1; i < segments.length; i++) {
+        if (value === null || value === undefined) return null;
+        const seg = segments[i];
+        if (Array.isArray(value)) {
+          if (/^\d+$/.test(seg)) {
+            // Numeric index
+            value = value[parseInt(seg, 10)];
+          } else {
+            // Id-based key: find the item whose id matches
+            // (matches the array-to-map optimization in core)
+            value = value.find(item => item && item.id != null && String(item.id) === seg);
+          }
+        } else {
+          value = value[seg];
+        }
+      }
+      return value;
+    }
+
+    function updateJsonPane() {
+      const pane = document.getElementById('json-pane-content');
+      const pathLabel = document.getElementById('json-pane-path');
+
+      if (currentPath.length === 0) {
+        pane.innerHTML = '<span class="json-truncated">Select a node to view its JSON tree</span>';
+        pathLabel.textContent = '';
+        return;
+      }
+
+      const dotPath = currentPath.join('.');
+      pathLabel.textContent = dotPath;
+
       try {
-        console.log('📦 Creating admin DB (in-memory)...');
-        console.log('   SwirlDB class:', SwirlDB);
-        console.log('   SwirlDB.create:', SwirlDB.create);
+        const data = getValueAtPath(dotPath);
+        pane.innerHTML = renderJsonTree(data, 3);
+      } catch (e) {
+        pane.innerHTML = `<span class="json-null">Error: ${e.message}</span>`;
+      }
+    }
 
-        // Connect to admin namespace to get list of namespaces
-        const promise = SwirlDB.create();
-        console.log('   Promise created:', promise);
+    async function init() {
+      try {
+        db = await SwirlDB.create();
 
-        adminDB = await promise;
-        console.log('✅ Admin DB created:', adminDB);
-
-        // Observe namespaces
-        adminDB.data.namespaces.$observe(() => {
-          console.log('🔄 Namespaces list updated');
-          // Defer the update to avoid recursive borrow issues
-          setTimeout(() => updateNamespaceList(), 0);
+        // Observe root to refresh all visible columns when data changes
+        db.data.$observe(() => {
+          setTimeout(() => refreshAll(), 0);
         });
 
-        // Give localStorage time to load, then render
-        setTimeout(() => {
-          console.log('📊 Initial render with cached namespaces');
-          updateNamespaceList();
-        }, 50);
+        setTimeout(() => updateRootKeys(), 50);
 
-        // Connect to server
-        console.log('🔌 Connecting to admin server...');
-        await connectToAdminServer(adminDB);
-        console.log('✅ Connected to admin server');
-
+        await connectToServer();
       } catch (error) {
-        console.error('❌ Initialization failed:', error);
-        console.error('Error details:', error.message, error.stack);
+        console.error('Initialization failed:', error);
         document.getElementById('status-dot').className = 'status-dot offline';
         document.getElementById('status-text').textContent = 'Connection Failed';
       }
     }
 
-    // Connect to admin server
-    async function connectToAdminServer(db) {
-      return new Promise((resolve, reject) => {
-        const ws = new WebSocket('ws://localhost:3030/ws');
-        ws.binaryType = 'arraybuffer';
-
-        ws.onopen = () => {
-          console.log('✅ Connected to admin namespace');
-          document.getElementById('status-dot').className = 'status-dot online';
-          document.getElementById('status-text').textContent = 'Connected';
-
-          // Send connect message
-          const clientIdBytes = new TextEncoder().encode('admin-data-browser');
-          const namespaceBytes = new TextEncoder().encode('__admin');
-          const headsBytes = db.getHeads();
-
-          const size = 1 + 4 + clientIdBytes.length + 4 + namespaceBytes.length + 4 + headsBytes.length;
-          const buffer = new Uint8Array(size);
-          let offset = 0;
-
-          buffer[offset++] = 0x01;
-          writeUint32(buffer, offset, clientIdBytes.length);
-          offset += 4;
-          buffer.set(clientIdBytes, offset);
-          offset += clientIdBytes.length;
-          writeUint32(buffer, offset, namespaceBytes.length);
-          offset += 4;
-          buffer.set(namespaceBytes, offset);
-          offset += namespaceBytes.length;
-          writeUint32(buffer, offset, headsBytes.length);
-          offset += 4;
-          buffer.set(headsBytes, offset);
-
-          ws.send(buffer);
-          resolve();
-        };
-
-        ws.onmessage = (event) => {
-          const buffer = new Uint8Array(event.data);
-          const msgType = buffer[0];
-
-          if (msgType === 0x02 || msgType === 0x04) {
-            let offset = 1;
-            if (msgType === 0x02) {
-              const headsLen = readUint32(buffer, offset);
-              offset += 4 + headsLen;
-            } else {
-              const clientIdLen = readUint32(buffer, offset);
-              offset += 4 + clientIdLen;
-            }
-
-            const changesCount = readUint32(buffer, offset);
-            offset += 4;
-
-            if (changesCount > 0) {
-              const allChanges = [];
-              for (let i = 0; i < changesCount; i++) {
-                const changeLen = readUint32(buffer, offset);
-                offset += 4;
-                const changeBytes = buffer.slice(offset, offset + changeLen);
-                offset += changeLen;
-                allChanges.push(changeBytes);
-              }
-
-              try {
-                db.applyChanges(allChanges);
-                db.checkObservers();
-              } catch (e) {
-                console.error('❌ Failed to apply changes:', e);
-              }
-            }
-          }
-        };
-
-        ws.onerror = (error) => {
-          console.error('❌ WebSocket error:', error);
-          reject(error);
-        };
-      });
+    // Refresh everything: root keys, all open columns, and JSON pane
+    function refreshAll() {
+      updateRootKeys();
+      if (currentPath.length > 0) {
+        document.getElementById('dynamic-columns').innerHTML = '';
+        for (let i = 0; i < currentPath.length; i++) {
+          const dotPath = currentPath.slice(0, i + 1).join('.');
+          // The selected key at this depth is the next segment in currentPath (if any)
+          const selectedKey = i < currentPath.length - 1 ? currentPath[i + 1] : null;
+          showKeysColumn(dotPath, selectedKey);
+        }
+      }
+      updateJsonPane();
     }
 
-    // Update namespace list (column 1)
-    function updateNamespaceList() {
-      const list = document.getElementById('namespace-list');
+    async function connectToServer() {
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
 
       try {
-        const namespaces = adminDB.data.namespaces.$value;
-
-        if (!namespaces) {
-          list.innerHTML = '<li class="browser-list-item" style="padding: 2rem; text-align: center; color: var(--text-muted); cursor: default;">No namespaces</li>';
-          return;
-        }
-
-        // Convert to plain array
-        let nsArray;
-        if (typeof namespaces === 'string') {
-          nsArray = JSON.parse(namespaces);
-        } else if (Array.isArray(namespaces)) {
-          nsArray = namespaces.map(ns => ({
-            id: ns.id,
-            connection_count: ns.connection_count || 0
-          }));
-        } else if (typeof namespaces === 'object') {
-          nsArray = Object.values(namespaces).map(ns => ({
-            id: ns.id,
-            connection_count: ns.connection_count || 0
-          }));
-        } else {
-          nsArray = [];
-        }
-
-        namespacesData = nsArray;
-
-        if (nsArray.length === 0) {
-          list.innerHTML = '<li class="browser-list-item" style="padding: 2rem; text-align: center; color: var(--text-muted); cursor: default;">No namespaces</li>';
-          return;
-        }
-
-        list.innerHTML = nsArray.map(ns =>
-          createListItem({
-            name: ns.id,
-            type: 'namespace',
-            onClick: `selectNamespaceColumn('${ns.id}')`,
-            selected: selectedNamespace === ns.id
-          })
-        ).join('');
+        db.connect('ws://localhost:3030/ws', 'admin-data-browser', ['/**']);
+        document.getElementById('status-dot').className = 'status-dot online';
+        document.getElementById('status-text').textContent = 'Connected';
       } catch (error) {
-        console.error('❌ Error updating namespace list:', error);
-        console.error('Error message:', error.message);
-        console.error('Error stack:', error.stack);
-        // Don't try to read adminDB again here - it causes recursive borrow issues
+        console.error('Connection failed:', error);
+        document.getElementById('status-dot').className = 'status-dot offline';
+        document.getElementById('status-text').textContent = 'Reconnecting...';
+        scheduleReconnect();
+      }
+    }
+
+    function scheduleReconnect() {
+      const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), maxReconnectDelay);
+      reconnectAttempts++;
+      document.getElementById('status-text').textContent = `Reconnecting in ${Math.ceil(delay/1000)}s...`;
+
+      reconnectTimer = setTimeout(async () => {
+        try { await connectToServer(); }
+        catch (error) { console.error('Reconnection failed:', error); }
+      }, delay);
+    }
+
+    // Update root keys (first column)
+    function updateRootKeys() {
+      const list = document.getElementById('root-list');
+
+      try {
+        let keys = [];
+
+        if (typeof db.wasmDB.getRootKeys === 'function') {
+          keys = db.wasmDB.getRootKeys();
+        }
+
+        if (keys.length === 0) {
+          list.innerHTML = '<li class="browser-list-item" style="padding: 2rem; text-align: center; color: var(--text-muted); cursor: default;">No data</li>';
+          return;
+        }
+
+        list.innerHTML = keys.map(key => {
+          const value = db.wasmDB.getValue(key);
+          const valueType = Array.isArray(value) ? 'array' : typeof value;
+
+          return createListItem({
+            name: key,
+            type: valueType,
+            value: value,
+            onClick: `selectRootKey('${key.replace(/'/g, "\\'")}')`,
+            selected: currentPath[0] === key
+          });
+        }).join('');
+      } catch (error) {
+        console.error('Error updating root keys:', error);
         list.innerHTML = `<li class="browser-list-item" style="padding: 2rem; text-align: center; color: var(--danger); cursor: default;">Error: ${error.message}</li>`;
       }
     }
 
-    // Select namespace and show its keys (column 2)
-    window.selectNamespaceColumn = async function(namespaceId) {
-      try {
-        console.log('🔍 Selecting namespace:', namespaceId);
-        selectedNamespace = namespaceId;
-        currentPath = [namespaceId];
-
-        // Update namespace list selection
-        updateNamespaceList();
-
-        // Update path display
-        updatePathDisplay();
-
-        // Clear any existing dynamic columns
-        document.getElementById('dynamic-columns').innerHTML = '';
-
-        // Connect to namespace if not already connected
-        if (!namespaceDBs.has(namespaceId)) {
-          await connectToNamespace(namespaceId);
-        }
-
-        // Get top-level keys and show them in column 2
-        showKeysColumn(namespaceId, '');
-      } catch (error) {
-        console.error('❌ Error selecting namespace:', error);
-        showAlert(`Error: ${error.message}`, 'danger');
-      }
+    // Select a root key and show its contents
+    window.selectRootKey = function(key) {
+      currentPath = [key];
+      updatePathDisplay();
+      updateRootKeys(); // re-renders root column with selection
+      document.getElementById('dynamic-columns').innerHTML = '';
+      showKeysColumn(key);
+      updateJsonPane();
     };
 
-    // Connect to a namespace
-    async function connectToNamespace(namespaceId) {
-      console.log('🔌 Connecting to namespace:', namespaceId);
-
-      // Create in-memory DB
-      const db = await SwirlDB.create();
-
-      // Connect to server WebSocket
-      const ws = new WebSocket('ws://localhost:3030/ws');
-      ws.binaryType = 'arraybuffer';
-
-      let initialSyncReceived = false;
-      let resolveInitialSync;
-      const initialSyncPromise = new Promise(resolve => {
-        resolveInitialSync = resolve;
-      });
-
-      await new Promise((resolve, reject) => {
-        ws.onopen = () => {
-          const clientIdBytes = new TextEncoder().encode(`data-browser-${namespaceId}`);
-          const namespaceBytes = new TextEncoder().encode(namespaceId);
-          const headsBytes = db.getHeads();
-
-          const size = 1 + 4 + clientIdBytes.length + 4 + namespaceBytes.length + 4 + headsBytes.length;
-          const buffer = new Uint8Array(size);
-          let offset = 0;
-
-          buffer[offset++] = 0x01;
-          writeUint32(buffer, offset, clientIdBytes.length);
-          offset += 4;
-          buffer.set(clientIdBytes, offset);
-          offset += clientIdBytes.length;
-          writeUint32(buffer, offset, namespaceBytes.length);
-          offset += 4;
-          buffer.set(namespaceBytes, offset);
-          offset += namespaceBytes.length;
-          writeUint32(buffer, offset, headsBytes.length);
-          offset += 4;
-          buffer.set(headsBytes, offset);
-
-          ws.send(buffer);
-          console.log('✅ Connected to namespace WebSocket:', namespaceId);
-          resolve();
-        };
-
-        ws.onerror = (error) => {
-          console.error('❌ WebSocket error:', error);
-          reject(error);
-        };
-      });
-
-      // Handle incoming changes
-      ws.onmessage = (event) => {
-        const buffer = new Uint8Array(event.data);
-        const msgType = buffer[0];
-
-        if (msgType === 0x02 || msgType === 0x04) {
-          let offset = 1;
-          if (msgType === 0x02) {
-            const headsLen = readUint32(buffer, offset);
-            offset += 4 + headsLen;
-          } else {
-            const clientIdLen = readUint32(buffer, offset);
-            offset += 4 + clientIdLen;
-          }
-
-          const changesCount = readUint32(buffer, offset);
-          offset += 4;
-
-          if (changesCount > 0) {
-            const allChanges = [];
-            for (let i = 0; i < changesCount; i++) {
-              const changeLen = readUint32(buffer, offset);
-              offset += 4;
-              const changeBytes = buffer.slice(offset, offset + changeLen);
-              offset += changeLen;
-              allChanges.push(changeBytes);
-            }
-
-            try {
-              db.applyChanges(allChanges);
-              console.log(`🔄 Applied ${allChanges.length} changes to namespace:`, namespaceId);
-
-              // Mark initial sync as received if this is the first sync message
-              if (msgType === 0x02 && !initialSyncReceived) {
-                initialSyncReceived = true;
-                console.log('✅ Initial sync received for namespace:', namespaceId);
-                resolveInitialSync();
-              }
-
-              // Refresh current view if this is the selected namespace
-              if (selectedNamespace === namespaceId && currentPath.length > 0) {
-                setTimeout(() => {
-                  const pathInNamespace = currentPath.slice(1).join('.');
-                  showKeysColumn(namespaceId, pathInNamespace);
-                }, 100);
-              }
-            } catch (e) {
-              console.error('❌ Failed to apply changes:', e);
-            }
-          } else if (msgType === 0x02 && !initialSyncReceived) {
-            // Empty sync response (namespace has no data)
-            initialSyncReceived = true;
-            console.log('✅ Initial sync received (empty) for namespace:', namespaceId);
-            resolveInitialSync();
-          }
-        }
-      };
-
-      namespaceDBs.set(namespaceId, { db, ws });
-
-      // Wait for initial sync before returning
-      console.log('⏳ Waiting for initial sync...');
-      await initialSyncPromise;
-      console.log('✅ Initial sync complete, data ready');
-
-      // Set up automatic upstream sync
-      let lastSyncedHeads = db.getHeads();
-      let syncDebounceTimeout = null;
-
-      const syncChanges = () => {
-        const currentHeads = db.getHeads();
-
-        // Compare heads to detect if we have new local changes
-        const headsChanged = lastSyncedHeads.length !== currentHeads.length ||
-          !lastSyncedHeads.every((byte, i) => byte === currentHeads[i]);
-
-        if (headsChanged) {
-          console.log('🔄 Auto-sync: Local changes detected, pushing to server...');
-
-          const changes = db.getChanges();
-          if (changes.length === 0) {
-            lastSyncedHeads = currentHeads;
-            return;
-          }
-
-          // Build MSG_PUSH message
-          const encoder = new TextEncoder();
-          const namespaceBytes = encoder.encode(namespaceId);
-
-          let totalSize = 1 + 4 + namespaceBytes.length + 4;
-          changes.forEach(change => {
-            totalSize += 4 + change.length;
-          });
-
-          const buffer = new Uint8Array(totalSize);
-          let offset = 0;
-
-          buffer[offset++] = 0x03; // MSG_PUSH
-
-          // Namespace ID
-          new DataView(buffer.buffer).setUint32(offset, namespaceBytes.length, false);
-          offset += 4;
-          buffer.set(namespaceBytes, offset);
-          offset += namespaceBytes.length;
-
-          // Changes count
-          new DataView(buffer.buffer).setUint32(offset, changes.length, false);
-          offset += 4;
-
-          // Changes
-          changes.forEach(change => {
-            new DataView(buffer.buffer).setUint32(offset, change.length, false);
-            offset += 4;
-            buffer.set(change, offset);
-            offset += change.length;
-          });
-
-          ws.send(buffer);
-          lastSyncedHeads = currentHeads;
-          console.log('✅ Auto-sync: Pushed', changes.length, 'changes to server');
-        }
-      };
-
-      const debouncedSync = () => {
-        if (syncDebounceTimeout) {
-          clearTimeout(syncDebounceTimeout);
-        }
-        syncDebounceTimeout = setTimeout(syncChanges, 300); // 300ms debounce
-      };
-
-      // Monkey-patch setValue to trigger auto-sync
-      const originalSetValue = db.wasmDB.setValue.bind(db.wasmDB);
-      db.wasmDB.setValue = function(path, value) {
-        const result = originalSetValue(path, value);
-        debouncedSync();
-        return result;
-      };
-
-      // Also patch setPath for completeness
-      const originalSetPath = db.wasmDB.setPath.bind(db.wasmDB);
-      db.wasmDB.setPath = function(path, value) {
-        const result = originalSetPath(path, value);
-        debouncedSync();
-        return result;
-      };
-
-      console.log('🔄 Auto-sync enabled for namespace:', namespaceId);
-    }
-
-    // Show keys at a given path in a column
-    function showKeysColumn(namespaceId, pathInNamespace) {
-      const nsData = namespaceDBs.get(namespaceId);
-      if (!nsData) {
-        console.error('❌ Namespace not connected:', namespaceId);
-        return;
-      }
-
-      const { db } = nsData;
+    // Show keys at a given dot-path in a new column
+    // selectedKey: which child key to mark as selected (for preserving drill-down state)
+    function showKeysColumn(dotPath, selectedKey = null) {
       const dynamicColumns = document.getElementById('dynamic-columns');
 
-      // Clear subsequent columns (everything after this path)
-      const columnIndex = currentPath.length - 1;
+      // Clear columns after current depth
+      const depth = dotPath.split('.').length;
       const allColumns = dynamicColumns.querySelectorAll('.browser-column, .browser-value-display');
-      for (let i = allColumns.length - 1; i >= columnIndex; i--) {
+      for (let i = allColumns.length - 1; i >= depth - 1; i--) {
         allColumns[i].remove();
       }
 
-      // Get data at this path using getValue()
       let data;
-      let keys = [];
-
       try {
-        // Use getValue() to get the actual JavaScript value
-        if (!pathInNamespace) {
-          // Root level - get all root keys
-          // Use wasmDB.getRootKeys() if available
-          if (typeof db.wasmDB.getRootKeys === 'function') {
-            keys = db.wasmDB.getRootKeys();
-          } else {
-            // Fallback: try to get the whole document and enumerate
-            data = {};
-            keys = [];
-          }
-        } else {
-          // Nested level - get value at path
-          data = db.wasmDB.getValue(pathInNamespace);
-
-          if (data === null || data === undefined) {
-            keys = [];
-          } else if (Array.isArray(data)) {
-            // For arrays, use numeric indices
-            keys = Array.from({ length: data.length }, (_, i) => String(i));
-          } else if (typeof data === 'object') {
-            // For objects, use Object.keys()
-            keys = Object.keys(data);
-          } else {
-            // Primitive value - no keys
-            keys = [];
-          }
-        }
+        data = getValueAtPath(dotPath);
       } catch (error) {
-        console.error('❌ Error getting data at path:', pathInNamespace, error);
-        console.error('Full error stack:', error.stack);
+        console.error('Error getting data at path:', dotPath, error);
         showAlert(`Error reading data: ${error.message}`, 'danger');
         return;
       }
 
-      // Get just the current level name for the column header
-      const columnHeader = currentPath.length > 0 ? currentPath[currentPath.length - 1] : 'Root';
+      const pathSegments = dotPath.split('.');
+      const columnHeader = pathSegments[pathSegments.length - 1] || 'Root';
+      const dataType = data === null || data === undefined ? 'null' : Array.isArray(data) ? 'array' : typeof data;
 
-      // If we have keys at root level, display them
-      if (!pathInNamespace && keys.length > 0) {
-        const column = document.createElement('div');
-        column.className = 'browser-column';
-        column.innerHTML = `
-          <div class="browser-column-header">${columnHeader}</div>
-          <ul class="browser-list">
-            ${keys.map(key => {
-              const value = db.wasmDB.getValue(key);
-              const valueType = Array.isArray(value) ? 'array' : typeof value;
-
-              return createListItem({
-                name: key,
-                type: valueType,
-                value: value,
-                onClick: `drillDownColumn('${namespaceId}', '${key}', '${key}')`
-              });
-            }).join('')}
-          </ul>
-        `;
-        dynamicColumns.appendChild(column);
-        scrollColumnsToRight();
-        return;
-      } else if (!pathInNamespace) {
-        // Empty namespace
-        const column = document.createElement('div');
-        column.className = 'browser-column';
-        column.innerHTML = `
-          <div class="browser-column-header">${columnHeader}</div>
-          <ul class="browser-list">
-            <li class="browser-list-item" style="padding: 2rem; text-align: center; color: var(--text-muted); cursor: default;">
-              <div>Empty namespace</div>
-              <div style="font-size: 0.75rem; margin-top: 0.5rem;">No data stored yet</div>
-            </li>
-          </ul>
-        `;
-        dynamicColumns.appendChild(column);
-        scrollColumnsToRight();
-        return;
-      }
-
-      // Check data type
-      const dataType = Array.isArray(data) ? 'array' : typeof data;
-
-      console.log(`📂 Data at "${pathInNamespace || 'root'}":`, dataType, data);
-
-      // If it's an object or array, show its keys/indices (keys already populated above)
+      // Object or array: show keys/indices
       if (dataType === 'object' || dataType === 'array') {
-        if (keys.length === 0) {
-          // Empty object/array
+        // For arrays of objects with id fields, the core stores them as Maps
+        // keyed by id (array-to-map optimization). We must use the id as the
+        // path key so setPath resolves to the correct internal Map entry.
+        let items;
+        if (dataType === 'array') {
+          items = data.map((item, i) => {
+            const pathKey = (item && typeof item === 'object' && item.id != null)
+              ? String(item.id)
+              : String(i);
+            return { displayName: String(i), pathKey, value: item };
+          });
+        } else {
+          items = Object.keys(data).map(key => ({
+            displayName: key, pathKey: key, value: data[key]
+          }));
+        }
+
+        if (items.length === 0) {
           const column = document.createElement('div');
           column.className = 'browser-column';
           column.innerHTML = `
-            <div class="browser-column-header">Keys</div>
+            <div class="browser-column-header">${columnHeader}</div>
             <ul class="browser-list">
               <li class="browser-list-item" style="padding: 2rem; text-align: center; color: var(--text-muted); cursor: default;">
                 ${dataType === 'array' ? 'Empty array' : 'Empty object'}
@@ -1445,176 +655,129 @@
             </ul>
           `;
           dynamicColumns.appendChild(column);
-        scrollColumnsToRight();
+          scrollColumnsToRight();
           return;
         }
 
-        // Create column with keys
         const column = document.createElement('div');
         column.className = 'browser-column';
-
         column.innerHTML = `
           <div class="browser-column-header">${columnHeader}</div>
           <ul class="browser-list">
-            ${keys.map(key => {
-              const fullPath = pathInNamespace ? `${pathInNamespace}.${key}` : key;
-              const value = data[key];
+            ${items.map(({ displayName, pathKey, value }) => {
+              const fullPath = `${dotPath}.${pathKey}`;
               const valueType = Array.isArray(value) ? 'array' : typeof value;
 
               return createListItem({
-                name: key,
+                name: displayName,
                 type: valueType,
                 value: value,
-                onClick: `drillDownColumn('${namespaceId}', '${fullPath}', '${key}')`
+                onClick: `drillDown('${fullPath.replace(/'/g, "\\'")}', '${displayName.replace(/'/g, "\\'")}')`,
+                selected: displayName === selectedKey
               });
             }).join('')}
           </ul>
         `;
-
         dynamicColumns.appendChild(column);
         scrollColumnsToRight();
       } else {
-        // Primitive value - show in an editable column
-        const column = document.createElement('div');
-        column.className = 'browser-value-display';
-
-        const dataType = typeof data;
-        let inputValue = '';
-        let inputType = 'text';
-
-        if (data === null) {
-          inputValue = 'null';
-        } else if (data === undefined) {
-          inputValue = 'undefined';
-        } else if (dataType === 'string') {
-          inputValue = data;
-          inputType = 'textarea';
-        } else if (dataType === 'number') {
-          inputValue = String(data);
-          inputType = 'number';
-        } else if (dataType === 'boolean') {
-          inputValue = String(data);
-        } else {
-          inputValue = String(data);
-        }
-
-        const editorId = `editor-${Date.now()}`;
-        const saveBtnId = `save-${Date.now()}`;
-
-        column.innerHTML = `
-          <div class="browser-column-header">${columnHeader}</div>
-          <div style="padding: 1.5rem;">
-            <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 1rem;">Type: ${dataType}</div>
-            <div class="value-editor">
-              ${inputType === 'textarea'
-                ? `<textarea id="${editorId}" class="value-editor-input" rows="4">${inputValue}</textarea>`
-                : `<input id="${editorId}" class="value-editor-input" type="${inputType}" value="${inputValue}" />`
-              }
-              <div class="value-editor-actions">
-                <button id="${saveBtnId}" class="btn-save" style="display: none;">
-                  <span class="material-icons">check</span>
-                  Save
-                </button>
-                <span id="${saveBtnId}-status" style="font-size: 0.75rem; color: var(--text-muted);"></span>
-              </div>
-            </div>
-          </div>
-        `;
-
-        dynamicColumns.appendChild(column);
-        scrollColumnsToRight();
-
-        // Setup editing functionality
-        const editor = document.getElementById(editorId);
-        const saveBtn = document.getElementById(saveBtnId);
-        const status = document.getElementById(`${saveBtnId}-status`);
-        const originalValue = inputValue;
-
-        editor.addEventListener('input', () => {
-          const hasChanged = editor.value !== originalValue;
-          saveBtn.style.display = hasChanged ? 'inline-flex' : 'none';
-          status.textContent = '';
-        });
-
-        saveBtn.addEventListener('click', async () => {
-          try {
-            console.log('💾 Save clicked', { namespaceId, pathInNamespace, dataType, value: editor.value });
-            saveBtn.disabled = true;
-            status.textContent = 'Saving...';
-
-            // Get the namespace DB
-            const nsData = namespaceDBs.get(namespaceId);
-            if (!nsData) {
-              throw new Error('Namespace not connected');
-            }
-
-            // Convert value to correct type
-            let newValue = editor.value;
-            if (dataType === 'number') {
-              newValue = parseFloat(newValue);
-            } else if (dataType === 'boolean') {
-              newValue = newValue === 'true';
-            } else if (newValue === 'null') {
-              newValue = null;
-            } else if (newValue === 'undefined') {
-              newValue = undefined;
-            }
-
-            console.log('💾 Saving to path:', pathInNamespace, 'value:', newValue);
-
-            // Save to DB (auto-sync will handle pushing to server)
-            nsData.db.wasmDB.setValue(pathInNamespace, newValue);
-
-            status.textContent = 'Saved! (syncing...)';
-            status.style.color = 'var(--success)';
-            saveBtn.style.display = 'none';
-
-            setTimeout(() => {
-              status.textContent = '';
-            }, 2000);
-          } catch (error) {
-            console.error('❌ Save error:', error);
-            status.textContent = 'Error: ' + error.message;
-            status.style.color = 'var(--danger)';
-          } finally {
-            saveBtn.disabled = false;
-          }
-        });
+        // Primitive value: show editable display
+        showValueEditor(dynamicColumns, columnHeader, dotPath, data, dataType);
       }
     }
 
-    // Drill down into a key
-    window.drillDownColumn = function(namespaceId, fullPath, key) {
-      console.log('🔽 Drilling down:', fullPath);
+    // Show an editable value panel
+    function showValueEditor(container, header, dotPath, data, dataType) {
+      const column = document.createElement('div');
+      column.className = 'browser-value-display';
 
-      // Update current path
-      currentPath = [namespaceId, ...fullPath.split('.')];
+      let inputValue = data === null ? 'null' : data === undefined ? 'undefined' : String(data);
+      let inputType = dataType === 'number' ? 'number' : 'text';
+      const useTextarea = dataType === 'string' && inputValue.length > 40;
+
+      const editorId = `editor-${Date.now()}`;
+      const saveBtnId = `save-${Date.now()}`;
+
+      column.innerHTML = `
+        <div class="browser-column-header">${header}</div>
+        <div style="padding: 1.5rem;">
+          <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 1rem;">Type: ${dataType}</div>
+          <div class="value-editor">
+            ${useTextarea
+              ? `<textarea id="${editorId}" class="value-editor-input" rows="4">${inputValue}</textarea>`
+              : `<input id="${editorId}" class="value-editor-input" type="${inputType}" value="${inputValue}" />`
+            }
+            <div class="value-editor-actions">
+              <button id="${saveBtnId}" class="btn-save" style="display: none;">
+                <span class="material-icons">check</span>
+                Save
+              </button>
+              <span id="${saveBtnId}-status" style="font-size: 0.75rem; color: var(--text-muted);"></span>
+            </div>
+          </div>
+        </div>
+      `;
+
+      container.appendChild(column);
+      scrollColumnsToRight();
+
+      // Setup editing
+      const editor = document.getElementById(editorId);
+      const saveBtn = document.getElementById(saveBtnId);
+      const status = document.getElementById(`${saveBtnId}-status`);
+      const originalValue = inputValue;
+
+      editor.addEventListener('input', () => {
+        saveBtn.style.display = editor.value !== originalValue ? 'inline-flex' : 'none';
+        status.textContent = '';
+      });
+
+      saveBtn.addEventListener('click', () => {
+        try {
+          saveBtn.disabled = true;
+          status.textContent = 'Saving...';
+
+          let newValue = editor.value;
+          if (dataType === 'number') newValue = parseFloat(newValue);
+          else if (dataType === 'boolean') newValue = newValue === 'true';
+          else if (newValue === 'null') newValue = null;
+
+          db.wasmDB.setPath(dotPath, newValue);
+          db.syncChanges();
+
+          status.textContent = 'Saved!';
+          status.style.color = 'var(--success)';
+          saveBtn.style.display = 'none';
+          setTimeout(() => { status.textContent = ''; }, 2000);
+        } catch (error) {
+          console.error('Save error:', error);
+          status.textContent = 'Error: ' + error.message;
+          status.style.color = 'var(--danger)';
+        } finally {
+          saveBtn.disabled = false;
+        }
+      });
+    }
+
+    // Drill down into a key
+    window.drillDown = function(fullPath, key) {
+      currentPath = fullPath.split('.');
       updatePathDisplay();
 
-      // Show next level
-      showKeysColumn(namespaceId, fullPath);
+      // Mark the clicked item as selected in its parent column
+      const parentDepth = currentPath.length - 2; // 0-indexed depth in dynamic-columns
+      const dynamicColumns = document.getElementById('dynamic-columns');
+      const columns = dynamicColumns.querySelectorAll('.browser-column');
+      if (columns[parentDepth]) {
+        const items = columns[parentDepth].querySelectorAll('.browser-list-item');
+        items.forEach(item => {
+          item.classList.toggle('selected', item.dataset.key === key);
+        });
+      }
+
+      showKeysColumn(fullPath);
+      updateJsonPane();
     };
-
-    // Update path display
-    function updatePathDisplay() {
-      const pathDisplay = document.getElementById('current-path');
-      pathDisplay.textContent = currentPath.length > 0 ? currentPath.join(' / ') : '/';
-    }
-
-    // Utility functions
-    function readUint32(buffer, offset) {
-      return (buffer[offset] << 24) |
-             (buffer[offset + 1] << 16) |
-             (buffer[offset + 2] << 8) |
-             buffer[offset + 3];
-    }
-
-    function writeUint32(buffer, offset, value) {
-      buffer[offset] = (value >>> 24) & 0xFF;
-      buffer[offset + 1] = (value >>> 16) & 0xFF;
-      buffer[offset + 2] = (value >>> 8) & 0xFF;
-      buffer[offset + 3] = value & 0xFF;
-    }
 
     init();
   </script>

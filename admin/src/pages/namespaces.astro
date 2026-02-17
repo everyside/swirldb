@@ -1,12 +1,13 @@
 ---
-// Namespaces page - Full view of all namespaces
+// Subscriptions page - View active client subscriptions
 ---
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Namespaces - SwirlDB Admin</title>
+  <title>Subscriptions - SwirlDB Admin</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <style>
     * {
       margin: 0;
@@ -345,8 +346,8 @@
         <div class="nav-section">
           <div class="nav-section-title">Data Management</div>
           <a href="/namespaces" class="nav-link active">
-            <span class="nav-icon">🗂️</span>
-            Namespaces
+            <span class="nav-icon">📡</span>
+            Subscriptions
           </a>
           <a href="/data" class="nav-link">
             <span class="nav-icon">🔍</span>
@@ -373,7 +374,7 @@
       <div class="top-bar">
         <div class="server-status">
           <div class="page-header">
-            <h1>🗂️ Namespaces</h1>
+            <h1>📡 Subscriptions</h1>
           </div>
           <div class="status-indicator">
             <span class="status-dot online" id="status-dot"></span>
@@ -394,18 +395,18 @@
             <table>
               <thead>
                 <tr>
-                  <th>Namespace ID</th>
-                  <th>Connections</th>
-                  <th>Changes</th>
+                  <th>Client ID</th>
+                  <th>Subscriptions</th>
+                  <th>Changes Received</th>
                   <th>Last Activity</th>
                   <th>Actions</th>
                 </tr>
               </thead>
-              <tbody id="namespaces-tbody">
+              <tbody id="subscriptions-tbody">
                 <tr>
                   <td colspan="5" class="empty-state">
-                    <div class="empty-state-icon">🗂️</div>
-                    <div>Loading namespaces...</div>
+                    <div class="empty-state-icon">📡</div>
+                    <div>Loading subscriptions...</div>
                   </td>
                 </tr>
               </tbody>
@@ -416,270 +417,51 @@
     </main>
   </div>
 
-  <script type="module">
-    import { SwirlDB } from '/swirldb.js';
+  <script>
+    const SERVER = 'http://localhost:3030';
 
-    const ADMIN_NAMESPACE = '__admin';
-    let db;
-    let ws = null;
-    let reconnectAttempts = 0;
-    let maxReconnectDelay = 30000;
-    let reconnectTimer = null;
-
-    // Update current time
     function updateTime() {
       document.getElementById('current-time').textContent =
-        new Date().toLocaleString('en-US', {
-          hour: '2-digit',
-          minute: '2-digit',
-          second: '2-digit',
-          hour12: false
-        });
+        new Date().toLocaleString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
     }
     updateTime();
     setInterval(updateTime, 1000);
 
-    function formatRelativeTime(timestamp) {
-      if (!timestamp) return 'Never';
-      const now = Date.now();
-      const diff = now - timestamp;
-      const seconds = Math.floor(diff / 1000);
+    const es = new EventSource(`${SERVER}/admin/events`);
 
-      if (seconds < 60) return `${seconds}s ago`;
-      if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-      if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-      return new Date(timestamp).toLocaleString();
-    }
+    es.onopen = () => {
+      document.getElementById('status-dot').className = 'status-dot online';
+      document.getElementById('status-text').textContent = 'Connected';
+    };
 
-    async function init() {
+    es.onerror = () => {
+      document.getElementById('status-dot').className = 'status-dot offline';
+      document.getElementById('status-text').textContent = 'Reconnecting...';
+    };
+
+    es.onmessage = (e) => {
       try {
-        db = await SwirlDB.withLocalStorage('swirldb-admin');
-        console.log('✅ Namespaces page SwirlDB initialized');
+        const { subscriptions } = JSON.parse(e.data);
+        const tbody = document.getElementById('subscriptions-tbody');
 
-        // Set up observer
-        db.data.namespaces.$observe(() => {
-          console.log('🔄 Namespaces observer triggered');
-          updateNamespaces();
-        });
-
-        // Give localStorage time to load, then render
-        setTimeout(() => {
-          console.log('📊 Initial render with cached data');
-          updateNamespaces();
-        }, 50);
-
-        // Connect to server
-        await connectToServer();
-      } catch (error) {
-        console.error('❌ Initialization failed:', error);
-        document.getElementById('status-dot').className = 'status-dot offline';
-        document.getElementById('status-text').textContent = 'Connection Failed';
-      }
-    }
-
-    async function connectToServer() {
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
-
-      return new Promise((resolve, reject) => {
-        ws = new WebSocket('ws://localhost:3030/ws');
-        ws.binaryType = 'arraybuffer';
-
-        ws.onopen = () => {
-          console.log('✅ Connected');
-          reconnectAttempts = 0;
-          document.getElementById('status-dot').className = 'status-dot online';
-          document.getElementById('status-text').textContent = 'Connected';
-
-          sendConnectMessage();
-          setTimeout(() => broadcastCRDTState(), 100);
-          resolve();
-        };
-
-        ws.onmessage = (event) => {
-          handleServerMessage(new Uint8Array(event.data));
-        };
-
-        ws.onclose = () => {
-          console.log('👋 Disconnected');
-          document.getElementById('status-dot').className = 'status-dot offline';
-          document.getElementById('status-text').textContent = 'Reconnecting...';
-          scheduleReconnect();
-        };
-
-        ws.onerror = (error) => {
-          console.error('❌ WebSocket error:', error);
-          reject(error);
-        };
-      });
-    }
-
-    function scheduleReconnect() {
-      const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), maxReconnectDelay);
-      reconnectAttempts++;
-      document.getElementById('status-text').textContent = `Reconnecting in ${Math.ceil(delay/1000)}s...`;
-
-      reconnectTimer = setTimeout(async () => {
-        try {
-          await connectToServer();
-        } catch (error) {
-          console.error('❌ Reconnection failed:', error);
-        }
-      }, delay);
-    }
-
-    function sendConnectMessage() {
-      const clientIdBytes = new TextEncoder().encode('admin-namespaces');
-      const namespaceBytes = new TextEncoder().encode(ADMIN_NAMESPACE);
-      const headsBytes = db.getHeads();
-
-      const size = 1 + 4 + clientIdBytes.length + 4 + namespaceBytes.length + 4 + headsBytes.length;
-      const buffer = new Uint8Array(size);
-      let offset = 0;
-
-      buffer[offset++] = 0x01;
-      writeUint32(buffer, offset, clientIdBytes.length);
-      offset += 4;
-      buffer.set(clientIdBytes, offset);
-      offset += clientIdBytes.length;
-      writeUint32(buffer, offset, namespaceBytes.length);
-      offset += 4;
-      buffer.set(namespaceBytes, offset);
-      offset += namespaceBytes.length;
-      writeUint32(buffer, offset, headsBytes.length);
-      offset += 4;
-      buffer.set(headsBytes, offset);
-
-      ws.send(buffer);
-    }
-
-    function broadcastCRDTState() {
-      const allChanges = db.getChanges();
-      if (allChanges.length === 0) return;
-
-      const namespaceBytes = new TextEncoder().encode(ADMIN_NAMESPACE);
-      let totalSize = 1 + 4 + namespaceBytes.length + 4;
-      for (const change of allChanges) {
-        totalSize += 4 + change.length;
-      }
-
-      const buffer = new Uint8Array(totalSize);
-      let offset = 0;
-
-      buffer[offset++] = 0x03;
-      writeUint32(buffer, offset, namespaceBytes.length);
-      offset += 4;
-      buffer.set(namespaceBytes, offset);
-      offset += namespaceBytes.length;
-      writeUint32(buffer, offset, allChanges.length);
-      offset += 4;
-
-      for (const change of allChanges) {
-        writeUint32(buffer, offset, change.length);
-        offset += 4;
-        buffer.set(change, offset);
-        offset += change.length;
-      }
-
-      ws.send(buffer);
-    }
-
-    function handleServerMessage(buffer) {
-      const msgType = buffer[0];
-      if (msgType === 0x02) handleSync(buffer);
-      else if (msgType === 0x04) handleBroadcast(buffer);
-    }
-
-    function handleSync(buffer) {
-      let offset = 1;
-      const headsLen = readUint32(buffer, offset);
-      offset += 4 + headsLen;
-      applyCRDTChanges(buffer, offset);
-    }
-
-    function handleBroadcast(buffer) {
-      let offset = 1;
-      const clientIdLen = readUint32(buffer, offset);
-      offset += 4 + clientIdLen;
-      applyCRDTChanges(buffer, offset);
-    }
-
-    function applyCRDTChanges(buffer, offset) {
-      const changesCount = readUint32(buffer, offset);
-      offset += 4;
-
-      if (changesCount === 0) return;
-
-      const allChanges = [];
-      for (let i = 0; i < changesCount; i++) {
-        const changeLen = readUint32(buffer, offset);
-        offset += 4;
-        const changeBytes = buffer.slice(offset, offset + changeLen);
-        offset += changeLen;
-        allChanges.push(changeBytes);
-      }
-
-      try {
-        db.applyChanges(allChanges);
-        db.checkObservers();
-      } catch (e) {
-        console.error('❌ Failed to apply changes:', e);
-      }
-    }
-
-    function updateNamespaces() {
-      try {
-        const namespaces = db.data.namespaces.$value;
-        if (!namespaces) return;
-
-        const nsArray = typeof namespaces === 'string' ? JSON.parse(namespaces) : namespaces;
-        const tbody = document.getElementById('namespaces-tbody');
-
-        if (!Array.isArray(nsArray) || nsArray.length === 0) {
-          tbody.innerHTML = `
-            <tr>
-              <td colspan="5" class="empty-state">
-                <div class="empty-state-icon">🗂️</div>
-                <div>No active namespaces</div>
-              </td>
-            </tr>
-          `;
+        if (!subscriptions || subscriptions.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="5" class="empty-state"><div class="empty-state-icon">📡</div><div>No active subscriptions</div></td></tr>`;
           return;
         }
 
-        tbody.innerHTML = nsArray.map(ns => `
+        tbody.innerHTML = subscriptions.map(sub => `
           <tr>
-            <td><span class="code">${ns.id}</span></td>
-            <td>${ns.connection_count || 0}</td>
-            <td>${(ns.change_count || 0).toLocaleString()}</td>
-            <td>${formatRelativeTime(ns.last_activity)}</td>
-            <td>
-              <a href="/data?namespace=${encodeURIComponent(ns.id)}" class="btn btn-sm">View</a>
-            </td>
+            <td><span class="code">${sub.client_id}</span></td>
+            <td>${(sub.patterns || []).map(p => `<span class="code">${p}</span>`).join(', ')}</td>
+            <td>-</td>
+            <td>-</td>
+            <td><a href="/data" class="btn btn-sm">Browse</a></td>
           </tr>
         `).join('');
-      } catch (e) {
-        console.error('Error updating namespaces:', e);
+      } catch (err) {
+        console.error('SSE parse error:', err);
       }
-    }
-
-    function readUint32(buffer, offset) {
-      return (buffer[offset] << 24) |
-             (buffer[offset + 1] << 16) |
-             (buffer[offset + 2] << 8) |
-             buffer[offset + 3];
-    }
-
-    function writeUint32(buffer, offset, value) {
-      buffer[offset] = (value >>> 24) & 0xFF;
-      buffer[offset + 1] = (value >>> 16) & 0xFF;
-      buffer[offset + 2] = (value >>> 8) & 0xFF;
-      buffer[offset + 3] = value & 0xFF;
-    }
-
-    init();
+    };
   </script>
 </body>
 </html>

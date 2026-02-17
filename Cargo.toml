@@ -4,6 +4,7 @@ members = [
     "native/swirldb-core",
     "native/swirldb-server",
     "native/swirldb-browser",
+    "tests",
 ]
 
 [workspace.package]

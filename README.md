@@ -79,24 +79,64 @@ const db = await SwirlDB.create();
 
 ## Development
 
-### Build WASM for Browser
+### Building from Source
 
+**Build Browser WASM:**
 ```bash
-pnpm run build:wasm
+cd native/swirldb-browser
+wasm-pack build --target web --out-dir pkg
 ```
 
-### Build Server
-
+**Build Server:**
 ```bash
 cd native/swirldb-server
 cargo build --release
 ```
 
-### Run Tests
+### Running Tests
 
+**Prerequisites for Integration Tests:**
 ```bash
-pnpm test
+# Install Node.js dependencies for browser tests
+cd tests/integration
+npm install
+
+# Install Playwright for headless browser testing
+npx playwright install chromium
 ```
+
+**Run All Integration Tests:**
+```bash
+cd tests
+cargo test --test integration
+```
+
+**Run Specific Test Suites:**
+```bash
+# Browser WebAssembly ↔ Server sync tests
+cargo test --test integration browser_sync
+
+# Subscription filtering tests
+cargo test --test integration subscription_filtering
+
+# Multi-client sync tests
+cargo test --test integration multi_client_sync
+
+# Network resilience tests
+cargo test --test integration network_resilience
+```
+
+**Run a Single Test:**
+```bash
+cargo test --test integration test_browser_to_server_sync -- --nocapture
+```
+
+The integration test suite includes:
+- 32 passing tests covering Browser WASM and Rust native clients
+- Real headless browser testing with Playwright
+- Cross-platform CRDT synchronization validation
+- Subscription filtering and policy enforcement
+- Network disconnect/reconnect scenarios
 
 See [BUILD.md](./BUILD.md) for detailed build instructions.
 

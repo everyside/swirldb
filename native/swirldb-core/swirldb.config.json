@@ -11,7 +11,7 @@
         "priority": 10,
         "actor": { "type": "User" },
         "action": "Write",
-        "path_pattern": "/user/{actor.id}/**",
+        "path_pattern": "user.{actor.id}.**",
         "effect": "Allow"
       },
       {
@@ -19,7 +19,7 @@
         "priority": 10,
         "actor": { "type": "User" },
         "action": "Read",
-        "path_pattern": "/user/{actor.id}/**",
+        "path_pattern": "user.{actor.id}.**",
         "effect": "Allow"
       },
       {
@@ -27,7 +27,7 @@
         "priority": 10,
         "actor": { "type": "User" },
         "action": "Subscribe",
-        "path_pattern": "/user/{actor.id}/**",
+        "path_pattern": "user.{actor.id}.**",
         "effect": "Allow"
       },
       {
@@ -35,7 +35,7 @@
         "priority": 20,
         "actor": { "type": "User" },
         "action": "Read",
-        "path_pattern": "/org/{actor.org_id}/shared/**",
+        "path_pattern": "org.{actor.org_id}.shared.**",
         "effect": "Allow"
       },
       {
@@ -43,7 +43,7 @@
         "priority": 20,
         "actor": { "type": "User" },
         "action": "Subscribe",
-        "path_pattern": "/org/{actor.org_id}/shared/**",
+        "path_pattern": "org.{actor.org_id}.shared.**",
         "effect": "Allow"
       },
       {
@@ -51,7 +51,7 @@
         "priority": 30,
         "actor": { "type": "User", "role": "admin" },
         "action": "Write",
-        "path_pattern": "/org/{actor.org_id}/**",
+        "path_pattern": "org.{actor.org_id}.**",
         "effect": "Allow"
       },
       {
@@ -59,7 +59,7 @@
         "priority": 50,
         "actor": { "type": "User" },
         "action": "Read",
-        "path_pattern": "/public/**",
+        "path_pattern": "public.**",
         "effect": "Allow"
       },
       {
@@ -67,7 +67,7 @@
         "priority": 50,
         "actor": { "type": "User" },
         "action": "Subscribe",
-        "path_pattern": "/public/**",
+        "path_pattern": "public.**",
         "effect": "Allow"
       },
       {
@@ -75,7 +75,7 @@
         "priority": 100,
         "actor": { "type": "Server" },
         "action": "Replicate",
-        "path_pattern": "/**",
+        "path_pattern": "**",
         "effect": "Allow"
       },
       {
@@ -83,7 +83,7 @@
         "priority": 9999,
         "actor": { "type": "Any" },
         "action": "Write",
-        "path_pattern": "/**",
+        "path_pattern": "**",
         "effect": "Deny"
       }
     ],
@@ -129,7 +129,7 @@
       "endpoint": "wss://primary.example.com/ws",
       "transport": "WebSocket",
       "jwt_provider": "server_token",
-      "path_patterns": ["/**"],
+      "path_patterns": ["**"],
       "mode": "Bidirectional",
       "auto_connect": true,
       "retry_strategy": {
@@ -143,7 +143,7 @@
       "endpoint": "wss://backup.example.com/ws",
       "transport": "WebSocket",
       "jwt_provider": "server_token",
-      "path_patterns": ["/**"],
+      "path_patterns": ["**"],
       "mode": "Push",
       "auto_connect": false,
       "retry_strategy": {

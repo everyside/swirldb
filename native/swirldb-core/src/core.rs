@@ -10,7 +10,6 @@ use automerge::{
     Value as AutoValue, ROOT,
 };
 use serde_json::Value as JsonValue;
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 /// Storage adapter trait - all storage implementations implement this
@@ -846,9 +845,14 @@ impl SwirlDB {
         use crate::paths::PathExtractor;
         use automerge::{Automerge, Change};
 
-        // Create an empty temporary document to apply changes to
-        // We don't need the current state - we just need to apply changes to generate patches
-        let mut temp_doc = Automerge::new();
+        // Fork the current document to apply changes for path extraction
+        // This ensures we only extract paths for actual changes, not parent object creation
+        let saved_bytes = {
+            let mut doc = self.doc.lock().unwrap();
+            doc.save()
+        };
+        let mut temp_doc = Automerge::load(&saved_bytes)
+            .map_err(|e| anyhow!("Failed to clone document: {:?}", e))?;
 
         // Get registry - clone the PathRegistry itself
         // Note: The registry isn't actually used for patch extraction since patches

@@ -291,14 +291,16 @@ pub struct PathPatternMatcher;
 impl PathPatternMatcher {
     /// Check if a path matches a pattern with variable substitution
     ///
+    /// Patterns and paths use dot-notation (the native CRDT path format).
+    ///
     /// Examples:
-    /// - Pattern: "/user/{actor.id}/prefs/**"
-    ///   Path: "/user/alice/prefs/theme"
+    /// - Pattern: "user.{actor.id}.prefs.**"
+    ///   Path: "user.alice.prefs.theme"
     ///   Actor: { id: "alice" }
     ///   Result: true
     ///
-    /// - Pattern: "/org/{actor.org_id}/teams/*/members"
-    ///   Path: "/org/acme-corp/teams/engineering/members"
+    /// - Pattern: "org.{actor.org_id}.teams.*.members"
+    ///   Path: "org.acme-corp.teams.engineering.members"
     ///   Actor: { org_id: "acme-corp" }
     ///   Result: true
     pub fn matches(pattern: &str, path: &str, actor: &Actor) -> bool {
@@ -346,8 +348,8 @@ impl PathPatternMatcher {
     /// - `**` matches multiple path segments
     /// - Exact matches
     fn match_pattern(pattern: &str, path: &str) -> bool {
-        let pattern_segments: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
-        let path_segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let pattern_segments: Vec<&str> = pattern.split('.').filter(|s| !s.is_empty()).collect();
+        let path_segments: Vec<&str> = path.split('.').filter(|s| !s.is_empty()).collect();
 
         Self::match_segments(&pattern_segments, &path_segments)
     }
@@ -542,13 +544,13 @@ mod tests {
         };
 
         assert!(PathPatternMatcher::matches(
-            "/config/version",
-            "/config/version",
+            "config.version",
+            "config.version",
             &actor
         ));
         assert!(!PathPatternMatcher::matches(
-            "/config/version",
-            "/config/other",
+            "config.version",
+            "config.other",
             &actor
         ));
     }
@@ -558,13 +560,13 @@ mod tests {
         let actor = Actor::anonymous();
 
         assert!(PathPatternMatcher::matches(
-            "/org/*/members",
-            "/org/acme/members",
+            "org.*.members",
+            "org.acme.members",
             &actor
         ));
         assert!(!PathPatternMatcher::matches(
-            "/org/*/members",
-            "/org/acme/teams/members",
+            "org.*.members",
+            "org.acme.teams.members",
             &actor
         ));
     }
@@ -574,18 +576,18 @@ mod tests {
         let actor = Actor::anonymous();
 
         assert!(PathPatternMatcher::matches(
-            "/user/**",
-            "/user/alice/prefs/theme",
+            "user.**",
+            "user.alice.prefs.theme",
             &actor
         ));
         assert!(PathPatternMatcher::matches(
-            "/user/**",
-            "/user/alice",
+            "user.**",
+            "user.alice",
             &actor
         ));
         assert!(!PathPatternMatcher::matches(
-            "/user/**",
-            "/org/acme",
+            "user.**",
+            "org.acme",
             &actor
         ));
     }
@@ -603,20 +605,20 @@ mod tests {
         };
 
         assert!(PathPatternMatcher::matches(
-            "/user/{actor.id}/prefs/**",
-            "/user/alice/prefs/theme",
+            "user.{actor.id}.prefs.**",
+            "user.alice.prefs.theme",
             &actor
         ));
 
         assert!(!PathPatternMatcher::matches(
-            "/user/{actor.id}/prefs/**",
-            "/user/bob/prefs/theme",
+            "user.{actor.id}.prefs.**",
+            "user.bob.prefs.theme",
             &actor
         ));
 
         assert!(PathPatternMatcher::matches(
-            "/org/{actor.org_id}/shared/**",
-            "/org/acme-corp/shared/docs",
+            "org.{actor.org_id}.shared.**",
+            "org.acme-corp.shared.docs",
             &actor
         ));
     }
@@ -630,14 +632,14 @@ mod tests {
                         "priority": 10,
                         "actor": { "type": "User" },
                         "action": "Read",
-                        "path_pattern": "/user/{actor.id}/**",
+                        "path_pattern": "user.{actor.id}.**",
                         "effect": "Allow"
                     },
                     {
                         "priority": 100,
                         "actor": { "type": "Any" },
                         "action": "Read",
-                        "path_pattern": "/**",
+                        "path_pattern": "**",
                         "effect": "Deny"
                     }
                 ]
@@ -657,12 +659,12 @@ mod tests {
         };
 
         // Alice can read her own data
-        let decision = engine.evaluate(&alice, Action::Read, "/user/alice/prefs");
+        let decision = engine.evaluate(&alice, Action::Read, "user.alice.prefs");
         assert!(decision.is_allowed());
         assert_eq!(decision.rule_priority, 10);
 
         // Alice cannot read Bob's data
-        let decision = engine.evaluate(&alice, Action::Read, "/user/bob/prefs");
+        let decision = engine.evaluate(&alice, Action::Read, "user.bob.prefs");
         assert!(!decision.is_allowed());
         assert_eq!(decision.rule_priority, 100);
     }

@@ -76,7 +76,7 @@ import Layout from '../layouts/Layout.astro';
           <li>redb adapter (persistent, ACID)</li>
           <li>Memory adapter (volatile, fast)</li>
           <li>Binary sync protocol</li>
-          <li>Namespace management</li>
+          <li>Subscription-based filtering</li>
         </ul>
         <h4>Does NOT contain:</h4>
         <ul class="negative">
@@ -102,16 +102,6 @@ trait DocumentStorage {
     async fn load(&self, key: &str) -> Result<Option<Vec<u8>>>;
     async fn delete(&self, key: &str) -> Result<()>;
     async fn list_keys(&self) -> Result<Vec<String>>;
-}
-
-trait ChangeLog {
-    async fn init(&mut self) -> Result<()>;
-    async fn append_change(&self, namespace_id: &str, change: Change) -> Result<()>;
-    async fn append_changes(&self, namespace_id: &str, changes: Vec<Change>) -> Result<()>;
-    async fn get_changes(&self, namespace_id: &str) -> Result<Vec<Change>>;
-    async fn get_changes_since(&self, namespace_id: &str, since: i64) -> Result<Vec<Change>>;
-    async fn change_count(&self, namespace_id: &str) -> Result<usize>;
-    async fn delete_namespace(&self, namespace_id: &str) -> Result<()>;
 }`}</code></pre>
     </div>
 
@@ -158,13 +148,7 @@ impl DocumentStorage for RedbAdapter {
     // ...
 }
 
-#[async_trait]
-impl ChangeLog for RedbAdapter {
-    async fn append_change(&self, namespace_id: &str, change: Change) -> Result<()> {
-        // Persistent change log
-    }
-    // ...
-}`}</code></pre>
+`}</code></pre>
       </div>
     </div>
 

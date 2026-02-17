@@ -32,8 +32,8 @@ import Layout from '../layouts/Layout.astro';
         <li><strong>Storage:</strong> IndexedDB (persistent, per-client)</li>
         <li><strong>Sync:</strong> WebSocket binary protocol</li>
         <li><strong>Server:</strong> Pure Rust (swirldb-server)</li>
-        <li><strong>WebSocket:</strong> ws://demo.swirldb.org:3030/ws</li>
-        <li><strong>HTTP Fallback:</strong> http://demo.swirldb.org:3030/sync/*</li>
+        <li><strong>WebSocket:</strong> ws://localhost:3030/ws</li>
+        <li><strong>HTTP Fallback:</strong> http://localhost:3030/sync/*</li>
         <li><strong>Room:</strong> general</li>
       </ul>
 
@@ -48,8 +48,8 @@ import Layout from '../layouts/Layout.astro';
       <p class="note">
         💡 Each client maintains its own local database in IndexedDB.
         Messages sync through the upstream server to other clients in real-time.
-        User settings are stored in <code>/user/alice/prefs</code> and <code>/user/bob/prefs</code>
-        namespaces and only sync upstream (not to other clients).
+        User settings are stored at paths like <code>/user/alice/prefs</code> and <code>/user/bob/prefs</code>
+        and only sync upstream (not broadcast to other clients).
       </p>
     </div>
   </div>
@@ -159,7 +159,7 @@ import Layout from '../layouts/Layout.astro';
     if (statusEl) {
       statusEl.innerHTML = `
         <div>⏰ ${new Date().toLocaleTimeString()}</div>
-        <div>🟢 Server: ws://demo.swirldb.org:3030</div>
+        <div>🟢 Server: ws://localhost:3030</div>
         <div>👥 Clients: 2 active</div>
       `;
     }

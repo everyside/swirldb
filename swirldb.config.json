@@ -4,6 +4,10 @@
     "port": 3030,
     "transport": "Both"
   },
+  "storage": {
+    "type": "redb",
+    "path": "./data/swirldb.redb"
+  },
   "auth": {
     "jwt_secret": "your-secret-key-here",
     "jwt_algorithm": "HS256",
@@ -15,7 +19,7 @@
       "priority": 10,
       "actor": { "type": "User" },
       "action": "Read",
-      "path_pattern": "/user/{actor.id}/**",
+      "path_pattern": "user.{actor.id}.**",
       "effect": "Allow"
     },
     {
@@ -23,7 +27,7 @@
       "priority": 11,
       "actor": { "type": "User" },
       "action": "Write",
-      "path_pattern": "/user/{actor.id}/prefs/**",
+      "path_pattern": "user.{actor.id}.prefs.**",
       "effect": "Allow"
     },
     {
@@ -31,7 +35,7 @@
       "priority": 12,
       "actor": { "type": "User" },
       "action": "Write",
-      "path_pattern": "/user/{actor.id}/drafts/**",
+      "path_pattern": "user.{actor.id}.drafts.**",
       "effect": "Allow"
     },
     {
@@ -39,7 +43,7 @@
       "priority": 13,
       "actor": { "type": "User" },
       "action": "Subscribe",
-      "path_pattern": "/user/{actor.id}/**",
+      "path_pattern": "user.{actor.id}.**",
       "effect": "Allow"
     },
     {
@@ -47,7 +51,7 @@
       "priority": 20,
       "actor": { "type": "User" },
       "action": "Read",
-      "path_pattern": "/org/{actor.org_id}/shared/**",
+      "path_pattern": "org.{actor.org_id}.shared.**",
       "effect": "Allow"
     },
     {
@@ -55,7 +59,7 @@
       "priority": 21,
       "actor": { "type": "User" },
       "action": "Subscribe",
-      "path_pattern": "/org/{actor.org_id}/shared/**",
+      "path_pattern": "org.{actor.org_id}.shared.**",
       "effect": "Allow"
     },
     {
@@ -63,7 +67,7 @@
       "priority": 22,
       "actor": { "type": "User", "role": "admin" },
       "action": "Write",
-      "path_pattern": "/org/{actor.org_id}/config/**",
+      "path_pattern": "org.{actor.org_id}.config.**",
       "effect": "Allow"
     },
     {
@@ -71,7 +75,7 @@
       "priority": 30,
       "actor": { "type": "User" },
       "action": "Read",
-      "path_pattern": "/apps/chat/messages/**",
+      "path_pattern": "apps.chat.messages.**",
       "effect": "Allow"
     },
     {
@@ -79,7 +83,7 @@
       "priority": 31,
       "actor": { "type": "User" },
       "action": "Write",
-      "path_pattern": "/apps/chat/messages/**",
+      "path_pattern": "apps.chat.messages.**",
       "effect": "Allow"
     },
     {
@@ -87,7 +91,7 @@
       "priority": 32,
       "actor": { "type": "User" },
       "action": "Subscribe",
-      "path_pattern": "/apps/chat/messages/**",
+      "path_pattern": "apps.chat.messages.**",
       "effect": "Allow"
     },
     {
@@ -95,7 +99,7 @@
       "priority": 40,
       "actor": { "type": "User" },
       "action": "Read",
-      "path_pattern": "/apps/tasks/teams/{actor.team_id}/**",
+      "path_pattern": "apps.tasks.teams.{actor.team_id}.**",
       "effect": "Allow"
     },
     {
@@ -103,7 +107,7 @@
       "priority": 41,
       "actor": { "type": "User" },
       "action": "Write",
-      "path_pattern": "/apps/tasks/teams/{actor.team_id}/**",
+      "path_pattern": "apps.tasks.teams.{actor.team_id}.**",
       "effect": "Allow"
     },
     {
@@ -111,7 +115,7 @@
       "priority": 42,
       "actor": { "type": "User" },
       "action": "Subscribe",
-      "path_pattern": "/apps/tasks/teams/{actor.team_id}/**",
+      "path_pattern": "apps.tasks.teams.{actor.team_id}.**",
       "effect": "Allow"
     },
     {
@@ -119,7 +123,7 @@
       "priority": 50,
       "actor": { "type": "App", "id": "admin-dashboard" },
       "action": "Read",
-      "path_pattern": "/**",
+      "path_pattern": "**",
       "effect": "Allow"
     },
     {
@@ -127,7 +131,7 @@
       "priority": 51,
       "actor": { "type": "App", "id": "admin-dashboard" },
       "action": "Write",
-      "path_pattern": "/system/**",
+      "path_pattern": "system.**",
       "effect": "Allow"
     },
     {
@@ -135,7 +139,7 @@
       "priority": 60,
       "actor": { "type": "Server" },
       "action": "Read",
-      "path_pattern": "/**",
+      "path_pattern": "**",
       "effect": "Allow"
     },
     {
@@ -143,7 +147,7 @@
       "priority": 61,
       "actor": { "type": "Server" },
       "action": "Write",
-      "path_pattern": "/**",
+      "path_pattern": "**",
       "effect": "Allow"
     },
     {
@@ -151,7 +155,7 @@
       "priority": 62,
       "actor": { "type": "Server" },
       "action": "Replicate",
-      "path_pattern": "/**",
+      "path_pattern": "**",
       "effect": "Allow"
     },
     {
@@ -159,7 +163,7 @@
       "priority": 9000,
       "actor": { "type": "Anonymous" },
       "action": "Write",
-      "path_pattern": "/**",
+      "path_pattern": "**",
       "effect": "Deny"
     },
     {
@@ -167,7 +171,7 @@
       "priority": 9001,
       "actor": { "type": "Anonymous" },
       "action": "Subscribe",
-      "path_pattern": "/**",
+      "path_pattern": "**",
       "effect": "Deny"
     },
     {
@@ -175,7 +179,7 @@
       "priority": 10000,
       "actor": { "type": "Any" },
       "action": "Write",
-      "path_pattern": "/**",
+      "path_pattern": "**",
       "effect": "Deny"
     }
   ],
@@ -185,7 +189,7 @@
       "endpoint": "wss://primary.swirldb.example.com/ws",
       "transport": "WebSocket",
       "jwt_provider": "server_token_provider",
-      "path_patterns": ["/**"],
+      "path_patterns": ["**"],
       "mode": "Bidirectional",
       "auto_connect": true,
       "retry_strategy": {
@@ -199,7 +203,7 @@
       "endpoint": "wss://backup.swirldb.example.com/ws",
       "transport": "WebSocket",
       "jwt_provider": "server_token_provider",
-      "path_patterns": ["/**"],
+      "path_patterns": ["**"],
       "mode": "Push",
       "auto_connect": true,
       "retry_strategy": {
@@ -214,8 +218,8 @@
       "transport": "Http",
       "jwt_provider": "analytics_token_provider",
       "path_patterns": [
-        "/apps/*/metrics/**",
-        "/apps/*/events/**"
+        "apps.*.metrics.**",
+        "apps.*.events.**"
       ],
       "mode": "Push",
       "auto_connect": true,

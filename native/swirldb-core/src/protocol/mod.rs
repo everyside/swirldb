@@ -303,7 +303,7 @@ mod tests {
     fn test_connect_message() {
         let msg = Message::Connect {
             client_id: "alice".to_string(),
-            subscriptions: vec!["/user/alice/**".to_string(), "/public/**".to_string()],
+            subscriptions: vec!["user.alice.**".to_string(), "public.**".to_string()],
             heads: vec![1, 2, 3],
         };
 
@@ -318,8 +318,8 @@ mod tests {
             } => {
                 assert_eq!(client_id, "alice");
                 assert_eq!(subscriptions.len(), 2);
-                assert_eq!(subscriptions[0], "/user/alice/**");
-                assert_eq!(subscriptions[1], "/public/**");
+                assert_eq!(subscriptions[0], "user.alice.**");
+                assert_eq!(subscriptions[1], "public.**");
                 assert_eq!(heads, vec![1, 2, 3]);
             }
             _ => panic!("Wrong message type"),

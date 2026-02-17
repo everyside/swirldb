@@ -367,20 +367,19 @@
     const prefStorageEl = document.getElementById('pref-storage');
     const globalDebugModeEl = document.getElementById('global-debug-mode');
 
-    // Settings namespace for this client (upstream-only sync)
-    const PREFS_KEY = `user_${clientId}_prefs`;
+    // Settings path prefix for logging
+    const PREFS_KEY = `apps.chat.prefs.${clientId}`;
+    // Helper to access the prefs node via chained property access (not bracket notation)
+    const prefs = () => db.data.apps.chat.prefs[clientId];
 
     // Global debug mode (stored in localStorage, shared across all clients in this browser)
     const GLOBAL_DEBUG_KEY = 'swirldb-debug-mode';
     let debugMode = localStorage.getItem(GLOBAL_DEBUG_KEY) === 'true';
 
     // Protocol-aware URL helpers
-    // Use secure protocols (wss://, https://) when page is HTTPS, insecure otherwise
-    const isSecure = window.location.protocol === 'https:';
-    const WS_PROTOCOL = isSecure ? 'wss:' : 'ws:';
-    const HTTP_PROTOCOL = isSecure ? 'https:' : 'http:';
-    // Use localhost for local development, demo server for production
-    const SERVER_HOST = window.location.hostname === 'localhost' ? 'localhost:3030' : 'demo.swirldb.org:3030';
+    const WS_PROTOCOL = 'ws:';
+    const HTTP_PROTOCOL = 'http:';
+    const SERVER_HOST = 'localhost:3030';
 
     function getWebSocketUrl(path) {
       return `${WS_PROTOCOL}//${SERVER_HOST}${path}`;
@@ -397,7 +396,7 @@
      * - Storage hint: "persisted" (save to IndexedDB)
      * - Sync hint: "upstream-only" (sync to server but NOT broadcast to other clients)
      *
-     * Each client has their own /user/{clientId}/prefs namespace that:
+     * Each client has their own apps.chat.prefs.{clientId} path that:
      * 1. Persists locally in IndexedDB
      * 2. Syncs to the server for backup
      * 3. Does NOT sync to other clients (privacy)
@@ -439,12 +438,12 @@
         const newTransport = e.target.value;
 
         recentMutations.length = 0;
-        db.data[PREFS_KEY].transport = newTransport;
+        prefs().transport = newTransport;
         recentMutations.push({ key: `${PREFS_KEY}.transport`, value: newTransport });
 
         db.persist();
         console.log(`💾 Saved preferred transport: ${newTransport} [${PREFS_KEY}]`);
-        console.log(`📊 Namespace: ${PREFS_KEY} (upstream-only, not broadcast to other clients)`);
+        console.log(`📊 Path: ${PREFS_KEY} (upstream-only, not broadcast to other clients)`);
 
         // Switch to the selected transport
         if (newTransport !== currentTransport) {
@@ -457,7 +456,7 @@
 
       prefNotificationsEl.addEventListener('change', (e) => {
         const checked = e.target.checked;
-        db.data[PREFS_KEY].notifications = checked;
+        prefs().notifications = checked;
         db.persist();
         console.log(`💾 Saved notifications: ${checked} [${PREFS_KEY}]`);
 
@@ -468,7 +467,7 @@
 
       prefStorageEl.addEventListener('change', (e) => {
         const newBackend = e.target.value;
-        db.data[PREFS_KEY].storageBackend = newBackend;
+        prefs().storageBackend = newBackend;
         db.persist();
         console.log(`💾 Saved storage backend: ${newBackend} [${PREFS_KEY}]`);
         console.log(`⚠️  Note: To apply this change, reload the page.`);
@@ -499,7 +498,7 @@
         }
       });
 
-      console.log(`✅ Settings initialized at namespace: ${PREFS_KEY}`);
+      console.log(`✅ Settings initialized at path: ${PREFS_KEY}`);
     }
 
     async function requestNotificationPermission() {
@@ -516,11 +515,11 @@
         console.log('✅ Database initialized');
 
         console.log('🔍 Initializing messages array...');
-        // Initialize messages array if it doesn't exist
+        // Initialize messages array under apps.chat namespace
         // Now using native array support - arrays become Automerge Lists!
         try {
           console.log('🔍 Checking if messages exist...');
-          const existing = db.data.messages.$value;
+          const existing = db.data.apps.chat.messages.$value;
           console.log('🔍 Messages exist:', existing, 'Type:', typeof existing);
 
           // Migration: Convert old JSON string format to native array
@@ -528,20 +527,20 @@
             console.log('🔄 Migrating old JSON string format to native array...');
             try {
               const parsedMessages = JSON.parse(existing);
-              db.data.messages = parsedMessages; // Convert to native array
+              db.data.apps.chat.messages = parsedMessages; // Convert to native array
               console.log('✅ Migrated', parsedMessages.length, 'messages to native array format');
             } catch (e) {
               console.error('❌ Failed to parse old message format:', e);
-              db.data.messages = []; // Reset to empty array
+              db.data.apps.chat.messages = []; // Reset to empty array
             }
           } else if (!existing) {
             console.log('🔍 Creating empty messages array (native array)...');
-            db.data.messages = []; // Native array with proper CRDT support!
+            db.data.apps.chat.messages = []; // Native array with proper CRDT support!
           }
         } catch (e) {
           console.log('🔍 Messages don\'t exist (caught error):', e.message);
           // messages doesn't exist yet, create it as native array
-          db.data.messages = [];
+          db.data.apps.chat.messages = [];
         }
         console.log('✅ Messages array initialized');
 
@@ -552,7 +551,7 @@
 
         // Set up observer to auto-render messages when they change
         // This enables reactive updates when WASM receives server changes
-        db.data.messages.$observe(() => {
+        db.data.apps.chat.messages.$observe(() => {
           console.log('📊 Messages changed, re-rendering...');
           renderMessages();
         });
@@ -603,7 +602,7 @@
 
         // WASM now manages WebSocket internally!
         // Just call connect() with URL, client ID, and subscriptions
-        db.connect(getWebSocketUrl('/ws'), clientId, ['/**']);
+        db.connect(getWebSocketUrl('/ws'), clientId, ['apps.chat.**']);
 
         // Update UI
         connected = true;
@@ -629,7 +628,7 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             client_id: clientId,
-            namespace_id: roomId
+            room_id: roomId
           })
         });
 
@@ -674,7 +673,7 @@
 
         try {
           const response = await fetch(
-            `${getHttpUrl('/sync/poll')}?client_id=${clientId}&namespace_id=${roomId}&timeout=25000`,
+            `${getHttpUrl('/sync/poll')}?client_id=${clientId}&room_id=${roomId}&timeout=25000`,
             { method: 'GET' }
           );
 
@@ -722,7 +721,7 @@
       console.log(`🔄 Switching transport from ${currentTransport} to ${newTransport}`);
 
       // Save preference
-      db.data[PREFS_KEY].transport = newTransport;
+      prefs().transport = newTransport;
       prefTransportEl.value = newTransport;
       db.persist();
       console.log(`💾 Saved transport preference: ${newTransport}`);
@@ -776,11 +775,11 @@
       const mutations = [];
 
       // Get current messages array (native array with CRDT support!)
-      const messages = db.data.messages.$value || [];
+      const messages = db.data.apps.chat.messages.$value || [];
       const newMessages = [...messages, message];
 
       // Update messages array in CRDT (native array - each element is a separate CRDT change!)
-      db.data.messages = newMessages;
+      db.data.apps.chat.messages = newMessages;
       mutations.push({
         key: 'messages',
         value: `array[${newMessages.length}] (+1 message from ${clientId})`
@@ -824,13 +823,13 @@
       // HTTP: REST POST with CRDT changes
       const requestBody = {
         client_id: clientId,
-        namespace_id: roomId,
+        room_id: roomId,
         changes: allChanges.map(c => Array.from(c))
       };
 
       // Debug mode: Add human-readable metadata (server ignores this field)
       if (debugMode) {
-        const messages = db.data.messages.$value || [];
+        const messages = db.data.apps.chat.messages.$value || [];
         requestBody._debug = {
           message: 'This field is for debugging only - server ignores it',
           changes_count: allChanges.length,
@@ -860,8 +859,8 @@
     // reactive observer system.
 
     function renderMessages() {
-      // Read the messages array from the CRDT (native array with proper CRDT support!)
-      const messagesValue = db.data.messages.$value || [];
+      // Read the messages array from the CRDT (namespaced under apps.chat)
+      const messagesValue = db.data.apps.chat.messages.$value || [];
       // Ensure it's a proper JavaScript array (in case getValue returns array-like object)
       const messages = Array.isArray(messagesValue) ? messagesValue : Array.from(messagesValue);
 

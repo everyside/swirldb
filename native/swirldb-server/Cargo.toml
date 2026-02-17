@@ -6,6 +6,10 @@ authors = ["Everyside Innovations, LLC"]
 description = "High-performance CRDT sync server with pluggable storage"
 license = "Apache-2.0"
 
+[lib]
+name = "swirldb_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "swirldb-server"
 path = "src/main.rs"
@@ -17,6 +21,7 @@ swirldb-core = { path = "../swirldb-core" }
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.21"
+async-stream = "0.3"
 futures = "0.3"
 
 # HTTP server
@@ -49,3 +54,6 @@ bytes = "1.5"
 uuid = { version = "1.6", features = ["v4", "serde"] }
 async-trait = "0.1"
 dashmap = "6.0"  # Lock-free concurrent hashmap for massive scalability
+
+[dev-dependencies]
+tempfile = "3.25.0"
