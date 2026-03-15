@@ -3,9 +3,11 @@ resolver = "2"
 members = [
     "native/swirldb-core",
     "native/swirldb-server",
-    "native/swirldb-browser",
+    "native/swirldb-client",
     "tests",
 ]
+# swirldb-browser is WASM-only; build with: cargo build -p swirldb-browser --target wasm32-unknown-unknown
+exclude = ["native/swirldb-browser"]
 
 [workspace.package]
 version = "0.2.0"
@@ -20,6 +22,4 @@ lto = true
 codegen-units = 1
 strip = true
 
-[profile.release.package.swirldb-browser]
-# Browser-specific: optimize for size (WASM)
-opt-level = "z"
+# Note: swirldb-browser uses opt-level = "z" when built via wasm-pack

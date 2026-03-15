@@ -1,0 +1,28 @@
+[package]
+name = "swirldb-client"
+version = "0.1.0"
+edition = "2021"
+authors = ["Everyside Innovations, LLC"]
+description = "Native Rust client library for SwirlDB sync"
+license = "Apache-2.0"
+
+[dependencies]
+# SwirlDB Core - the CRDT engine
+swirldb-core = { path = "../swirldb-core" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.21"
+futures = "0.3"
+
+# Error handling
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+
+# Utilities
+uuid = { version = "1.6", features = ["v4"] }
+
+# CRDT types (re-exported from core but needed for public API)
+automerge = "0.6.1"

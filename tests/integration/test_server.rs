@@ -7,25 +7,19 @@
 
 use anyhow::Result;
 use axum::{
-    extract::{
-        ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
-        State as AxumState,
-    },
+    extract::{ws::WebSocketUpgrade, State as AxumState},
     response::Response,
     routing::get,
     Router,
 };
-use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
-use swirldb_core::protocol::Message;
 use swirldb_core::storage::InMemoryDocStorage;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
-use tracing::{error, info, warn};
-use uuid::Uuid;
+use tracing::{error, info};
 
 // Re-export server state types (we'll need to access server internals)
-pub use swirldb_server::state::{BroadcastMessage, ServerState};
+pub use swirldb_server::state::{BroadcastMessage, EphemeralMessage, ServerState};
 
 pub struct TestServer {
     pub port: u16,
@@ -116,205 +110,12 @@ impl Drop for TestServer {
     }
 }
 
-/// WebSocket upgrade handler (same as production server)
+/// WebSocket upgrade handler — delegates to the shared handler in swirldb_server
 async fn websocket_handler(
     ws: WebSocketUpgrade,
     AxumState(state): AxumState<ServerState>,
 ) -> Response {
-    ws.on_upgrade(|socket| handle_websocket(socket, state))
-}
-
-/// Handle individual WebSocket connection (same as production server)
-async fn handle_websocket(socket: WebSocket, state: ServerState) {
-    let connection_id = Uuid::new_v4();
-    let (mut sender, mut receiver) = socket.split();
-
-    let mut client_info: Option<String> = None;
-    let mut broadcast_rx: Option<tokio::sync::broadcast::Receiver<BroadcastMessage>> = None;
-
-    loop {
-        tokio::select! {
-            msg = receiver.next() => {
-                match msg {
-                    Some(Ok(WsMessage::Binary(data))) => {
-                        match Message::decode(&data) {
-                            Ok(Message::Connect { client_id, subscriptions, heads }) => {
-                                use swirldb_core::policy::{Actor, ActorType};
-                                let actor = Actor {
-                                    actor_type: ActorType::Anonymous,
-                                    id: client_id.clone(),
-                                    org_id: None,
-                                    team_id: None,
-                                    app_id: None,
-                                    role: None,
-                                    claims: std::collections::HashMap::new(),
-                                };
-
-                                let (added, denied) = match state.register_client(
-                                    connection_id,
-                                    client_id.clone(),
-                                    actor,
-                                    subscriptions.clone(),
-                                    "WebSocket".to_string()
-                                ).await {
-                                    Ok(result) => result,
-                                    Err(e) => {
-                                        error!("Failed to register client: {}", e);
-                                        break;
-                                    }
-                                };
-
-                                client_info = Some(client_id.clone());
-                                broadcast_rx = Some(state.subscribe_to_broadcasts());
-
-                                let sub_ack = Message::SubscribeAck { added, denied };
-                                if let Err(e) = sender.send(WsMessage::Binary(sub_ack.encode())).await {
-                                    error!("Failed to send subscribe ack: {}", e);
-                                    break;
-                                }
-
-                                let (server_heads, changes) = {
-                                    let db = state.db().read().await;
-                                    let server_heads = db.get_heads();
-
-                                    let changes = if heads.is_empty() {
-                                        db.get_changes()
-                                    } else {
-                                        let mut client_heads = Vec::new();
-                                        let mut offset = 0;
-                                        while offset + 32 <= heads.len() {
-                                            client_heads.push(heads[offset..offset+32].to_vec());
-                                            offset += 32;
-                                        }
-                                        db.get_changes_since(&client_heads)
-                                    };
-
-                                    (server_heads, changes)
-                                };
-
-                                let heads_bytes: Vec<u8> = server_heads.into_iter().flatten().collect();
-                                let response = Message::Sync { heads: heads_bytes, changes };
-
-                                if let Err(e) = sender.send(WsMessage::Binary(response.encode())).await {
-                                    error!("Failed to send sync: {}", e);
-                                    break;
-                                }
-                            }
-
-                            Ok(Message::Push { heads: _client_heads, changes }) => {
-                                if let Some(client_id) = &client_info {
-                                    let affected_paths = {
-                                        let db = state.db().read().await;
-                                        db.extract_affected_paths(&changes)
-                                            .unwrap_or_else(|e| {
-                                                warn!("Failed to extract paths: {}. Using wildcard.", e);
-                                                vec!["**".to_string()]
-                                            })
-                                    };
-
-                                    match state
-                                        .apply_changes(
-                                            client_id.clone(),
-                                            connection_id,
-                                            changes,
-                                            affected_paths,
-                                        )
-                                        .await
-                                    {
-                                        Ok(_) => {
-                                            let server_heads = {
-                                                let db = state.db().read().await;
-                                                let heads = db.get_heads();
-                                                heads.into_iter().flatten().collect()
-                                            };
-
-                                            let ack = Message::PushAck { heads: server_heads };
-                                            if let Err(e) = sender.send(WsMessage::Binary(ack.encode())).await {
-                                                error!("Failed to send push ack: {}", e);
-                                                break;
-                                            }
-                                        }
-                                        Err(e) => {
-                                            error!("Failed to apply changes: {}", e);
-                                        }
-                                    }
-                                }
-                            }
-
-                            Ok(Message::Ping) => {
-                                let pong = Message::Pong;
-                                if let Err(e) = sender.send(WsMessage::Binary(pong.encode())).await {
-                                    error!("Failed to send pong: {}", e);
-                                    break;
-                                }
-                            }
-
-                            Ok(Message::Pong) => {}
-
-                            Ok(msg) => {
-                                warn!("Unexpected message type: {:?}", msg);
-                            }
-
-                            Err(e) => {
-                                error!("Failed to decode message: {}", e);
-                            }
-                        }
-                    }
-
-                    Some(Ok(WsMessage::Close(_))) | None => break,
-                    Some(Err(e)) => {
-                        error!("WebSocket error: {}", e);
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-
-            broadcast = async {
-                match &mut broadcast_rx {
-                    Some(rx) => rx.recv().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                match broadcast {
-                    Ok(msg) => {
-                        if msg.exclude_connection == Some(connection_id) {
-                            continue;
-                        }
-
-                        // Only send to clients that should receive this broadcast (based on subscriptions)
-                        if let Some(ref client_id) = client_info {
-                            if !msg.target_clients.contains(client_id) {
-                                continue;
-                            }
-
-                            let broadcast_msg = Message::Broadcast {
-                                from_client_id: msg.from_client_id,
-                                changes: msg.changes,
-                                affected_paths: msg.affected_paths,
-                            };
-
-                            if let Err(e) = sender.send(WsMessage::Binary(broadcast_msg.encode())).await {
-                                error!("Failed to send broadcast: {}", e);
-                                break;
-                            }
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        warn!("Client lagged by {} messages", n);
-                    }
-                    Err(e) => {
-                        error!("Broadcast receive error: {}", e);
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    if let Err(e) = state.unregister_client(&connection_id).await {
-        error!("Failed to unregister client: {}", e);
-    }
+    ws.on_upgrade(|socket| swirldb_server::handler::handle_websocket(socket, state))
 }
 
 #[cfg(test)]

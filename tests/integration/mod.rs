@@ -23,6 +23,7 @@ pub mod test_server;
 // Test modules
 mod browser_sync;
 mod cross_platform;
+mod ephemeral;
 mod multi_client_sync;
 mod network_resilience;
 mod policy_enforcement;

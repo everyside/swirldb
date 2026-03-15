@@ -85,7 +85,7 @@ async fn test_subscription_exact_path_match() {
         .unwrap();
 
     assert_eq!(
-        client1.get_path("config.version"),
+        client1.get_path("config.version").await,
         Some(ScalarValue::Str("1.0.0".into()))
     );
 
@@ -139,7 +139,7 @@ async fn test_multiple_subscription_patterns() {
         .unwrap();
 
     assert_eq!(
-        client1.get_path("user.name"),
+        client1.get_path("user.name").await,
         Some(ScalarValue::Str("Bob".into()))
     );
 
@@ -155,7 +155,7 @@ async fn test_multiple_subscription_patterns() {
         .unwrap();
 
     assert_eq!(
-        client1.get_path("settings.lang"),
+        client1.get_path("settings.lang").await,
         Some(ScalarValue::Str("en".into()))
     );
 
@@ -203,7 +203,7 @@ async fn test_subscription_nested_paths() {
         .unwrap();
 
     assert_eq!(
-        client1.get_path("org.team.members.alice"),
+        client1.get_path("org.team.members.alice").await,
         Some(ScalarValue::Str("admin".into()))
     );
 

@@ -18,6 +18,7 @@
     "test:core": "cd native/swirldb-core && cargo test",
     "test:browser": "cd native/swirldb-browser && pnpm test",
     "test:server": "cd native/swirldb-server && cargo test",
+    "test:client": "cd native/swirldb-client && cargo test",
     "server": "cd native/swirldb-server && cargo run --release",
     "clean": "cargo clean && rm -rf docs/dist packages/browser-wasm/*",
     "format": "cargo fmt --all -- --check",

@@ -9,15 +9,9 @@
 /// - Pluggable storage (redb, memory, etc.)
 /// - Binary protocol for minimal overhead
 /// - Lock-free data structures for scalability
-mod state;
-mod storage;
-
 use anyhow::Result;
 use axum::{
-    extract::{
-        ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
-        State as AxumState,
-    },
+    extract::{ws::WebSocketUpgrade, State as AxumState},
     http::StatusCode,
     response::{
         sse::{Event, KeepAlive, Sse},
@@ -26,15 +20,15 @@ use axum::{
     routing::get,
     Json, Router,
 };
-use futures::{SinkExt, StreamExt};
-use state::ServerState;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::{env, fs, io::BufReader, time::Duration};
-use storage::RedbAdapter;
+use swirldb_core::policy::{Remote, Transport};
 use swirldb_core::protocol::Message;
 use swirldb_core::storage::{DocumentStorage, InMemoryDocStorage};
+use swirldb_server::storage::RedbAdapter;
+use swirldb_server::ServerState;
 use tokio::time::interval;
 use tower_http::cors::CorsLayer;
 use tracing::{error, info, warn};
@@ -95,6 +89,35 @@ async fn main() -> Result<()> {
     // Create server state with storage
     let server_state = ServerState::new(policy, storage).await;
 
+    // Load optional config file for remotes
+    let remotes = load_remotes_config();
+
+    // Spawn peer connections for auto_connect remotes
+    for remote in &remotes {
+        if remote.auto_connect {
+            match remote.transport {
+                Transport::WebSocket => {
+                    info!(
+                        "Connecting to remote peer '{}' at {}",
+                        remote.name, remote.endpoint
+                    );
+                    tokio::spawn(connect_to_peer(
+                        server_state.clone(),
+                        remote.name.clone(),
+                        remote.endpoint.clone(),
+                        remote.path_patterns.clone(),
+                    ));
+                }
+                _ => {
+                    warn!(
+                        "Remote '{}' uses non-WebSocket transport, skipping",
+                        remote.name
+                    );
+                }
+            }
+        }
+    }
+
     // Build axum router
     let app = Router::new()
         .route("/ws", get(websocket_handler))
@@ -106,6 +129,12 @@ async fn main() -> Result<()> {
 
     // Spawn heartbeat task
     tokio::spawn(heartbeat_task(server_state.clone()));
+
+    // Start mDNS discovery if the feature is enabled
+    #[cfg(feature = "mdns")]
+    {
+        tokio::spawn(start_mdns_discovery(server_state.clone(), ws_port));
+    }
 
     // Check for TLS certificate configuration
     let tls_cert_path = env::var("TLS_CERT_PATH").ok();
@@ -155,6 +184,59 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Load remotes configuration from a config file.
+///
+/// Reads the file path from the `CONFIG_PATH` environment variable.
+/// Supports two formats:
+/// - Full `SwirlDBConfig` (with `policies` and `remotes` fields)
+/// - Partial config with just a top-level `remotes` array
+fn load_remotes_config() -> Vec<Remote> {
+    use swirldb_core::policy::SwirlDBConfig;
+
+    let config_path = match env::var("CONFIG_PATH") {
+        Ok(path) => path,
+        Err(_) => return Vec::new(),
+    };
+
+    let content = match fs::read_to_string(&config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("Failed to read config file {}: {}", config_path, e);
+            return Vec::new();
+        }
+    };
+
+    // Try full SwirlDBConfig first
+    if let Ok(config) = serde_json::from_str::<SwirlDBConfig>(&content) {
+        info!(
+            "Loaded {} remotes from config (SwirlDBConfig format)",
+            config.remotes.len()
+        );
+        return config.remotes;
+    }
+
+    // Try partial config with just remotes at top level
+    #[derive(serde::Deserialize)]
+    struct PartialConfig {
+        #[serde(default)]
+        remotes: Vec<Remote>,
+    }
+
+    match serde_json::from_str::<PartialConfig>(&content) {
+        Ok(partial) => {
+            info!(
+                "Loaded {} remotes from config (partial format)",
+                partial.remotes.len()
+            );
+            partial.remotes
+        }
+        Err(e) => {
+            warn!("Failed to parse config file {}: {}", config_path, e);
+            Vec::new()
+        }
+    }
+}
+
 /// Load TLS configuration from certificate and key files
 fn load_tls_config(
     cert_path: &str,
@@ -198,267 +280,7 @@ async fn websocket_handler(
     ws: WebSocketUpgrade,
     AxumState(state): AxumState<ServerState>,
 ) -> Response {
-    ws.on_upgrade(|socket| handle_websocket(socket, state))
-}
-
-/// Handle individual WebSocket connection
-async fn handle_websocket(socket: WebSocket, state: ServerState) {
-    let connection_id = Uuid::new_v4();
-    let (mut sender, mut receiver) = socket.split();
-
-    info!("New WebSocket connection: {}", connection_id);
-
-    let mut client_info: Option<String> = None;
-    let mut broadcast_rx: Option<tokio::sync::broadcast::Receiver<state::BroadcastMessage>> = None;
-
-    loop {
-        tokio::select! {
-            // Receive messages from client
-            msg = receiver.next() => {
-                match msg {
-                    Some(Ok(WsMessage::Binary(data))) => {
-                        // Check if this is a JSON debug frame (starts with '{')
-                        if !data.is_empty() && data[0] == 0x7b {
-                            // Skip debug JSON frames
-                            if let Ok(text) = String::from_utf8(data.clone()) {
-                                if text.contains("\"_debug\"") {
-                                    info!("Received debug frame from client");
-                                    continue;
-                                }
-                            }
-                        }
-
-                        // Parse binary protocol message
-                        match Message::decode(&data) {
-                            Ok(Message::Connect { client_id, subscriptions, heads }) => {
-                                info!("📱 Client {} connected ({} subscriptions)",
-                                      client_id, subscriptions.len());
-
-                                // TODO: Extract actor from JWT token instead of using anonymous
-                                use swirldb_core::policy::{Actor, ActorType};
-                                let actor = Actor {
-                                    actor_type: ActorType::Anonymous,
-                                    id: client_id.clone(),
-                                    org_id: None,
-                                    team_id: None,
-                                    app_id: None,
-                                    role: None,
-                                    claims: std::collections::HashMap::new(),
-                                };
-
-                                // Register client with subscriptions
-                                let (added, denied) = match state.register_client(
-                                    connection_id,
-                                    client_id.clone(),
-                                    actor,
-                                    subscriptions.clone(),
-                                    "WebSocket".to_string()
-                                ).await {
-                                    Ok(result) => result,
-                                    Err(e) => {
-                                        error!("Failed to register client: {}", e);
-                                        break;
-                                    }
-                                };
-
-                                if !denied.is_empty() {
-                                    warn!("{} subscriptions denied by policy", denied.len());
-                                }
-
-                                client_info = Some(client_id.clone());
-
-                                // Subscribe to broadcasts
-                                broadcast_rx = Some(state.subscribe_to_broadcasts());
-
-                                // Send SubscribeAck to inform client which subscriptions were accepted
-                                let sub_ack = Message::SubscribeAck { added, denied };
-                                if let Err(e) = sender.send(WsMessage::Binary(sub_ack.encode())).await {
-                                    error!("Failed to send subscribe ack: {}", e);
-                                    break;
-                                }
-
-                                // Get current server heads and changes
-                                let (server_heads, changes) = {
-                                    let db = state.db().read().await;
-                                    let server_heads = db.get_heads();
-
-                                    // Parse client heads if present
-                                    let changes = if heads.is_empty() {
-                                        // Client has no changes, send everything
-                                        db.get_changes()
-                                    } else {
-                                        // Parse client heads (each head is 32 bytes)
-                                        let mut client_heads = Vec::new();
-                                        let mut offset = 0;
-                                        while offset + 32 <= heads.len() {
-                                            client_heads.push(heads[offset..offset+32].to_vec());
-                                            offset += 32;
-                                        }
-
-                                        // Send only changes the client doesn't have
-                                        db.get_changes_since(&client_heads)
-                                    };
-
-                                    (server_heads, changes)
-                                };
-
-                                // Calculate total bytes for stats
-                                let total_bytes: usize = changes.iter().map(|c| c.len()).sum();
-                                let sync_mode = if heads.is_empty() { "full" } else { "delta" };
-                                info!("📤 SEND: {} changes ({} bytes, {}) to {}",
-                                    changes.len(), total_bytes, sync_mode, client_id);
-
-                                // Encode server heads as flat bytes (each is 32 bytes)
-                                let heads_bytes: Vec<u8> = server_heads.into_iter().flatten().collect();
-
-                                let response = Message::Sync {
-                                    heads: heads_bytes,
-                                    changes
-                                };
-
-                                if let Err(e) = sender.send(WsMessage::Binary(response.encode())).await {
-                                    error!("Failed to send sync: {}", e);
-                                    break;
-                                }
-                            }
-
-                            Ok(Message::Push { heads: _client_heads, changes }) => {
-                                if let Some(client_id) = &client_info {
-                                    // Calculate total bytes for stats
-                                    let total_bytes: usize = changes.iter().map(|c| c.len()).sum();
-                                    info!("📥 RECV: {} changes ({} bytes) from {}",
-                                        changes.len(), total_bytes, client_id);
-
-                                    // Extract affected paths from changes
-                                    let affected_paths = {
-                                        let db = state.db().read().await;
-                                        db.extract_affected_paths(&changes)
-                                            .unwrap_or_else(|e| {
-                                                warn!("Failed to extract paths: {}. Using wildcard.", e);
-                                                vec!["**".to_string()]
-                                            })
-                                    };
-
-                                    // Apply CRDT changes and broadcast to subscribers
-                                    match state
-                                        .apply_changes(
-                                            client_id.clone(),
-                                            connection_id,
-                                            changes,
-                                            affected_paths,
-                                        )
-                                        .await
-                                    {
-                                        Ok(_) => {
-                                            // Get server's new heads after applying changes
-                                            let server_heads = {
-                                                let db = state.db().read().await;
-                                                let heads = db.get_heads();
-                                                // Flatten Vec<Vec<u8>> to Vec<u8> (each head is 32 bytes)
-                                                heads.into_iter().flatten().collect()
-                                            };
-
-                                            // Send acknowledgment with server heads
-                                            let ack = Message::PushAck { heads: server_heads };
-                                            if let Err(e) = sender.send(WsMessage::Binary(ack.encode())).await {
-                                                error!("Failed to send push ack: {}", e);
-                                                break;
-                                            }
-                                        }
-                                        Err(e) => {
-                                            error!("Failed to apply changes: {}", e);
-                                        }
-                                    }
-                                }
-                            }
-
-                            Ok(Message::Ping) => {
-                                let pong = Message::Pong;
-                                if let Err(e) = sender.send(WsMessage::Binary(pong.encode())).await {
-                                    error!("Failed to send pong: {}", e);
-                                    break;
-                                }
-                            }
-
-                            Ok(Message::Pong) => {
-                                // Heartbeat response, ignore
-                            }
-
-                            Ok(msg) => {
-                                warn!("Unexpected message type: {:?}", msg);
-                            }
-
-                            Err(e) => {
-                                error!("Failed to decode message: {}", e);
-                            }
-                        }
-                    }
-
-                    Some(Ok(WsMessage::Text(_))) => {
-                        // Ignore text messages (may be debug frames)
-                    }
-
-                    Some(Ok(WsMessage::Close(_))) | None => {
-                        break;
-                    }
-
-                    Some(Err(e)) => {
-                        error!("WebSocket error: {}", e);
-                        break;
-                    }
-
-                    _ => {}
-                }
-            }
-
-            // Receive broadcasts from other clients
-            broadcast = async {
-                match &mut broadcast_rx {
-                    Some(rx) => rx.recv().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                match broadcast {
-                    Ok(msg) => {
-                        // Don't send back to the sender
-                        if msg.exclude_connection == Some(connection_id) {
-                            continue;
-                        }
-
-                        // Only send to clients that should receive this broadcast (based on subscriptions)
-                        if let Some(ref client_id) = client_info {
-                            if !msg.target_clients.contains(client_id) {
-                                continue;
-                            }
-
-                            let broadcast_msg = Message::Broadcast {
-                                from_client_id: msg.from_client_id,
-                                changes: msg.changes,
-                                affected_paths: msg.affected_paths,
-                            };
-
-                            if let Err(e) = sender.send(WsMessage::Binary(broadcast_msg.encode())).await {
-                                error!("Failed to send broadcast: {}", e);
-                                break;
-                            }
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        warn!("Client {} lagged by {} messages", connection_id, n);
-                    }
-                    Err(e) => {
-                        error!("Broadcast receive error: {}", e);
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    // Cleanup
-    if let Err(e) = state.unregister_client(&connection_id).await {
-        error!("Failed to unregister client: {}", e);
-    }
+    ws.on_upgrade(|socket| swirldb_server::handler::handle_websocket(socket, state))
 }
 
 /// Health check endpoint
@@ -500,7 +322,7 @@ async fn admin_sse_handler(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
-/// Heartbeat task - sends pings to all connected clients
+/// Heartbeat task - sends pings and cleans up stale state
 async fn heartbeat_task(state: ServerState) {
     let mut ticker = interval(Duration::from_secs(30));
 
@@ -510,7 +332,267 @@ async fn heartbeat_task(state: ServerState) {
             "Heartbeat tick - {} active connections",
             state.get_connection_count()
         );
+        // Prune stale ephemeral_seen entries (older than 1 hour)
+        state.cleanup_stale_ephemeral_seen();
     }
+}
+
+/// Connect to a peer server as a client
+///
+/// Establishes a WebSocket connection to a remote SwirlDB server,
+/// subscribes to all paths (or a configured subset), and forwards
+/// changes bidirectionally.
+pub async fn connect_to_peer(
+    state: ServerState,
+    peer_id: String,
+    endpoint: String,
+    subscriptions: Vec<String>,
+) {
+    let mut backoff_ms = 1000u64;
+    let max_backoff_ms = 30000u64;
+
+    loop {
+        info!("Connecting to peer {} at {}", peer_id, endpoint);
+
+        match tokio_tungstenite::connect_async(&endpoint).await {
+            Ok((ws_stream, _)) => {
+                backoff_ms = 1000; // Reset backoff on successful connection
+                info!("Connected to peer {}", peer_id);
+
+                let (mut ws_sender, mut ws_receiver) = futures::StreamExt::split(ws_stream);
+
+                // Send Connect message with our server ID
+                let connect_msg = Message::Connect {
+                    client_id: format!("peer-{}", state.server_id()),
+                    subscriptions: subscriptions.clone(),
+                    heads: Vec::new(),
+                };
+
+                if let Err(e) = futures::SinkExt::send(
+                    &mut ws_sender,
+                    tokio_tungstenite::tungstenite::Message::Binary(connect_msg.encode()),
+                )
+                .await
+                {
+                    error!("Failed to send Connect to peer {}: {}", peer_id, e);
+                    // Apply backoff before retry
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    backoff_ms = (backoff_ms * 2).min(max_backoff_ms);
+                    continue;
+                }
+
+                // Register peer only after Connect handshake succeeds
+                state.register_peer(peer_id.clone(), endpoint.clone(), subscriptions.clone());
+
+                // Subscribe to local broadcasts to forward to peer
+                let mut broadcast_rx = state.subscribe_to_broadcasts();
+                let mut ephemeral_rx = state.subscribe_to_ephemeral();
+
+                // Receive loop
+                loop {
+                    tokio::select! {
+                        msg = futures::StreamExt::next(&mut ws_receiver) => {
+                            match msg {
+                                Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(data))) => {
+                                    match Message::decode(&data) {
+                                        Ok(Message::Broadcast { from_client_id, changes, affected_paths }) => {
+                                            // Skip if from_client_id already has peer prefix
+                                            // (prevents double-application in multi-hop topologies)
+                                            if from_client_id.starts_with("peer-") {
+                                                continue;
+                                            }
+                                            if let Err(e) = state.apply_peer_changes(
+                                                format!("peer-{}", peer_id),
+                                                changes,
+                                                affected_paths,
+                                            ).await {
+                                                error!("Failed to apply peer changes: {}", e);
+                                            }
+                                        }
+                                        Ok(Message::Sync { heads: _, changes }) => {
+                                            if !changes.is_empty() {
+                                                let db = state.db().write().await;
+                                                if let Err(e) = db.apply_changes(changes) {
+                                                    error!("Failed to apply peer sync: {}", e);
+                                                }
+                                            }
+                                        }
+                                        Ok(Message::EphemeralBatch { updates }) => {
+                                            // Route peer ephemeral to local subscribers
+                                            if let Err(e) = state.route_ephemeral(
+                                                format!("peer-{}", peer_id),
+                                                Uuid::nil(),
+                                                updates,
+                                            ).await {
+                                                error!("Failed to route peer ephemeral: {}", e);
+                                            }
+                                        }
+                                        Ok(Message::EphemeralRelay { origin, seq, path_through, updates }) => {
+                                            // Atomic check-and-claim (prevents TOCTOU race)
+                                            if state.try_claim_relay(&origin, seq, &path_through) {
+                                                // Route to local subscribers
+                                                if let Err(e) = state.route_ephemeral(
+                                                    format!("peer-{}", peer_id),
+                                                    Uuid::nil(),
+                                                    updates,
+                                                ).await {
+                                                    error!("Failed to route relayed ephemeral: {}", e);
+                                                    // Release claim so retries from other peers are accepted
+                                                    state.release_relay_claim(&origin, seq);
+                                                }
+                                            }
+                                        }
+                                        Ok(Message::Ping) => {
+                                            let _ = futures::SinkExt::send(
+                                                &mut ws_sender,
+                                                tokio_tungstenite::tungstenite::Message::Binary(Message::Pong.encode()),
+                                            ).await;
+                                        }
+                                        Ok(Message::SubscribeAck { .. }) => {}
+                                        Ok(Message::PushAck { .. }) => {}
+                                        _ => {}
+                                    }
+                                }
+                                Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) | None => {
+                                    info!("Peer {} disconnected", peer_id);
+                                    break;
+                                }
+                                Some(Err(e)) => {
+                                    error!("Peer {} WebSocket error: {}", peer_id, e);
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        // Forward local broadcasts to peer
+                        Ok(msg) = broadcast_rx.recv() => {
+                            // Don't forward messages that originated from any peer
+                            // (prevents broadcast storms between peers)
+                            if msg.from_client_id.starts_with("peer-") {
+                                continue;
+                            }
+
+                            // Read current heads from DB so the peer can do delta sync
+                            let heads = {
+                                let db = state.db().read().await;
+                                db.get_heads().into_iter().flatten().collect()
+                            };
+
+                            let push_msg = Message::Push {
+                                heads,
+                                changes: msg.changes,
+                            };
+                            if let Err(e) = futures::SinkExt::send(
+                                &mut ws_sender,
+                                tokio_tungstenite::tungstenite::Message::Binary(push_msg.encode()),
+                            ).await {
+                                error!("Failed to forward to peer {}: {}", peer_id, e);
+                                break;
+                            }
+                        }
+
+                        // Forward local ephemeral to peer as EphemeralRelay
+                        Ok(msg) = ephemeral_rx.recv() => {
+                            // Don't forward messages that originated from any peer
+                            if msg.from_client_id.starts_with("peer-") {
+                                continue;
+                            }
+
+                            let relay_msg = Message::EphemeralRelay {
+                                origin: state.server_id().to_string(),
+                                seq: state.next_ephemeral_seq(),
+                                path_through: vec![state.server_id().to_string()],
+                                updates: msg.updates,
+                            };
+                            if let Err(e) = futures::SinkExt::send(
+                                &mut ws_sender,
+                                tokio_tungstenite::tungstenite::Message::Binary(relay_msg.encode()),
+                            ).await {
+                                error!("Failed to forward ephemeral to peer {}: {}", peer_id, e);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                state.unregister_peer(&peer_id);
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to connect to peer {} at {}: {}. Retrying in {}ms...",
+                    peer_id, endpoint, e, backoff_ms
+                );
+            }
+        }
+
+        // Exponential backoff before retry
+        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+        backoff_ms = (backoff_ms * 2).min(max_backoff_ms);
+    }
+}
+
+/// Start mDNS discovery and advertisement (if mdns feature is enabled)
+#[cfg(feature = "mdns")]
+pub async fn start_mdns_discovery(state: ServerState, port: u16) {
+    use mdns_sd::{ServiceDaemon, ServiceInfo};
+
+    let mdns = ServiceDaemon::new().expect("Failed to create mDNS daemon");
+    let service_type = "_swirldb._tcp.local.";
+
+    // Advertise our service
+    let host = format!("{}.local.", state.server_id());
+    let service_info = ServiceInfo::new(
+        service_type,
+        state.server_id(),
+        &host,
+        "0.0.0.0",
+        port,
+        None,
+    )
+    .expect("Failed to create service info");
+
+    mdns.register(service_info)
+        .expect("Failed to register mDNS service");
+    info!("Advertising via mDNS: {}", service_type);
+
+    // Browse for other servers
+    let receiver = mdns.browse(service_type).expect("Failed to browse mDNS");
+
+    tokio::spawn(async move {
+        loop {
+            match receiver.recv_async().await {
+                Ok(event) => {
+                    if let mdns_sd::ServiceEvent::ServiceResolved(info) = event {
+                        let peer_id = info.get_fullname().to_string();
+                        // Don't connect to ourselves (check for our ID followed by mDNS separator)
+                        let our_prefix = format!("{}._", state.server_id());
+                        if peer_id.starts_with(&our_prefix) {
+                            continue;
+                        }
+
+                        let addrs: Vec<_> = info.get_addresses().iter().collect();
+                        if let Some(addr) = addrs.first() {
+                            let endpoint = format!("ws://{}:{}/ws", addr, info.get_port());
+                            info!("Discovered peer {} at {}", peer_id, endpoint);
+
+                            let state_clone = state.clone();
+                            tokio::spawn(connect_to_peer(
+                                state_clone,
+                                peer_id,
+                                endpoint,
+                                vec!["**".to_string()],
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!("mDNS browse error: {}", e);
+                    break;
+                }
+            }
+        }
+    });
 }
 
 /// Error wrapper for Axum handlers

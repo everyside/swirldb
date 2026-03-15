@@ -31,6 +31,7 @@ async fn test_policy_denies_unauthorized_subscription() {
         },
         adapters: Default::default(),
         remotes: vec![],
+        ephemeral_paths: vec![],
     };
 
     let policy = PolicyEngine::new(config);
@@ -71,6 +72,7 @@ async fn test_policy_allows_authorized_subscription() {
         },
         adapters: Default::default(),
         remotes: vec![],
+        ephemeral_paths: vec![],
     };
 
     let policy = PolicyEngine::new(config);
@@ -118,6 +120,7 @@ async fn test_policy_mixed_allow_deny() {
         },
         adapters: Default::default(),
         remotes: vec![],
+        ephemeral_paths: vec![],
     };
 
     let policy = PolicyEngine::new(config);

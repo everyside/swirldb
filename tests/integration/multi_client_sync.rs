@@ -60,7 +60,7 @@ async fn test_two_client_sync() {
         .unwrap();
 
     // Verify client 2 has the value
-    let value = client2.get_path("message");
+    let value = client2.get_path("message").await;
     assert_eq!(value, Some(ScalarValue::Str("Hello from client1".into())));
     info!("✓ Client 2 received message: {:?}", value);
 
@@ -128,8 +128,14 @@ async fn test_three_client_sync() {
         .unwrap();
 
     // Verify both have the value
-    assert_eq!(client2.get_path("data.count"), Some(ScalarValue::Int(42)));
-    assert_eq!(client3.get_path("data.count"), Some(ScalarValue::Int(42)));
+    assert_eq!(
+        client2.get_path("data.count").await,
+        Some(ScalarValue::Int(42))
+    );
+    assert_eq!(
+        client3.get_path("data.count").await,
+        Some(ScalarValue::Int(42))
+    );
     info!("✓ Both clients received: data.count = 42");
 
     // Cleanup
@@ -201,17 +207,23 @@ async fn test_concurrent_writes_crdt_merge() {
 
     // Both clients should have both values (CRDT merge)
     assert_eq!(
-        client1.get_path("user.name"),
+        client1.get_path("user.name").await,
         Some(ScalarValue::Str("Alice".into()))
     );
-    assert_eq!(client1.get_path("user.age"), Some(ScalarValue::Int(30)));
+    assert_eq!(
+        client1.get_path("user.age").await,
+        Some(ScalarValue::Int(30))
+    );
     info!("✓ Client 1 has both fields: {{name: Alice, age: 30}}");
 
     assert_eq!(
-        client2.get_path("user.name"),
+        client2.get_path("user.name").await,
         Some(ScalarValue::Str("Alice".into()))
     );
-    assert_eq!(client2.get_path("user.age"), Some(ScalarValue::Int(30)));
+    assert_eq!(
+        client2.get_path("user.age").await,
+        Some(ScalarValue::Int(30))
+    );
     info!("✓ Client 2 has both fields: {{name: Alice, age: 30}}");
 
     // Cleanup
@@ -267,7 +279,7 @@ async fn test_late_joiner_gets_full_state() {
     info!("✓ Client 2 connected");
 
     // Client 2 should have the data from initial sync
-    let value = client2.get_path("existing.data");
+    let value = client2.get_path("existing.data").await;
     assert_eq!(value, Some(ScalarValue::Str("Already here".into())));
     info!("✓ Client 2 has existing data: {:?}", value);
 
@@ -324,7 +336,7 @@ async fn test_bidirectional_sync() {
         .unwrap();
 
     assert_eq!(
-        client2.get_path("msg1"),
+        client2.get_path("msg1").await,
         Some(ScalarValue::Str("from client1".into()))
     );
     info!("✓ Client 2 received msg1");
@@ -343,27 +355,27 @@ async fn test_bidirectional_sync() {
         .unwrap();
 
     assert_eq!(
-        client1.get_path("msg2"),
+        client1.get_path("msg2").await,
         Some(ScalarValue::Str("from client2".into()))
     );
     info!("✓ Client 1 received msg2");
 
     // Both clients should have both messages
     assert_eq!(
-        client1.get_path("msg1"),
+        client1.get_path("msg1").await,
         Some(ScalarValue::Str("from client1".into()))
     );
     assert_eq!(
-        client1.get_path("msg2"),
+        client1.get_path("msg2").await,
         Some(ScalarValue::Str("from client2".into()))
     );
 
     assert_eq!(
-        client2.get_path("msg1"),
+        client2.get_path("msg1").await,
         Some(ScalarValue::Str("from client1".into()))
     );
     assert_eq!(
-        client2.get_path("msg2"),
+        client2.get_path("msg2").await,
         Some(ScalarValue::Str("from client2".into()))
     );
     info!("✓ Both clients have both messages");

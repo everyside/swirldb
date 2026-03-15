@@ -56,17 +56,23 @@ async fn test_rust_to_rust_serialization() {
 
     // Verify all types transmitted correctly
     assert_eq!(
-        client2.get_path("types.string"),
+        client2.get_path("types.string").await,
         Some(ScalarValue::Str("test".into()))
     );
-    assert_eq!(client2.get_path("types.int"), Some(ScalarValue::Int(42)));
-    assert_eq!(client2.get_path("types.uint"), Some(ScalarValue::Uint(100)));
     assert_eq!(
-        client2.get_path("types.float"),
+        client2.get_path("types.int").await,
+        Some(ScalarValue::Int(42))
+    );
+    assert_eq!(
+        client2.get_path("types.uint").await,
+        Some(ScalarValue::Uint(100))
+    );
+    assert_eq!(
+        client2.get_path("types.float").await,
         Some(ScalarValue::F64(3.15))
     );
     assert_eq!(
-        client2.get_path("types.bool"),
+        client2.get_path("types.bool").await,
         Some(ScalarValue::Boolean(true))
     );
 
@@ -114,15 +120,15 @@ async fn test_nested_objects_serialization() {
 
     // Verify nested structure
     assert_eq!(
-        client2.get_path("user.profile.name"),
+        client2.get_path("user.profile.name").await,
         Some(ScalarValue::Str("Alice".into()))
     );
     assert_eq!(
-        client2.get_path("user.profile.age"),
+        client2.get_path("user.profile.age").await,
         Some(ScalarValue::Int(30))
     );
     assert_eq!(
-        client2.get_path("user.settings.theme"),
+        client2.get_path("user.settings.theme").await,
         Some(ScalarValue::Str("dark".into()))
     );
 
@@ -158,7 +164,7 @@ async fn test_large_data_transmission() {
         .unwrap();
 
     assert_eq!(
-        client2.get_path("data.large"),
+        client2.get_path("data.large").await,
         Some(ScalarValue::Str(large_string.into()))
     );
 

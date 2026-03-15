@@ -37,7 +37,7 @@ async fn test_browser_to_server_sync() {
         .unwrap();
 
     assert_eq!(
-        rust_client.get_path("message"),
+        rust_client.get_path("message").await,
         Some(ScalarValue::Str("Hello from Browser".into()))
     );
 
@@ -114,15 +114,15 @@ async fn test_browser_wasm_serialization() {
 
     // Verify Rust received them
     assert_eq!(
-        rust_client.get_path("types.string"),
+        rust_client.get_path("types.string").await,
         Some(ScalarValue::Str("test".into()))
     );
     assert_eq!(
-        rust_client.get_path("types.number"),
+        rust_client.get_path("types.number").await,
         Some(ScalarValue::Int(42))
     );
     assert_eq!(
-        rust_client.get_path("types.bool"),
+        rust_client.get_path("types.bool").await,
         Some(ScalarValue::Boolean(true))
     );
 

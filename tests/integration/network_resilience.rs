@@ -28,8 +28,9 @@ async fn test_client_reconnect_after_disconnect() {
     // Disconnect client 1
     client1.close().await.unwrap();
 
-    // Wait for server to process the disconnect
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait for server to process the disconnect (background task needs time
+    // to detect the WebSocket close and unregister)
+    tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(server.connection_count(), 0);
 
     // Reconnect client 1
@@ -39,7 +40,7 @@ async fn test_client_reconnect_after_disconnect() {
 
     // Should get state from server
     assert_eq!(
-        client1_reconnected.get_path("data.before"),
+        client1_reconnected.get_path("data.before").await,
         Some(ScalarValue::Str("original".into()))
     );
 
@@ -75,7 +76,7 @@ async fn test_offline_writes_sync_on_reconnect() {
         .unwrap();
 
     assert_eq!(
-        client1.get_path("data.shared"),
+        client1.get_path("data.shared").await,
         Some(ScalarValue::Str("from client2".into()))
     );
 
@@ -97,11 +98,11 @@ async fn test_offline_writes_sync_on_reconnect() {
 
     // Should receive all changes in initial sync
     assert_eq!(
-        client1_new.get_path("data.shared"),
+        client1_new.get_path("data.shared").await,
         Some(ScalarValue::Str("from client2".into()))
     );
     assert_eq!(
-        client1_new.get_path("data.offline"),
+        client1_new.get_path("data.offline").await,
         Some(ScalarValue::Str("missed by client1".into()))
     );
 
@@ -138,7 +139,7 @@ async fn test_server_maintains_state_across_client_disconnects() {
 
     // Should get the data from server
     assert_eq!(
-        client2.get_path("persistent.data"),
+        client2.get_path("persistent.data").await,
         Some(ScalarValue::Int(12345))
     );
 
@@ -176,15 +177,15 @@ async fn test_multiple_disconnect_reconnect_cycles() {
         .unwrap();
 
     assert_eq!(
-        final_client.get_path("cycle.0"),
+        final_client.get_path("cycle.0").await,
         Some(ScalarValue::Str("data_0".into()))
     );
     assert_eq!(
-        final_client.get_path("cycle.1"),
+        final_client.get_path("cycle.1").await,
         Some(ScalarValue::Str("data_1".into()))
     );
     assert_eq!(
-        final_client.get_path("cycle.2"),
+        final_client.get_path("cycle.2").await,
         Some(ScalarValue::Str("data_2".into()))
     );
 

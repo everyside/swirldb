@@ -5,11 +5,12 @@
 //!
 //! This library exposes server components for use in integration tests.
 
+pub mod handler;
 pub mod state;
 pub mod storage;
 
 // Re-export commonly used types
 pub use state::{
-    ActivityEvent, BroadcastMessage, ClientInfo, ConnectionInfo, ServerState, ServerStats,
-    SubscriptionInfo,
+    ActivityEvent, BroadcastMessage, ClientInfo, ConnectionInfo, EphemeralMessage, PeerInfo,
+    ServerState, ServerStats, SubscriptionInfo,
 };

@@ -24,6 +24,10 @@ thread_local! {
     static NEXT_ID: RefCell<usize> = const { RefCell::new(0) };
     #[allow(clippy::missing_const_for_thread_local)]
     static CONNECTIONS: RefCell<std::collections::HashMap<usize, ConnectionState>> = RefCell::new(std::collections::HashMap::new());
+    /// Ephemeral message handlers: (db_id, handler_id, path_pattern, callback)
+    #[allow(clippy::type_complexity)]
+    static EPHEMERAL_HANDLERS: RefCell<Vec<(usize, u32, String, Function)>> = const { RefCell::new(Vec::new()) };
+    static NEXT_HANDLER_ID: RefCell<u32> = const { RefCell::new(0) };
 }
 
 /// Connection state for protocol handling
@@ -130,6 +134,32 @@ fn fire_all_observers(db_id: usize, core: &swirldb_core::SwirlDB) {
 
             // Update last_value for change detection (use scalar for comparison)
             *last_value = core.get_path(path);
+        }
+    });
+}
+
+/// Fire ephemeral handlers for incoming ephemeral updates
+/// Uses PathPatternMatcher to match handler patterns against update paths
+fn fire_ephemeral_handlers(db_id: usize, updates: &[(String, Vec<u8>)]) {
+    use swirldb_core::policy::{Actor, PathPatternMatcher};
+
+    let actor = Actor::anonymous();
+
+    EPHEMERAL_HANDLERS.with(|handlers| {
+        let handlers_ref = handlers.borrow();
+
+        for (handler_db_id, _, pattern, callback) in handlers_ref.iter() {
+            if *handler_db_id != db_id {
+                continue;
+            }
+
+            for (path, data) in updates {
+                if PathPatternMatcher::matches(pattern, path, &actor) {
+                    let js_path = JsValue::from(path.as_str());
+                    let js_data = Uint8Array::from(&data[..]);
+                    let _ = callback.call2(&JsValue::NULL, &js_path, &js_data.into());
+                }
+            }
         }
     });
 }
@@ -749,6 +779,12 @@ impl SwirlDB {
                                     } => {
                                         // Subscription confirmed
                                     }
+                                    Message::Ephemeral { path, data } => {
+                                        fire_ephemeral_handlers(db_id, &[(path, data)]);
+                                    }
+                                    Message::EphemeralBatch { updates } => {
+                                        fire_ephemeral_handlers(db_id, &updates);
+                                    }
                                     Message::Error { message } => {
                                         web_sys::console::error_1(
                                             &format!("Server error: {}", message).into(),
@@ -850,6 +886,133 @@ impl SwirlDB {
                     }
                 }
             }
+        });
+    }
+
+    // ===== Ephemeral Methods =====
+
+    /// Send an ephemeral message (bypasses CRDT and storage, pure pub/sub)
+    ///
+    /// Example:
+    /// ```javascript
+    /// const colorData = new Uint8Array([255, 0, 128, 255]); // RGBA
+    /// db.sendEphemeral('fixtures.1.color', colorData);
+    /// ```
+    #[wasm_bindgen(js_name = sendEphemeral)]
+    pub fn send_ephemeral(&self, path: String, data: &[u8]) -> Result<(), JsValue> {
+        CONNECTIONS.with(|conns| {
+            let conns_map = conns.borrow();
+            if let Some(state) = conns_map.get(&self.id) {
+                if let Some(ws) = &state.websocket {
+                    let msg = Message::Ephemeral {
+                        path,
+                        data: data.to_vec(),
+                    };
+                    let encoded = msg.encode();
+                    ws.send_with_u8_array(&encoded).map_err(|e| {
+                        JsValue::from_str(&format!("Failed to send ephemeral: {:?}", e))
+                    })?;
+                    Ok(())
+                } else {
+                    Err(JsValue::from_str("Not connected"))
+                }
+            } else {
+                Err(JsValue::from_str("Not connected"))
+            }
+        })
+    }
+
+    /// Send a batch of ephemeral messages (single frame, lower overhead for 60fps updates)
+    ///
+    /// Takes an array of [path, Uint8Array] pairs.
+    ///
+    /// Example:
+    /// ```javascript
+    /// db.sendEphemeralBatch([
+    ///   ['fixtures.1.color', new Uint8Array([255, 0, 0])],
+    ///   ['fixtures.2.color', new Uint8Array([0, 255, 0])],
+    ///   ['beat.bpm', new Uint8Array([0, 0, 0, 120])],
+    /// ]);
+    /// ```
+    #[wasm_bindgen(js_name = sendEphemeralBatch)]
+    pub fn send_ephemeral_batch(&self, updates: JsValue) -> Result<(), JsValue> {
+        let array: js_sys::Array = updates
+            .dyn_into()
+            .map_err(|_| JsValue::from_str("Expected array of [path, data] pairs"))?;
+
+        let mut update_vec = Vec::new();
+        for i in 0..array.length() {
+            let pair: js_sys::Array = array
+                .get(i)
+                .dyn_into()
+                .map_err(|_| JsValue::from_str("Expected [path, data] pair"))?;
+            let path = pair
+                .get(0)
+                .as_string()
+                .ok_or_else(|| JsValue::from_str("Path must be a string"))?;
+            let data_val = pair.get(1);
+            let data_arr: Uint8Array = data_val
+                .dyn_into()
+                .map_err(|_| JsValue::from_str("Data must be a Uint8Array"))?;
+            update_vec.push((path, data_arr.to_vec()));
+        }
+
+        CONNECTIONS.with(|conns| {
+            let conns_map = conns.borrow();
+            if let Some(state) = conns_map.get(&self.id) {
+                if let Some(ws) = &state.websocket {
+                    let msg = Message::EphemeralBatch {
+                        updates: update_vec,
+                    };
+                    let encoded = msg.encode();
+                    ws.send_with_u8_array(&encoded).map_err(|e| {
+                        JsValue::from_str(&format!("Failed to send ephemeral batch: {:?}", e))
+                    })?;
+                    Ok(())
+                } else {
+                    Err(JsValue::from_str("Not connected"))
+                }
+            } else {
+                Err(JsValue::from_str("Not connected"))
+            }
+        })
+    }
+
+    /// Register a handler for incoming ephemeral messages matching a path pattern
+    ///
+    /// Returns a handler ID that can be used to unregister later.
+    /// The callback receives (path: string, data: Uint8Array) for each matching update.
+    ///
+    /// Example:
+    /// ```javascript
+    /// const handlerId = db.onEphemeral('fixtures.**', (path, data) => {
+    ///   console.log('Got ephemeral:', path, data);
+    /// });
+    /// ```
+    #[wasm_bindgen(js_name = onEphemeral)]
+    pub fn on_ephemeral(&self, path_pattern: String, callback: Function) -> u32 {
+        let handler_id = NEXT_HANDLER_ID.with(|id| {
+            let current = *id.borrow();
+            *id.borrow_mut() = current + 1;
+            current
+        });
+
+        EPHEMERAL_HANDLERS.with(|handlers| {
+            handlers
+                .borrow_mut()
+                .push((self.id, handler_id, path_pattern, callback));
+        });
+
+        handler_id
+    }
+
+    /// Remove an ephemeral handler by its ID
+    #[wasm_bindgen(js_name = offEphemeral)]
+    pub fn off_ephemeral(&self, handler_id: u32) {
+        EPHEMERAL_HANDLERS.with(|handlers| {
+            handlers
+                .borrow_mut()
+                .retain(|(_, id, _, _)| *id != handler_id);
         });
     }
 
@@ -986,6 +1149,51 @@ impl SwirlDB {
                 let obj = js_sys::Object::new();
                 js_sys::Reflect::set(&obj, &"type".into(), &"Error".into())?;
                 js_sys::Reflect::set(&obj, &"message".into(), &message.into())?;
+                obj.into()
+            }
+            Message::Ephemeral { path, data } => {
+                let obj = js_sys::Object::new();
+                js_sys::Reflect::set(&obj, &"type".into(), &"Ephemeral".into())?;
+                js_sys::Reflect::set(&obj, &"path".into(), &path.into())?;
+                js_sys::Reflect::set(&obj, &"data".into(), &Uint8Array::from(&data[..]))?;
+                obj.into()
+            }
+            Message::EphemeralBatch { updates } => {
+                let obj = js_sys::Object::new();
+                js_sys::Reflect::set(&obj, &"type".into(), &"EphemeralBatch".into())?;
+                let updates_arr = js_sys::Array::new();
+                for (path, data) in updates {
+                    let pair = js_sys::Array::new();
+                    pair.push(&JsValue::from(path));
+                    pair.push(&Uint8Array::from(&data[..]).into());
+                    updates_arr.push(&pair);
+                }
+                js_sys::Reflect::set(&obj, &"updates".into(), &updates_arr)?;
+                obj.into()
+            }
+            Message::EphemeralRelay {
+                origin,
+                seq,
+                path_through,
+                updates,
+            } => {
+                let obj = js_sys::Object::new();
+                js_sys::Reflect::set(&obj, &"type".into(), &"EphemeralRelay".into())?;
+                js_sys::Reflect::set(&obj, &"origin".into(), &origin.into())?;
+                js_sys::Reflect::set(&obj, &"seq".into(), &JsValue::from(seq as f64))?;
+                let path_arr = path_through
+                    .into_iter()
+                    .map(JsValue::from)
+                    .collect::<js_sys::Array>();
+                js_sys::Reflect::set(&obj, &"pathThrough".into(), &path_arr)?;
+                let updates_arr = js_sys::Array::new();
+                for (path, data) in updates {
+                    let pair = js_sys::Array::new();
+                    pair.push(&JsValue::from(path));
+                    pair.push(&Uint8Array::from(&data[..]).into());
+                    updates_arr.push(&pair);
+                }
+                js_sys::Reflect::set(&obj, &"updates".into(), &updates_arr)?;
                 obj.into()
             }
             Message::Subscribe { add, remove } => {

@@ -24,6 +24,17 @@ pub struct SwirlDBConfig {
     pub adapters: AdaptersConfig,
     #[serde(default)]
     pub remotes: Vec<Remote>,
+    /// Path patterns that should be routed as ephemeral (bypasses CRDT/storage).
+    ///
+    /// When configured, clients can use these patterns to determine which writes
+    /// should go through the ephemeral pub/sub channel instead of the CRDT path.
+    /// This is a client-side configuration hint — the server does not enforce
+    /// routing based on this field; it processes whatever message type it receives.
+    ///
+    /// Example: `["fixtures.**", "beat.**", "cursor.**"]`
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub ephemeral_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -140,15 +151,28 @@ pub enum Effect {
     Deny,
 }
 
+/// Configuration for a remote peer server connection.
+///
+/// Used in `SwirlDBConfig.remotes` to define server-to-server sync peers.
+/// The server will connect to each remote on startup and forward CRDT changes
+/// and ephemeral messages according to the configured mode and path patterns.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Remote {
+    /// Human-readable name for this remote
     pub name: String,
+    /// WebSocket endpoint URL (e.g., `ws://peer:3030/ws`)
     pub endpoint: String,
+    /// Transport protocol to use
     pub transport: Transport,
+    /// JWT provider name for authenticating with the remote
     pub jwt_provider: String,
+    /// Path patterns to subscribe to on the remote
     pub path_patterns: Vec<String>,
+    /// Sync direction: push, pull, or bidirectional
     pub mode: SyncMode,
+    /// Whether to connect automatically on server startup
     pub auto_connect: bool,
+    /// Reconnection strategy on disconnect
     pub retry_strategy: RetryStrategy,
 }
 
