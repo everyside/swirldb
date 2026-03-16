@@ -5,6 +5,7 @@
 //!
 //! This library exposes server components for use in integration tests.
 
+pub mod discovery;
 pub mod handler;
 pub mod state;
 pub mod storage;
@@ -14,3 +15,6 @@ pub use state::{
     ActivityEvent, BroadcastMessage, ClientInfo, ConnectionInfo, EphemeralMessage, PeerInfo,
     ServerState, ServerStats, SubscriptionInfo,
 };
+
+#[cfg(feature = "mdns")]
+pub use discovery::MdnsDiscovery;

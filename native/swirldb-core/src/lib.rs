@@ -13,6 +13,9 @@ pub mod encryption;
 // Sync protocol module
 pub mod sync;
 
+// Transport traits - pluggable peer networking (LAN, WebSocket, BLE)
+pub mod transport;
+
 // Network protocol - binary message encoding/decoding
 pub mod protocol;
 
