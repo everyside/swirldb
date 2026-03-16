@@ -865,7 +865,7 @@ mod tests {
 
     #[test]
     fn test_transport_event_display() {
-        let events = vec![
+        let events = [
             TransportEvent::PeerDiscovered(PeerAddr::new("p1")),
             TransportEvent::PeerLost(PeerId::new("p2")),
             TransportEvent::PeerConnected(PeerId::new("p3")),

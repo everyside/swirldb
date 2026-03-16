@@ -7,8 +7,10 @@
 
 pub mod discovery;
 pub mod handler;
+pub mod peer_manager;
 pub mod state;
 pub mod storage;
+pub mod transport;
 
 // Re-export commonly used types
 pub use state::{
@@ -18,3 +20,6 @@ pub use state::{
 
 #[cfg(feature = "mdns")]
 pub use discovery::MdnsDiscovery;
+
+pub use peer_manager::{PeerEvent, PeerManager, PeerManagerConfig, PeerSource};
+pub use transport::LanTransport;
