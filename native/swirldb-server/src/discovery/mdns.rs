@@ -115,7 +115,15 @@ impl MdnsDiscovery {
         }
 
         let port = info.get_port();
-        let ip = addrs.iter().next().unwrap();
+
+        // Prefer IPv4 addresses — IPv6 link-local (fe80::) without scope IDs
+        // won't parse as valid SocketAddr and fail to connect.
+        let ip = addrs
+            .iter()
+            .find(|a| a.is_ipv4())
+            .or_else(|| addrs.iter().find(|a| !a.is_loopback()))
+            .or_else(|| addrs.iter().next())
+            .unwrap();
 
         let mut peer_addr =
             PeerAddr::new(PeerId::new(&peer_id)).with_address("tcp", format!("{}:{}", ip, port));

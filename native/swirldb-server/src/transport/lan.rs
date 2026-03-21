@@ -42,7 +42,7 @@ use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use dashmap::DashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use swirldb_core::transport::{
     PeerAddr, PeerId, PeerTransport, PeerTransportMarker, TransportEvent,
@@ -80,6 +80,34 @@ struct PeerConn {
 
 /// Shared state for the transport, extracted so both the struct and
 /// spawned tasks can hold `Arc<Inner>` without needing `Arc<LanTransport>`.
+/// Shared byte counters for transport throughput monitoring.
+/// Created by `LanTransport::bind()` and accessible via `LanTransport::stats()`.
+/// The `Arc` references remain valid even after the transport is moved.
+#[derive(Debug, Clone)]
+pub struct TransportByteCounters {
+    pub tcp_bytes_sent: Arc<AtomicU64>,
+    pub tcp_bytes_recv: Arc<AtomicU64>,
+    pub udp_bytes_sent: Arc<AtomicU64>,
+    pub udp_bytes_recv: Arc<AtomicU64>,
+}
+
+impl Default for TransportByteCounters {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TransportByteCounters {
+    pub fn new() -> Self {
+        Self {
+            tcp_bytes_sent: Arc::new(AtomicU64::new(0)),
+            tcp_bytes_recv: Arc::new(AtomicU64::new(0)),
+            udp_bytes_sent: Arc::new(AtomicU64::new(0)),
+            udp_bytes_recv: Arc::new(AtomicU64::new(0)),
+        }
+    }
+}
+
 struct Inner {
     local_peer_id: String,
     peers: DashMap<String, PeerConn>,
@@ -92,6 +120,8 @@ struct Inner {
     tcp_local_addr: SocketAddr,
     /// Our UDP local address.
     udp_local_addr: SocketAddr,
+    /// Shared byte counters.
+    counters: TransportByteCounters,
 }
 
 impl Inner {
@@ -187,6 +217,8 @@ impl LanTransport {
 
         let (event_tx, event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
 
+        let counters = TransportByteCounters::new();
+
         let inner = Arc::new(Inner {
             local_peer_id,
             peers: DashMap::new(),
@@ -196,6 +228,7 @@ impl LanTransport {
             udp_addr_to_peer: DashMap::new(),
             tcp_local_addr,
             udp_local_addr,
+            counters,
         });
 
         // Spawn TCP accept task
@@ -233,6 +266,22 @@ impl LanTransport {
     /// Our peer ID.
     pub fn local_peer_id(&self) -> &str {
         &self.inner.local_peer_id
+    }
+
+    /// Cumulative byte counters: (tcp_sent, tcp_recv, udp_sent, udp_recv).
+    pub fn byte_counts(&self) -> (u64, u64, u64, u64) {
+        (
+            self.inner.counters.tcp_bytes_sent.load(Ordering::Relaxed),
+            self.inner.counters.tcp_bytes_recv.load(Ordering::Relaxed),
+            self.inner.counters.udp_bytes_sent.load(Ordering::Relaxed),
+            self.inner.counters.udp_bytes_recv.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Get a clone of the shared byte counters.
+    /// These remain valid even after the transport is moved into PeerManager.
+    pub fn stats(&self) -> TransportByteCounters {
+        self.inner.counters.clone()
     }
 }
 
@@ -280,7 +329,15 @@ impl PeerTransport for LanTransport {
             .ok_or_else(|| anyhow::anyhow!("Not connected to {}", peer))?;
 
         let mut writer = conn.tcp_writer.lock().await;
-        write_frame(&mut writer, data).await
+        let len = data.len() as u64;
+        let result = write_frame(&mut writer, data).await;
+        if result.is_ok() {
+            self.inner
+                .counters
+                .tcp_bytes_sent
+                .fetch_add(len + 4, Ordering::Relaxed); // +4 for length prefix
+        }
+        result
     }
 
     fn send_ephemeral(&self, peer: &PeerId, data: &[u8]) -> Result<()> {
@@ -296,11 +353,20 @@ impl PeerTransport for LanTransport {
 
         if let Some(udp_addr) = conn.udp_addr {
             let packet = self.inner.build_udp_packet(data);
+            let pkt_len = packet.len() as u64;
             let inner = Arc::clone(&self.inner);
             let pkt = packet;
             tokio::spawn(async move {
-                if let Err(e) = inner.udp_socket.send_to(&pkt, udp_addr).await {
-                    debug!("UDP send error: {}", e);
+                match inner.udp_socket.send_to(&pkt, udp_addr).await {
+                    Ok(_) => {
+                        inner
+                            .counters
+                            .udp_bytes_sent
+                            .fetch_add(pkt_len, Ordering::Relaxed);
+                    }
+                    Err(e) => {
+                        debug!("UDP send error to {}: {}", udp_addr, e);
+                    }
                 }
             });
             Ok(())
@@ -308,12 +374,18 @@ impl PeerTransport for LanTransport {
             // No UDP addr — fall back to TCP
             let inner = Arc::clone(&self.inner);
             let peer_id = peer.as_str().to_string();
+            let data_len = data.len() as u64;
             let data = data.to_vec();
             tokio::spawn(async move {
                 if let Some(conn) = inner.peers.get(&peer_id) {
                     let mut writer = conn.tcp_writer.lock().await;
                     if let Err(e) = write_frame(&mut writer, &data).await {
-                        debug!("TCP fallback send error: {}", e);
+                        debug!("TCP fallback send error to {}: {}", peer_id, e);
+                    } else {
+                        inner
+                            .counters
+                            .tcp_bytes_sent
+                            .fetch_add(data_len + 4, Ordering::Relaxed);
                     }
                 }
             });
@@ -342,10 +414,19 @@ impl PeerTransport for LanTransport {
         if !udp_targets.is_empty() {
             let inner = Arc::clone(&self.inner);
             let pkt = packet;
+            let pkt_len = pkt.len() as u64;
             tokio::spawn(async move {
-                for addr in udp_targets {
-                    if let Err(e) = inner.udp_socket.send_to(&pkt, addr).await {
-                        debug!("UDP broadcast error to {}: {}", addr, e);
+                for addr in &udp_targets {
+                    match inner.udp_socket.send_to(&pkt, addr).await {
+                        Ok(_) => {
+                            inner
+                                .counters
+                                .udp_bytes_sent
+                                .fetch_add(pkt_len, Ordering::Relaxed);
+                        }
+                        Err(e) => {
+                            debug!("UDP broadcast error to {}: {}", addr, e);
+                        }
                     }
                 }
             });
@@ -353,6 +434,7 @@ impl PeerTransport for LanTransport {
 
         if !tcp_fallback_peers.is_empty() {
             let inner = Arc::clone(&self.inner);
+            let data_len = data.len() as u64;
             let data = data.to_vec();
             tokio::spawn(async move {
                 for peer_id in tcp_fallback_peers {
@@ -360,6 +442,11 @@ impl PeerTransport for LanTransport {
                         let mut writer = conn.tcp_writer.lock().await;
                         if let Err(e) = write_frame(&mut writer, &data).await {
                             debug!("TCP fallback broadcast error to {}: {}", peer_id, e);
+                        } else {
+                            inner
+                                .counters
+                                .tcp_bytes_sent
+                                .fetch_add(data_len + 4, Ordering::Relaxed);
                         }
                     }
                 }
@@ -483,9 +570,52 @@ async fn connect_outbound(inner: Arc<Inner>, peer: &PeerAddr) -> Result<()> {
         .parse()
         .context("Invalid TCP address in PeerAddr")?;
 
-    let stream = TcpStream::connect(tcp_addr)
-        .await
-        .context("TCP connect failed")?;
+    // Extract the TCP port from the primary address
+    let tcp_port = tcp_addr.port();
+
+    // Build list of candidate addresses: primary first, then all IPs from metadata
+    let mut candidates: Vec<SocketAddr> = vec![tcp_addr];
+    for (key, val) in &peer.metadata {
+        if key.starts_with("ip_") {
+            if let Ok(ip) = val.parse::<std::net::IpAddr>() {
+                let candidate = SocketAddr::new(ip, tcp_port);
+                if !candidates.contains(&candidate) {
+                    candidates.push(candidate);
+                }
+            }
+        }
+    }
+
+    // Try each candidate address with a short timeout
+    let mut stream = None;
+    let mut last_err = None;
+    for addr in &candidates {
+        debug!("Trying TCP connect to {} ...", addr);
+        match tokio::time::timeout(std::time::Duration::from_secs(2), TcpStream::connect(addr))
+            .await
+        {
+            Ok(Ok(s)) => {
+                info!(
+                    "TCP connected to {} (of {} candidates)",
+                    addr,
+                    candidates.len()
+                );
+                stream = Some((s, *addr));
+                break;
+            }
+            Ok(Err(e)) => {
+                debug!("TCP connect to {} failed: {}", addr, e);
+                last_err = Some(e.into());
+            }
+            Err(_) => {
+                debug!("TCP connect to {} timed out", addr);
+                last_err = Some(anyhow::anyhow!("TCP connect to {} timed out", addr));
+            }
+        }
+    }
+
+    let (stream, connected_addr) = stream
+        .ok_or_else(|| last_err.unwrap_or_else(|| anyhow::anyhow!("All TCP addresses failed")))?;
 
     let (mut reader, mut writer) = stream.into_split();
 
@@ -505,10 +635,23 @@ async fn connect_outbound(inner: Arc<Inner>, peer: &PeerAddr) -> Result<()> {
         );
     }
 
-    // Parse UDP address from PeerAddr
-    let udp_addr = peer
-        .address("udp")
-        .and_then(|s| s.parse::<SocketAddr>().ok());
+    // Parse UDP address from PeerAddr, preferring the IP that actually connected
+    let udp_addr = peer.address("udp").and_then(|s| {
+        let parsed: SocketAddr = s.parse().ok()?;
+        // If the connected IP differs from the advertised UDP IP, use the
+        // connected IP with the advertised ephemeral port (multi-homed fix)
+        if parsed.ip() != connected_addr.ip() {
+            info!(
+                "Rewriting UDP addr from {} to {}:{} (matched connected IP)",
+                parsed,
+                connected_addr.ip(),
+                parsed.port()
+            );
+            Some(SocketAddr::new(connected_addr.ip(), parsed.port()))
+        } else {
+            Some(parsed)
+        }
+    });
 
     let peer_conn = PeerConn {
         tcp_writer: Mutex::new(writer),
@@ -529,6 +672,16 @@ async fn connect_outbound(inner: Arc<Inner>, peer: &PeerAddr) -> Result<()> {
 
     info!("✅ Peer connected (outbound): {}", remote_peer_id);
 
+    // Send a UDP "ping" to the peer so they learn our UDP address.
+    // The packet is just our peer ID header with an empty payload.
+    if let Some(addr) = udp_addr {
+        let ping = inner.build_udp_packet(&[]);
+        match inner.udp_socket.send_to(&ping, addr).await {
+            Ok(_) => info!("UDP ping sent to {} ({})", remote_peer_id, addr),
+            Err(e) => debug!("UDP ping to {} failed: {}", addr, e),
+        }
+    }
+
     // Spawn read loop
     let inner_clone = Arc::clone(&inner);
     let pid = remote_peer_id.clone();
@@ -548,6 +701,10 @@ async fn tcp_read_loop(
     loop {
         match read_frame(&mut reader).await {
             Ok(data) => {
+                inner
+                    .counters
+                    .tcp_bytes_recv
+                    .fetch_add(data.len() as u64 + 4, Ordering::Relaxed);
                 let _ = inner
                     .event_tx
                     .send(TransportEvent::ReliableMessage {
@@ -585,6 +742,11 @@ async fn udp_recv_loop(inner: Arc<Inner>) {
 
         match inner.udp_socket.recv_from(&mut buf).await {
             Ok((len, src_addr)) => {
+                inner
+                    .counters
+                    .udp_bytes_recv
+                    .fetch_add(len as u64, Ordering::Relaxed);
+
                 if len < 2 {
                     continue; // Need at least [id_len][1 byte id]
                 }
@@ -605,9 +767,18 @@ async fn udp_recv_loop(inner: Arc<Inner>) {
                 // Learn/update the peer's UDP addr
                 if let Some(mut conn) = inner.peers.get_mut(&peer_id) {
                     if conn.udp_addr.is_none() || conn.udp_addr != Some(src_addr) {
+                        info!("Learned UDP addr for {}: {}", peer_id, src_addr);
                         conn.udp_addr = Some(src_addr);
                         inner.udp_addr_to_peer.insert(src_addr, peer_id.clone());
                     }
+                } else {
+                    debug!(
+                        "UDP from unknown peer '{}' at {} (not yet in peers map)",
+                        peer_id, src_addr
+                    );
+                    // Store the mapping anyway — when the peer connects via TCP,
+                    // we can look it up
+                    inner.udp_addr_to_peer.insert(src_addr, peer_id.clone());
                 }
 
                 let _ = inner

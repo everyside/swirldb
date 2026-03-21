@@ -8,4 +8,4 @@
 
 pub mod lan;
 
-pub use self::lan::LanTransport;
+pub use self::lan::{LanTransport, TransportByteCounters};

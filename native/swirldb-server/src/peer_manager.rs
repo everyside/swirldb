@@ -239,6 +239,75 @@ struct ManagedPeer {
     /// Whether we initiated the connection (outbound) or they did (inbound).
     /// Determines who sends the Connect message first.
     outbound: bool,
+    /// Path patterns this peer is subscribed to (from their Connect message).
+    /// Empty means "everything" (same as `["**"]`).
+    subscriptions: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Path pattern matching for subscription filtering
+// ---------------------------------------------------------------------------
+
+/// Check if a path matches any of the given subscription patterns.
+///
+/// Supports:
+/// - `**` matches zero or more path segments
+/// - `*` matches exactly one path segment
+/// - Exact segment match
+/// - `!pattern` negates a pattern (exclude matching paths)
+///
+/// Empty patterns list matches everything.
+fn path_matches_subscriptions(path: &str, patterns: &[String]) -> bool {
+    if patterns.is_empty() {
+        return true;
+    }
+
+    let path_segs: Vec<&str> = path.split('.').filter(|s| !s.is_empty()).collect();
+    let mut matched = false;
+
+    for pattern in patterns {
+        if let Some(negated) = pattern.strip_prefix('!') {
+            // Negation: if the path matches the negated pattern, exclude it
+            let pat_segs: Vec<&str> = negated.split('.').filter(|s| !s.is_empty()).collect();
+            if match_segments(&pat_segs, &path_segs) {
+                return false;
+            }
+        } else {
+            let pat_segs: Vec<&str> = pattern.split('.').filter(|s| !s.is_empty()).collect();
+            if match_segments(&pat_segs, &path_segs) {
+                matched = true;
+            }
+        }
+    }
+
+    matched
+}
+
+fn match_segments(pattern: &[&str], path: &[&str]) -> bool {
+    if pattern.is_empty() && path.is_empty() {
+        return true;
+    }
+    if pattern.is_empty() || path.is_empty() {
+        return pattern.len() == 1 && pattern[0] == "**";
+    }
+    match pattern[0] {
+        "**" => {
+            for i in 0..=path.len() {
+                if match_segments(&pattern[1..], &path[i..]) {
+                    return true;
+                }
+            }
+            false
+        }
+        "*" => match_segments(&pattern[1..], &path[1..]),
+        segment => {
+            if segment == path[0] {
+                match_segments(&pattern[1..], &path[1..])
+            } else {
+                false
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -356,6 +425,7 @@ impl PeerManager {
                 state: ConnState::Connected,
                 connected_at: Some(Instant::now()),
                 outbound: true,
+                subscriptions: vec![],
             },
         );
 
@@ -375,7 +445,7 @@ impl PeerManager {
     pub async fn push_local_changes(
         &self,
         changes: Vec<Vec<u8>>,
-        _affected_paths: Vec<String>,
+        affected_paths: Vec<String>,
     ) -> Result<()> {
         if changes.is_empty() {
             return Ok(());
@@ -389,12 +459,26 @@ impl PeerManager {
         let msg = Message::Push { heads, changes };
         let encoded = msg.encode();
 
-        // Send to all synced peers
-        // TODO: subscription-aware filtering per-peer
+        // Send to all synced peers whose subscriptions match the affected paths
         for entry in self.inner.peers.iter() {
             if !matches!(entry.state, ConnState::Synced) {
                 continue;
             }
+
+            // Check if any affected path matches this peer's subscriptions
+            let dominated = &entry.subscriptions;
+            if !dominated.is_empty()
+                && !affected_paths
+                    .iter()
+                    .any(|p| path_matches_subscriptions(p, dominated))
+            {
+                debug!(
+                    "Skipping push to {} — no paths match subscriptions",
+                    entry.key()
+                );
+                continue;
+            }
+
             let peer_id = PeerId::new(entry.key().as_str());
             if let Err(e) = self.inner.transport.send_reliable(&peer_id, &encoded).await {
                 warn!("Failed to push changes to {}: {}", entry.key(), e);
@@ -441,6 +525,16 @@ impl PeerManager {
             .filter(|e| matches!(e.state, ConnState::Synced))
             .map(|e| PeerId::new(e.key().as_str()))
             .collect()
+    }
+
+    /// Remove a peer from tracking (e.g., before a manual reconnect).
+    /// Also disconnects at the transport level if still connected.
+    pub async fn remove_peer(&self, peer_id: &PeerId) {
+        let id = peer_id.as_str().to_string();
+        self.inner.peers.remove(&id);
+        if self.inner.transport.is_connected(peer_id) {
+            let _ = self.inner.transport.disconnect(peer_id).await;
+        }
     }
 
     /// Shut down the peer manager and transport.
@@ -512,6 +606,7 @@ async fn handle_peer_connected(inner: &Arc<Inner>, peer_id: &PeerId) {
                 state: ConnState::Connected,
                 connected_at: Some(Instant::now()),
                 outbound: false,
+                subscriptions: vec![],
             },
         );
     } else {
@@ -588,10 +683,18 @@ async fn handle_reliable_message(inner: &Arc<Inner>, from: &PeerId, data: &[u8])
         // -- Sync handshake: they sent Connect, we respond with Sync --
         Message::Connect {
             client_id: _,
-            subscriptions: _,
+            subscriptions,
             heads,
         } => {
-            info!("📥 Received Connect from {}", from_id);
+            info!(
+                "📥 Received Connect from {} (subscriptions: {:?})",
+                from_id, subscriptions
+            );
+
+            // Store the peer's subscriptions so we can filter outgoing changes
+            if let Some(mut entry) = inner.peers.get_mut(&from_id) {
+                entry.subscriptions = subscriptions;
+            }
 
             // Get changes they need (delta sync based on their heads)
             let changes = {
@@ -625,10 +728,18 @@ async fn handle_reliable_message(inner: &Arc<Inner>, from: &PeerId, data: &[u8])
 
             info!("📤 Sent Sync response to {}", from_id);
 
-            // Now we send our own Connect so they can sync us back
-            // (This makes it bidirectional — both sides end up with all changes)
-            if let Err(e) = send_connect_message(inner, from).await {
-                warn!("Failed to send Connect back to {}: {}", from_id, e);
+            // Send our own Connect back so they can sync us too (bidirectional).
+            // But only if the peer isn't already synced — otherwise we'd loop
+            // (Connect → Sync+Connect → Sync+Connect → ...).
+            let already_synced = inner
+                .peers
+                .get(&from_id)
+                .map(|e| matches!(e.state, ConnState::Synced))
+                .unwrap_or(false);
+            if !already_synced {
+                if let Err(e) = send_connect_message(inner, from).await {
+                    warn!("Failed to send Connect back to {}: {}", from_id, e);
+                }
             }
         }
 
@@ -729,11 +840,47 @@ async fn handle_reliable_message(inner: &Arc<Inner>, from: &PeerId, data: &[u8])
                 if !matches!(entry.state, ConnState::Synced) {
                     continue;
                 }
+
+                // Only relay if any affected path matches this peer's subscriptions
+                let subs = &entry.subscriptions;
+                if !subs.is_empty()
+                    && !affected_paths
+                        .iter()
+                        .any(|p| path_matches_subscriptions(p, subs))
+                {
+                    debug!(
+                        "Skipping relay to {} — no paths match subscriptions",
+                        entry.key()
+                    );
+                    continue;
+                }
+
                 let peer = PeerId::new(entry.key().as_str());
                 if let Err(e) = inner.transport.send_reliable(&peer, &encoded).await {
                     debug!("Failed to relay to {}: {}", entry.key(), e);
                 }
             }
+        }
+
+        // Ephemeral messages arriving over TCP (fallback when UDP addr unknown)
+        Message::Ephemeral { path, data } => {
+            let _ = inner
+                .event_tx
+                .send(PeerEvent::EphemeralReceived {
+                    from: from.clone(),
+                    updates: vec![(path, data)],
+                })
+                .await;
+        }
+
+        Message::EphemeralBatch { updates } => {
+            let _ = inner
+                .event_tx
+                .send(PeerEvent::EphemeralReceived {
+                    from: from.clone(),
+                    updates,
+                })
+                .await;
         }
 
         Message::PushAck { .. } | Message::SubscribeAck { .. } => {
@@ -875,7 +1022,13 @@ async fn discovery_loop(inner: Arc<Inner>, discovery: impl PeerDiscovery) {
                     continue;
                 }
 
-                info!("🔗 Discovered peer: {}", addr);
+                info!(
+                    "🔗 Discovered peer: {} (tcp={:?}, udp={:?}, metadata={:?})",
+                    addr,
+                    addr.address("tcp"),
+                    addr.address("udp"),
+                    addr.metadata
+                );
 
                 inner.peers.insert(
                     peer_id.clone(),
@@ -885,6 +1038,7 @@ async fn discovery_loop(inner: Arc<Inner>, discovery: impl PeerDiscovery) {
                         state: ConnState::Connected,
                         connected_at: None,
                         outbound: true,
+                        subscriptions: vec![],
                     },
                 );
 
@@ -1167,6 +1321,93 @@ mod tests {
 
         let addr = PeerAddr::new("peer-1").with_address("tcp", "10.0.0.1:3030");
         assert!(manager.connect(&addr).await.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Subscription pattern matching tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_empty_subscriptions_match_everything() {
+        assert!(path_matches_subscriptions("settings.bpm", &[]));
+        assert!(path_matches_subscriptions("anything", &[]));
+    }
+
+    #[test]
+    fn test_exact_match() {
+        let subs = vec!["settings.bpm".to_string()];
+        assert!(path_matches_subscriptions("settings.bpm", &subs));
+        assert!(!path_matches_subscriptions("settings.palette", &subs));
+    }
+
+    #[test]
+    fn test_double_star_matches_all() {
+        let subs = vec!["**".to_string()];
+        assert!(path_matches_subscriptions("settings.bpm", &subs));
+        assert!(path_matches_subscriptions("a.b.c.d.e", &subs));
+        assert!(path_matches_subscriptions("x", &subs));
+    }
+
+    #[test]
+    fn test_single_star_wildcard() {
+        let subs = vec!["settings.*".to_string()];
+        assert!(path_matches_subscriptions("settings.bpm", &subs));
+        assert!(path_matches_subscriptions("settings.palette", &subs));
+        assert!(!path_matches_subscriptions("settings.deep.nested", &subs));
+        assert!(!path_matches_subscriptions("other.bpm", &subs));
+    }
+
+    #[test]
+    fn test_negation_pattern() {
+        let subs = vec!["**".to_string(), "!settings.output_enabled".to_string()];
+        assert!(path_matches_subscriptions("settings.bpm", &subs));
+        assert!(path_matches_subscriptions("settings.palette", &subs));
+        assert!(!path_matches_subscriptions(
+            "settings.output_enabled",
+            &subs
+        ));
+    }
+
+    #[test]
+    fn test_negation_with_wildcard() {
+        let subs = vec!["**".to_string(), "!settings.device_local.*".to_string()];
+        assert!(path_matches_subscriptions("settings.bpm", &subs));
+        assert!(!path_matches_subscriptions(
+            "settings.device_local.volume",
+            &subs
+        ));
+        assert!(!path_matches_subscriptions(
+            "settings.device_local.output",
+            &subs
+        ));
+    }
+
+    #[test]
+    fn test_negation_takes_precedence() {
+        // Even if multiple positive patterns match, negation wins
+        let subs = vec![
+            "**".to_string(),
+            "settings.*".to_string(),
+            "!settings.output_enabled".to_string(),
+        ];
+        assert!(!path_matches_subscriptions(
+            "settings.output_enabled",
+            &subs
+        ));
+    }
+
+    #[test]
+    fn test_double_star_mid_pattern() {
+        let subs = vec!["fixtures.**.color".to_string()];
+        assert!(path_matches_subscriptions("fixtures.led1.color", &subs));
+        assert!(path_matches_subscriptions(
+            "fixtures.room.led1.color",
+            &subs
+        ));
+        assert!(!path_matches_subscriptions(
+            "fixtures.led1.brightness",
+            &subs
+        ));
     }
 
     #[tokio::test]
