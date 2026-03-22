@@ -332,7 +332,14 @@ struct Inner {
     reconnect_tx: mpsc::Sender<String>,
     /// Our peer ID (from the transport's local identity).
     local_peer_id: String,
+    /// Flag: CRDT changes have been applied but not yet persisted to disk.
+    /// Checked by the persist timer task every PERSIST_DEBOUNCE interval.
+    persist_needed: AtomicBool,
 }
+
+/// How often to flush pending CRDT changes to disk (seconds).
+/// Prevents blocking the event loop with synchronous disk writes on every push.
+const PERSIST_DEBOUNCE_SECS: u64 = 1;
 
 impl PeerManager {
     /// Start the peer manager.
@@ -368,6 +375,7 @@ impl PeerManager {
             config,
             reconnect_tx,
             local_peer_id: local_peer_id.into(),
+            persist_needed: AtomicBool::new(false),
         });
 
         // Spawn transport event loop
@@ -386,6 +394,19 @@ impl PeerManager {
         {
             let inner = Arc::clone(&inner);
             tokio::spawn(async move { reconnect_processor(inner, reconnect_rx).await });
+        }
+
+        // Spawn keepalive ping timer — sends Ping to all connected peers periodically
+        // so the TCP read timeout doesn't fire on healthy idle connections.
+        {
+            let inner = Arc::clone(&inner);
+            tokio::spawn(async move { keepalive_timer(inner).await });
+        }
+
+        // Spawn debounced persist timer — flushes CRDT to disk at most once per second
+        {
+            let inner = Arc::clone(&inner);
+            tokio::spawn(async move { persist_timer(inner).await });
         }
 
         Self {
@@ -539,6 +560,13 @@ impl PeerManager {
 
     /// Shut down the peer manager and transport.
     pub async fn shutdown(&self) -> Result<()> {
+        // Persist any pending changes before shutting down
+        if self.inner.persist_needed.swap(false, Ordering::AcqRel) {
+            let db = self.inner.db.read().await;
+            if let Err(e) = db.persist().await {
+                error!("Failed to persist on shutdown: {}", e);
+            }
+        }
         self.inner.shut_down.store(true, Ordering::Relaxed);
         self.inner.transport.shutdown().await?;
         self.inner.peers.clear();
@@ -588,6 +616,90 @@ async fn transport_loop(inner: Arc<Inner>) {
 
             // Discovery events come from the discovery loop, not transport
             TransportEvent::PeerDiscovered(_) | TransportEvent::PeerLost(_) => {}
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Debounced persist timer
+// ---------------------------------------------------------------------------
+
+/// Periodically flushes CRDT changes to disk if any have accumulated.
+///
+/// CRDT changes are applied to the in-memory Automerge document immediately
+/// when received. This timer persists them to storage at most once per
+/// `PERSIST_DEBOUNCE_SECS`, preventing slow disk I/O (especially on SD cards)
+/// from blocking the event loop on every Push message.
+async fn persist_timer(inner: Arc<Inner>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(PERSIST_DEBOUNCE_SECS));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        interval.tick().await;
+
+        if inner.shut_down.load(Ordering::Relaxed) {
+            // Final persist on shutdown
+            if inner.persist_needed.swap(false, Ordering::AcqRel) {
+                let db = inner.db.read().await;
+                if let Err(e) = db.persist().await {
+                    error!("Failed to persist on shutdown: {}", e);
+                }
+            }
+            break;
+        }
+
+        if inner.persist_needed.swap(false, Ordering::AcqRel) {
+            let db = inner.db.read().await;
+            if let Err(e) = db.persist().await {
+                error!("Failed to persist (debounced): {}", e);
+                // Re-set the flag so we retry next tick
+                inner.persist_needed.store(true, Ordering::Release);
+            }
+        }
+    }
+}
+
+/// Periodically sends Ping messages to all connected peers.
+///
+/// This serves two purposes:
+/// 1. Keeps the TCP connection alive through NAT/firewall timeouts
+/// 2. Ensures the remote peer's read loop doesn't time out on idle connections
+///
+/// The interval must be shorter than the transport's TCP_READ_TIMEOUT_SECS.
+async fn keepalive_timer(inner: Arc<Inner>) {
+    // Send pings every 15 seconds — well within the 45s read timeout
+    let mut interval = tokio::time::interval(Duration::from_secs(15));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    let ping_data = Message::Ping.encode();
+
+    loop {
+        interval.tick().await;
+
+        if inner.shut_down.load(Ordering::Relaxed) {
+            break;
+        }
+
+        // Send ping to all synced peers
+        let peer_ids: Vec<String> = inner
+            .peers
+            .iter()
+            .filter(|e| matches!(e.value().state, ConnState::Synced))
+            .map(|e| e.key().clone())
+            .collect();
+
+        for pid in &peer_ids {
+            if let Err(e) = inner
+                .transport
+                .send_reliable(&PeerId::new(pid), &ping_data)
+                .await
+            {
+                debug!("Keepalive ping to {} failed: {}", pid, e);
+            }
+        }
+
+        if !peer_ids.is_empty() {
+            debug!("Keepalive ping sent to {} peers", peer_ids.len());
         }
     }
 }
@@ -802,16 +914,14 @@ async fn handle_reliable_message(inner: &Arc<Inner>, from: &PeerId, data: &[u8])
                 })
             };
 
-            // Apply to local SwirlDB and persist
+            // Apply to local SwirlDB (persist is debounced — see persist_timer)
             {
                 let db = inner.db.read().await;
                 if let Err(e) = db.apply_changes(changes.clone()) {
                     error!("Failed to apply changes from {}: {}", from_id, e);
                     return;
                 }
-                if let Err(e) = db.persist().await {
-                    error!("Failed to persist after changes from {}: {}", from_id, e);
-                }
+                inner.persist_needed.store(true, Ordering::Release);
             }
 
             // Notify app

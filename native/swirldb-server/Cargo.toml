@@ -54,6 +54,7 @@ bytes = "1.5"
 uuid = { version = "1.6", features = ["v4", "serde"] }
 async-trait = "0.1"
 dashmap = "6.0"  # Lock-free concurrent hashmap for massive scalability
+socket2 = "0.5"  # TCP keepalive configuration
 
 # mDNS discovery (optional)
 mdns-sd = { version = "0.11", optional = true }

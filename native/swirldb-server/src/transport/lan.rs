@@ -58,6 +58,13 @@ const MAX_FRAME_SIZE: u32 = 16 * 1024 * 1024;
 /// Maximum UDP packet size. Our ephemeral messages are small (~20-200 bytes).
 const MAX_UDP_PACKET: usize = 4096;
 
+/// TCP keepalive interval — how often to probe idle connections.
+const TCP_KEEPALIVE_SECS: u64 = 10;
+
+/// TCP read timeout — if no data arrives for this long, consider the peer dead.
+/// Must be significantly longer than keepalive to allow for retries.
+const TCP_READ_TIMEOUT_SECS: u64 = 45;
+
 /// Event channel capacity.
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
@@ -488,6 +495,31 @@ impl PeerTransport for LanTransport {
 // Free functions for spawned tasks (operate on Arc<Inner>)
 // ---------------------------------------------------------------------------
 
+/// Configure TCP keepalive and nodelay on a stream.
+///
+/// Keepalive probes detect dead connections that would otherwise block the
+/// read loop forever (common on WiFi when a peer disappears without FIN).
+fn configure_tcp_socket(stream: &TcpStream) {
+    // Set TCP_NODELAY for low-latency small messages
+    if let Err(e) = stream.set_nodelay(true) {
+        debug!("Failed to set TCP_NODELAY: {}", e);
+    }
+
+    // Set OS-level TCP keepalive
+    let sock = socket2::SockRef::from(stream);
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(std::time::Duration::from_secs(TCP_KEEPALIVE_SECS))
+        .with_interval(std::time::Duration::from_secs(TCP_KEEPALIVE_SECS));
+
+    // On Linux, also set the retry count
+    #[cfg(target_os = "linux")]
+    let keepalive = keepalive.with_retries(3);
+
+    if let Err(e) = sock.set_tcp_keepalive(&keepalive) {
+        debug!("Failed to set TCP keepalive: {}", e);
+    }
+}
+
 /// TCP accept loop — runs in a spawned task.
 async fn tcp_accept_loop(inner: Arc<Inner>, listener: TcpListener) {
     loop {
@@ -518,6 +550,7 @@ async fn tcp_accept_loop(inner: Arc<Inner>, listener: TcpListener) {
 
 /// Handle an inbound TCP connection: read peer's ID, send ours, register.
 async fn handle_inbound(inner: Arc<Inner>, stream: TcpStream) -> Result<()> {
+    configure_tcp_socket(&stream);
     let (mut reader, mut writer) = stream.into_split();
 
     // Read the peer's ID (first framed message)
@@ -617,6 +650,7 @@ async fn connect_outbound(inner: Arc<Inner>, peer: &PeerAddr) -> Result<()> {
     let (stream, connected_addr) = stream
         .ok_or_else(|| last_err.unwrap_or_else(|| anyhow::anyhow!("All TCP addresses failed")))?;
 
+    configure_tcp_socket(&stream);
     let (mut reader, mut writer) = stream.into_split();
 
     // Send our ID
@@ -692,15 +726,22 @@ async fn connect_outbound(inner: Arc<Inner>, peer: &PeerAddr) -> Result<()> {
     Ok(())
 }
 
-/// TCP read loop — reads framed messages until the connection drops.
+/// TCP read loop — reads framed messages until the connection drops or times out.
+///
+/// The read timeout ensures we detect dead connections even if TCP keepalive
+/// doesn't trigger (e.g., the remote host is unreachable but the local OS
+/// hasn't given up yet). For idle connections with no CRDT traffic, the
+/// PeerManager sends periodic Ping messages to keep the connection alive.
 async fn tcp_read_loop(
     inner: Arc<Inner>,
     peer_id: String,
     mut reader: tokio::net::tcp::OwnedReadHalf,
 ) {
+    let timeout_duration = std::time::Duration::from_secs(TCP_READ_TIMEOUT_SECS);
+
     loop {
-        match read_frame(&mut reader).await {
-            Ok(data) => {
+        match tokio::time::timeout(timeout_duration, read_frame(&mut reader)).await {
+            Ok(Ok(data)) => {
                 inner
                     .counters
                     .tcp_bytes_recv
@@ -713,9 +754,16 @@ async fn tcp_read_loop(
                     })
                     .await;
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 if !inner.shut_down.load(Ordering::Relaxed) {
                     debug!("TCP read from {} ended: {}", peer_id, e);
+                }
+                break;
+            }
+            Err(_) => {
+                // Read timeout — connection is likely dead
+                if !inner.shut_down.load(Ordering::Relaxed) {
+                    warn!("TCP read timeout from {} ({}s) — disconnecting", peer_id, TCP_READ_TIMEOUT_SECS);
                 }
                 break;
             }
