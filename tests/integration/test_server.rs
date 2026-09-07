@@ -14,6 +14,7 @@ use axum::{
 };
 use std::sync::Arc;
 use swirldb_core::storage::InMemoryDocStorage;
+use swirldb_server::authority::{Authority, OpenToAll};
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tracing::{error, info};
@@ -38,13 +39,25 @@ impl TestServer {
     pub async fn start_with_policy(
         policy: Option<swirldb_core::policy::PolicyEngine>,
     ) -> Result<Self> {
+        Self::start_with(policy, Arc::new(OpenToAll)).await
+    }
+
+    /// Start a test server whose documents open only as `authority` allows
+    pub async fn start_with_authority(authority: Arc<dyn Authority>) -> Result<Self> {
+        Self::start_with(None, authority).await
+    }
+
+    async fn start_with(
+        policy: Option<swirldb_core::policy::PolicyEngine>,
+        authority: Arc<dyn Authority>,
+    ) -> Result<Self> {
         // Bind to port 0 to get a random available port
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let port = addr.port();
 
         let storage = Arc::new(InMemoryDocStorage::new());
-        let state = ServerState::new(policy, storage).await;
+        let state = ServerState::with_authority(policy, storage, authority).await;
 
         let app = Router::new()
             .route("/ws", get(websocket_handler))

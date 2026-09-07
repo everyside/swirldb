@@ -25,6 +25,7 @@ mod browser_sync;
 mod cross_platform;
 mod ephemeral;
 mod multi_client_sync;
+mod multi_document;
 mod network_resilience;
 mod policy_enforcement;
 mod subscription_filtering;

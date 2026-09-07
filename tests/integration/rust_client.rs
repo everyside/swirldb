@@ -10,6 +10,7 @@
 use anyhow::Result;
 use automerge::ScalarValue;
 use swirldb_client::SyncClient;
+use swirldb_core::protocol::Access;
 use tokio::sync::broadcast;
 use tracing::warn;
 
@@ -17,20 +18,44 @@ pub struct RustClient {
     inner: SyncClient,
     change_rx: broadcast::Receiver<Vec<String>>,
     ephemeral_rx: broadcast::Receiver<Vec<(String, Vec<u8>)>>,
+    error_rx: broadcast::Receiver<String>,
 }
 
 impl RustClient {
-    /// Connect to a test server
+    /// Connect to a test server on the default document
     pub async fn connect(ws_url: &str, subscriptions: Vec<String>) -> Result<Self> {
-        let inner = SyncClient::connect(ws_url, subscriptions).await?;
+        Ok(Self::wrap(
+            SyncClient::connect(ws_url, subscriptions).await?,
+        ))
+    }
+
+    /// Connect to a test server and open the named document
+    pub async fn open(ws_url: &str, document: &str, subscriptions: Vec<String>) -> Result<Self> {
+        Ok(Self::wrap(
+            SyncClient::open(ws_url, document, subscriptions).await?,
+        ))
+    }
+
+    fn wrap(inner: SyncClient) -> Self {
         let change_rx = inner.on_change();
         let ephemeral_rx = inner.on_ephemeral();
-
-        Ok(RustClient {
+        let error_rx = inner.on_error();
+        RustClient {
             inner,
             change_rx,
             ephemeral_rx,
-        })
+            error_rx,
+        }
+    }
+
+    /// What the server granted at open
+    pub fn access(&self) -> Access {
+        self.inner.access()
+    }
+
+    /// Wait for the server to send an error, such as a refused write
+    pub async fn wait_for_error_timeout(&mut self, timeout: std::time::Duration) -> Result<String> {
+        Ok(tokio::time::timeout(timeout, self.error_rx.recv()).await??)
     }
 
     /// Set a value in the database and push to server
