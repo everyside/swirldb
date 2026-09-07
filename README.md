@@ -15,8 +15,10 @@ Cross-platform CRDT database built on Automerge. Runs in browsers via WebAssembl
 - **Cross-platform**: Browser WASM (~489KB gzipped) and native Rust server with different optimizations
 - **Pluggable storage**: In-memory, LocalStorage, IndexedDB, or redb
 - **Real-time sync**: WebSocket-based synchronization server
+- **Many documents**: a server holds any number of documents, each its own Automerge history, synced whole to whoever has it open; a browser holds several over one connection
+- **Access from an authority**: who may open a document is asked of the application that owns membership, not authored a second time in SwirlDB
 - **Observable**: Field-level change tracking via observers
-- **Policy engine**: Access control for subscriptions
+- **Policy engine**: Access control for subscriptions within a document
 
 ## Architecture
 
@@ -76,6 +78,54 @@ db.data.user.name.$observe((newValue) => {
 // Volatile storage (nothing persists)
 const db = await SwirlDB.create();
 ```
+
+## Documents, and who may open them
+
+A document is the unit of sync and the unit of access, and the two are the
+same thing on purpose. Automerge's change graph is not partitioned by path, so
+the only history a server can hand a client selectively is a whole document's;
+a "global document with per-user branches" leaks the whole history to every
+client on its first sync. So SwirlDB holds many documents, each with its own
+id, its own history, its own row in storage and its own subscribers.
+
+Every protocol message that touches a document names it. A connection opens
+its first document in `Connect` and more with `Open`; each is answered with
+`SubscribeAck` (carrying the access granted) and `Sync` (carrying only that
+document's history), or `OpenDenied`. A client that never names a document is
+on the default one, which is how the single-document demos and tests kept
+working unchanged.
+
+```javascript
+import { SwirlDBConnection } from '@swirldb/js';
+
+const connection = await SwirlDBConnection.open('wss://example/ws', 'alice');
+const pattern = await connection.openDocument('pattern.7');   // rejects if refused
+const palette = await connection.openDocument('palette.3');   // same socket
+pattern.data.source = '...';
+pattern.syncChanges();
+pattern.sendPresence('alice', { cursor: 42 });               // per document, ephemeral
+```
+
+**Who may open a document is decided by an `Authority`**, a server trait with
+one question: `may_open(subject, document) -> Read | Write | None`. Three
+implementations ship:
+
+| Authority | When |
+|---|---|
+| `OpenToAll` | The default. Every document open to every client — a laptop, a demo, the test suite |
+| `PolicyAuthority` | The policy file *is* where access is decided; rules are written over document ids |
+| `HttpAuthority` | An application owns membership. `POST <AUTHORITY_URL>/may-open` with `{"subject": <actor>, "document": "<id>"}` is answered `{"access": "read" \| "write" \| "none"}`; answers are cached ten seconds; an unreachable authority refuses |
+
+The rule this protects is that access is **derived here and authored there**.
+Two places that both know who may read a document disagree eventually, and
+when they do the disagreement is a disclosure. So SwirlDB never carries a copy
+of an application's membership; it asks, briefly remembers, and enforces: a
+reader receives the document and may send presence, but its `Push` is
+refused; a refused subject never receives the history. See
+`native/swirldb-server/src/authority.rs`.
+
+What stays single-document: server-to-server peer sync (`connect_to_peer`,
+the peer manager, the LAN transport) speaks about the default document only.
 
 ## Development
 
