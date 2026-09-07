@@ -22,4 +22,5 @@ lto = true
 codegen-units = 1
 strip = true
 
-# Note: swirldb-browser uses opt-level = "z" when built via wasm-pack
+# Note: swirldb-browser is excluded above, so this profile does not reach it; it carries
+# its own size-first [profile.release] in native/swirldb-browser/Cargo.toml

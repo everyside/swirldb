@@ -63,3 +63,14 @@ wasm-bindgen-test = "0.3"
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-Oz", "--enable-bulk-memory", "--enable-nontrapping-float-to-int"]
+
+# This crate is outside the workspace, so the workspace profile does not reach it and
+# wasm-pack runs a plain `cargo build --release`: without this block it shipped at
+# opt-level 3 with no LTO. The module loads only when a collaborative document opens,
+# so it is optimized for download size, not throughput.
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
