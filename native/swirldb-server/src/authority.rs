@@ -220,6 +220,10 @@ impl From<AccessAnswer> for Option<Access> {
 /// documents, because failing open here is a disclosure.
 pub struct HttpAuthority {
     endpoint: String,
+    /// The endpoint as it appears in the log: user-info removed, so a secret
+    /// carried the older way is never printed. The bearer is not in a URL
+    /// and is never printed either.
+    shown: String,
     /// The shared secret sent as a bearer on every request, if there is one.
     secret: Option<String>,
     client: reqwest::Client,
@@ -241,6 +245,7 @@ impl HttpAuthority {
     pub fn with_time_to_live(endpoint: impl Into<String>, time_to_live: Duration) -> Self {
         let endpoint = endpoint.into().trim_end_matches('/').to_string();
         Self {
+            shown: without_user_info(&endpoint),
             endpoint,
             secret: None,
             client: reqwest::Client::builder()
@@ -296,12 +301,13 @@ impl HttpAuthority {
 
     async fn ask_who(&self, token: &str) -> Option<Actor> {
         let url = format!("{}/whoami", self.endpoint);
+        let shown = format!("{}/whoami", self.shown);
         let response = match self.post(&url).json(&WhoAmIRequest { token }).send().await {
             Ok(response) => response,
             Err(error) => {
                 warn!(
                     "Authority at {} unreachable, refusing connection: {}",
-                    url, error
+                    shown, error
                 );
                 return None;
             }
@@ -309,7 +315,7 @@ impl HttpAuthority {
         if !response.status().is_success() {
             warn!(
                 "Authority at {} answered {}, refusing connection",
-                url,
+                shown,
                 response.status()
             );
             return None;
@@ -319,7 +325,7 @@ impl HttpAuthority {
             Err(error) => {
                 warn!(
                     "Authority at {} answered badly, refusing connection: {}",
-                    url, error
+                    shown, error
                 );
                 None
             }
@@ -347,6 +353,7 @@ impl HttpAuthority {
 
     async fn ask(&self, subject: &Actor, document: &str) -> Option<Access> {
         let url = format!("{}/may-open", self.endpoint);
+        let shown = format!("{}/may-open", self.shown);
         let response = match self
             .post(&url)
             .json(&MayOpenRequest { subject, document })
@@ -355,14 +362,17 @@ impl HttpAuthority {
         {
             Ok(response) => response,
             Err(error) => {
-                warn!("Authority at {} unreachable, refusing open: {}", url, error);
+                warn!(
+                    "Authority at {} unreachable, refusing open: {}",
+                    shown, error
+                );
                 return None;
             }
         };
         if !response.status().is_success() {
             warn!(
                 "Authority at {} answered {}, refusing open of {}",
-                url,
+                shown,
                 response.status(),
                 document
             );
@@ -373,7 +383,7 @@ impl HttpAuthority {
             Err(error) => {
                 warn!(
                     "Authority at {} answered badly, refusing open: {}",
-                    url, error
+                    shown, error
                 );
                 None
             }
@@ -470,6 +480,18 @@ mod tests {
             "studio-server:8080/authority"
         );
         assert_eq!(without_user_info(""), "");
+    }
+
+    #[test]
+    fn the_endpoint_is_shown_without_its_user_info() {
+        let authority = HttpAuthority::new("http://swirldb:s3cret@127.0.0.1:9/authority/");
+        // Asked with the secret, shown without it.
+        assert_eq!(
+            authority.endpoint,
+            "http://swirldb:s3cret@127.0.0.1:9/authority"
+        );
+        assert_eq!(authority.shown, "http://127.0.0.1:9/authority");
+        assert!(!authority.shown.contains("s3cret"));
     }
 
     #[test]

@@ -28,7 +28,7 @@ use std::{env, fs, io::BufReader, time::Duration};
 use swirldb_core::policy::{Remote, Transport};
 use swirldb_core::protocol::{Message, DEFAULT_DOCUMENT};
 use swirldb_core::storage::{DocumentStorage, InMemoryDocStorage};
-use swirldb_server::authority::{Authority, HttpAuthority, OpenToAll};
+use swirldb_server::authority::{without_user_info, Authority, HttpAuthority, OpenToAll};
 use swirldb_server::storage::RedbAdapter;
 use swirldb_server::ServerState;
 use tokio::time::interval;
@@ -94,20 +94,34 @@ async fn main() -> Result<()> {
     // for anything else.
     let authority: Arc<dyn Authority> = match env::var("AUTHORITY_URL") {
         Ok(url) if !url.is_empty() => {
+            // The URL may carry a secret as user-info; the log never does.
+            let shown = without_user_info(&url);
             info!(
                 "Connections are who {}/whoami says; documents open as {}/may-open allows",
-                url, url
+                shown, shown
             );
+            let carries_user_info = shown != url;
             let authority = HttpAuthority::new(url);
             // The credential the authority checks before answering. Without
             // it the only thing the request can carry is user-info from the
             // URL, sent as Basic, which is the older way and on its way out.
             let authority = match env::var("AUTHORITY_SECRET") {
                 Ok(secret) if !secret.is_empty() => {
-                    info!("The authority is asked with AUTHORITY_SECRET as a bearer");
+                    if carries_user_info {
+                        info!("AUTHORITY_URL carries user-info; AUTHORITY_SECRET is sent instead, as a bearer");
+                    } else {
+                        info!("The authority is asked with AUTHORITY_SECRET as a bearer");
+                    }
                     authority.with_secret(secret)
                 }
-                _ => authority,
+                _ if carries_user_info => {
+                    warn!("AUTHORITY_URL carries its secret as user-info, sent as Basic; set AUTHORITY_SECRET instead, the user-info form is going away");
+                    authority
+                }
+                _ => {
+                    warn!("No AUTHORITY_SECRET: the authority is asked with no credential of the server's own");
+                    authority
+                }
             };
             Arc::new(authority)
         }

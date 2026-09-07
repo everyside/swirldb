@@ -62,7 +62,8 @@ decision is about; a connection without a token the authority knows is answered
 The authority's two endpoints answer questions about other people's access, so
 the server proves itself on every request with `AUTHORITY_SECRET` as a bearer;
 an authority that is down, or that refuses the secret, refuses every
-connection and every open rather than admitting them.
+connection and every open rather than admitting them. The log names the
+authority's URL with any user-info removed and never prints the secret.
 
 Binary protocol for real-time sync. Message types:
 
