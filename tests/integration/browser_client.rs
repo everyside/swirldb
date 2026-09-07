@@ -120,7 +120,7 @@ impl BrowserTestClient {
         client
             .send_command(IpcCommand::OpenDocuments {
                 ws_url: ws_url.to_string(),
-                documents,
+                documents: documents.clone(),
             })
             .await?;
 
@@ -134,7 +134,13 @@ impl BrowserTestClient {
             .await?
         {
             IpcResponse::Error { error } => anyhow::bail!("{}", error),
-            _ => Ok(client),
+            IpcResponse::DocumentsOpened { documents: opened } => {
+                if opened != documents {
+                    anyhow::bail!("Asked to open {:?}, browser opened {:?}", documents, opened);
+                }
+                Ok(client)
+            }
+            _ => unreachable!("the predicate admits only those two"),
         }
     }
 
