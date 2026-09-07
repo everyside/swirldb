@@ -343,9 +343,9 @@ fn dispatch(connection_id: usize, msg: Message) {
                         fire_all_observers(handle_id, &core);
                         fire_text_observers(handle_id, &applied.text_changes);
                     }
-                    Err(e) => web_sys::console::error_1(
-                        &format!("Failed to apply changes: {}", e).into(),
-                    ),
+                    Err(e) => {
+                        web_sys::console::error_1(&format!("Failed to apply changes: {}", e).into())
+                    }
                 }
             }
             if let Some((resolve, _reject, handle)) = waiting {
@@ -487,11 +487,7 @@ fn url_with_token(url: &str, token: Option<&str>) -> String {
 
 /// Open a WebSocket and register the connection. Nothing is sent until a
 /// document is opened on it; a connection exists to carry documents.
-fn create_connection(
-    url: &str,
-    client_id: String,
-    token: Option<&str>,
-) -> Result<usize, JsValue> {
+fn create_connection(url: &str, client_id: String, token: Option<&str>) -> Result<usize, JsValue> {
     let ws = WebSocket::new(&url_with_token(url, token))
         .map_err(|e| JsValue::from_str(&format!("Failed to create WebSocket: {:?}", e)))?;
     ws.set_binary_type(BinaryType::Arraybuffer);
@@ -991,6 +987,81 @@ impl SwirlDB {
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         // Check observers after mutation
+        self.check_observers();
+        Ok(())
+    }
+
+    /// Insert a value into the list at a path so that it sits at `index`;
+    /// `index` equal to the length appends. The list is created when the
+    /// path holds nothing, and `value` may be any JavaScript value — an
+    /// object becomes a map inside the list. Two people inserting at once
+    /// both keep their items, where two `setValue` calls with whole arrays
+    /// would each replace the other's. Call `syncChanges` to push it.
+    ///
+    /// Example:
+    /// ```javascript
+    /// db.insertListItem('stops', 1, { color: '#00ff00' });
+    /// db.syncChanges();
+    /// ```
+    #[wasm_bindgen(js_name = insertListItem)]
+    pub fn insert_list_item(
+        &mut self,
+        path: String,
+        index: usize,
+        value: JsValue,
+    ) -> Result<(), JsValue> {
+        let value: serde_json::Value = from_value(value)
+            .map_err(|e| JsValue::from_str(&format!("Failed to convert value: {}", e)))?;
+        self.core
+            .insert_list_item(&path, index, value)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        self.check_observers();
+        Ok(())
+    }
+
+    /// Edit the list at a path in place: remove `deleteCount` items at
+    /// `index`, then insert `values` there. A reorder is a removal and an
+    /// insertion. Throws when the range is outside the list; a splice that
+    /// only inserts may be the first write to a path.
+    ///
+    /// Example:
+    /// ```javascript
+    /// db.spliceList('stops', 2, 1, []);                 // remove one
+    /// db.spliceList('stops', 0, 0, [{ color: '#000' }]); // insert at the front
+    /// db.syncChanges();
+    /// ```
+    #[wasm_bindgen(js_name = spliceList)]
+    pub fn splice_list(
+        &mut self,
+        path: String,
+        index: usize,
+        delete_count: usize,
+        values: JsValue,
+    ) -> Result<(), JsValue> {
+        let values: Vec<serde_json::Value> = from_value(values)
+            .map_err(|e| JsValue::from_str(&format!("Failed to convert values: {}", e)))?;
+        self.core
+            .splice_list(&path, index, delete_count, values)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        self.check_observers();
+        Ok(())
+    }
+
+    /// Remove whatever is at a path — a key from its map, an item from its
+    /// list by index — and everything under it. A path that holds nothing is
+    /// left alone. An observer on the path is handed `null`.
+    ///
+    /// Example:
+    /// ```javascript
+    /// db.deletePath('stops.2');
+    /// db.deletePath('user.email');
+    /// db.syncChanges();
+    /// ```
+    #[wasm_bindgen(js_name = deletePath)]
+    pub fn delete_path(&mut self, path: String) -> Result<(), JsValue> {
+        self.core
+            .delete_path(&path)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
         self.check_observers();
         Ok(())
     }
@@ -1845,12 +1916,82 @@ mod tests {
         let mut db = SwirlDB::new();
         db.set_text("source".into(), "😀 cat".into()).unwrap();
         assert_eq!(db.text_length("source".into()), Some(6));
-        db.splice_text("source".into(), 3, 0, "black ".into()).unwrap();
+        db.splice_text("source".into(), 3, 0, "black ".into())
+            .unwrap();
         assert_eq!(
             db.get_path("source".into()).as_string().as_deref(),
             Some("😀 black cat")
         );
         assert!(db.splice_text("missing".into(), 0, 0, "x".into()).is_err());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_a_list_is_edited_in_place_and_reads_as_an_array() {
+        let mut db = SwirlDB::new();
+        let stop =
+            |color: &str| js_sys::JSON::parse(&format!(r##"{{"color":"{}"}}"##, color)).unwrap();
+        db.insert_list_item("stops".into(), 0, stop("#ff0000"))
+            .unwrap();
+        db.insert_list_item("stops".into(), 1, stop("#0000ff"))
+            .unwrap();
+        db.splice_list(
+            "stops".into(),
+            1,
+            0,
+            js_sys::JSON::parse(r##"[{"color":"#00ff00"}]"##).unwrap(),
+        )
+        .unwrap();
+        let rendered: String = js_sys::JSON::stringify(&db.get_value("stops".into()))
+            .unwrap()
+            .into();
+        assert_eq!(
+            rendered,
+            r##"[{"color":"#ff0000"},{"color":"#00ff00"},{"color":"#0000ff"}]"##
+        );
+
+        db.delete_path("stops.0".into()).unwrap();
+        db.splice_list("stops".into(), 1, 1, JsValue::from(js_sys::Array::new()))
+            .unwrap();
+        let rendered: String = js_sys::JSON::stringify(&db.get_value("stops".into()))
+            .unwrap()
+            .into();
+        assert_eq!(rendered, r##"[{"color":"#00ff00"}]"##);
+
+        // Outside the list, and not a list, are errors.
+        assert!(db
+            .insert_list_item("stops".into(), 5, stop("#fff"))
+            .is_err());
+        db.set_path("name".into(), JsValue::from_str("Alice"))
+            .unwrap();
+        assert!(db.insert_list_item("name".into(), 0, stop("#fff")).is_err());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_delete_path_hands_the_observer_null() {
+        let mut db = SwirlDB::new();
+        db.set_path("user.name".into(), JsValue::from_str("Alice"))
+            .unwrap();
+        let seen = js_sys::Array::new();
+        let sink = seen.clone();
+        let callback = Closure::wrap(Box::new(move |value: JsValue| {
+            sink.push(&value);
+        }) as Box<dyn FnMut(JsValue)>);
+        db.observe(
+            "user.name".into(),
+            callback.as_ref().unchecked_ref::<Function>().clone(),
+        )
+        .unwrap();
+
+        db.delete_path("user.name".into()).unwrap();
+        assert!(db.get_path("user.name".into()).is_null());
+        assert_eq!(seen.length(), 1);
+        assert!(seen.get(0).is_null());
+
+        // Nothing there: nothing removed, nobody told, no error.
+        db.delete_path("user.name".into()).unwrap();
+        db.delete_path("nowhere".into()).unwrap();
+        assert_eq!(seen.length(), 1);
+        drop(callback);
     }
 
     #[wasm_bindgen_test]

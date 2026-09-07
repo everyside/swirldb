@@ -68,6 +68,12 @@ impl RustClient {
         self.inner.get_path(path).await
     }
 
+    /// Get a value from the local database as JSON: a list as an array, a map
+    /// as an object
+    pub async fn get_value(&self, path: &str) -> Option<serde_json::Value> {
+        self.inner.db().await.get_value(path)
+    }
+
     /// Wait for a broadcast message from another client.
     ///
     /// The SyncClient background task applies changes automatically,

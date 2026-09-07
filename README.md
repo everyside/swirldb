@@ -193,6 +193,54 @@ a text, and `spliceText` is for changing it. A text observer sees such a
 replacement honestly, as a deletion of all of the old followed by an
 insertion of all of the new.
 
+## Lists, and a delete
+
+An array assigned with `setValue` is one value, replaced whole by the next
+assignment; two people each adding a stop to the same palette that way keep
+one stop between them. A **list** is edited in place. `insertListItem` puts
+one item at an index and `spliceList` removes a run and inserts another, and
+both merge: two people inserting at the same index at the same moment both
+keep their items, in an order every copy agrees on. An item may be anything —
+a color, a record, another list — and a record becomes a map whose keys
+merge in turn, so two people changing two fields of one stop both land. The
+list reads back as an array, and an item as `<path>.<index>`.
+
+```javascript
+const palette = await connection.openDocument('palette.3');
+palette.insertListItem('stops', 0, { color: '#ff0000' });   // creates the list
+palette.insertListItem('stops', 1, { color: '#0000ff' });
+palette.spliceList('stops', 1, 0, [{ color: '#00ff00' }]);  // insert between
+palette.spliceList('stops', 2, 1, []);                       // remove one
+palette.setPath('stops.0.color', '#ff8800');                 // one key of one item
+palette.deletePath('stops.1');                               // and it is gone
+palette.syncChanges();
+palette.getValue('stops');                                   // [{ color: '#ff8800' }]
+```
+
+**A reorder is a removal and an insertion**, never a replacement of the
+list, which is what keeps it safe: an item somebody else inserts beside the
+moving one at the same moment stays where they put it. A splice removes the
+items that are there now; what arrives concurrently is not among them.
+
+`deletePath` removes a key from its map or an item from its list, with
+everything under it, and is the same call as `db.data.<path>.$delete()`.
+It is a delete on the wire too — the other side's observer on the path is
+handed `null` (`None` in Rust), and an observer above it fires because
+something under it changed — so a removed stop needs no tombstone for
+readers to skip. Deleting a path that holds nothing does nothing, sends
+nothing, and is not an error. A delete that meets a concurrent write
+resolves as Automerge resolves it: a value put in the deleted one's place
+survives, because the delete removed only what it had seen; an edit inside
+a deleted map or list item goes with it. Both copies agree either way.
+
+The Rust client has the same three, `insert_list_item`, `splice_list` and
+`delete_path`, each pushing only the edit it made; the core has them
+underneath, and its `set_path`, `set_text` and `set_value` accept an index
+as the last segment of a path, so `stops.0.color` and `stops.0` are
+writable like any other path. Changed paths name a list item by index with
+a dot — `stops.2`, the same notation `getPath` takes and a subscription
+`stops.**` covers.
+
 ## Development
 
 ### Building from Source

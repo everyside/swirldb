@@ -2125,6 +2125,7 @@ dependencies = [
  "anyhow",
  "automerge",
  "futures",
+ "serde_json",
  "swirldb-core",
  "tokio",
  "tokio-tungstenite 0.21.0",

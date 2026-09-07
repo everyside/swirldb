@@ -140,7 +140,7 @@ mod tests {
 
         // Build path for items[1]
         let path = extractor.build_path(&items, &Prop::Seq(1)).unwrap();
-        assert_eq!(path, "items[1]");
+        assert_eq!(path, "items.1");
     }
 
     #[test]
@@ -160,7 +160,7 @@ mod tests {
         let path = extractor
             .build_path(&item, &Prop::Map("value".to_string()))
             .unwrap();
-        assert_eq!(path, "data.items[0].value");
+        assert_eq!(path, "data.items.0.value");
     }
 
     #[test]

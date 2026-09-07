@@ -93,8 +93,10 @@ class SwirlDBProxy implements ProxyHandler<object> {
 
     if (prop === '$delete') {
       return () => {
-        // Delete by setting to null (Automerge doesn't have true delete)
-        this.db.setValue(this.path.join('.'), null);
+        this.db.deletePath(this.path.join('.'));
+        if (this.swirlDB) {
+          this.swirlDB.triggerAutoPersist();
+        }
       };
     }
 
@@ -389,6 +391,57 @@ export class SwirlDB {
    */
   observeText(path: string, callback: (change: TextChange) => void): void {
     this.wasmDB.observeText(path, callback);
+  }
+
+  /**
+   * Insert a value into the list at a path so that it sits at `index`;
+   * `index` equal to the length appends. The list is created when the path
+   * holds nothing, and `value` may be anything — an object becomes a map
+   * inside the list. Two people inserting at once both keep their items,
+   * where two assignments of whole arrays would each replace the other's.
+   * The list reads back as an array through `getValue` and
+   * `db.data.<path>.$value`, and an item as `<path>.<index>`. Call
+   * `syncChanges` to push it.
+   *
+   * @example
+   * db.insertListItem('stops', 1, { color: '#00ff00' });
+   * db.syncChanges();
+   */
+  insertListItem(path: string, index: number, value: any): void {
+    this.wasmDB.insertListItem(path, index, value);
+    this.triggerAutoPersist();
+  }
+
+  /**
+   * Edit the list at a path in place: remove `deleteCount` items at `index`,
+   * then insert `values` there. A reorder is a removal and an insertion; a
+   * splice never replaces the list, so an item somebody else inserts beside
+   * it at the same moment stays. Throws when the range is outside the list.
+   *
+   * @example
+   * db.spliceList('stops', 2, 1, []);                  // remove one
+   * db.spliceList('stops', 0, 0, [{ color: '#000' }]);  // insert at the front
+   * db.syncChanges();
+   */
+  spliceList(path: string, index: number, deleteCount: number, values: any[]): void {
+    this.wasmDB.spliceList(path, index, deleteCount, values);
+    this.triggerAutoPersist();
+  }
+
+  /**
+   * Remove whatever is at a path — a key from its map, an item from its list
+   * by index — and everything under it. A path that holds nothing is left
+   * alone. An observer on the path is handed `null`; an observer above it
+   * fires because something under it changed. `db.data.<path>.$delete()` is
+   * the same call.
+   *
+   * @example
+   * db.deletePath('stops.2');
+   * db.syncChanges();
+   */
+  deletePath(path: string): void {
+    this.wasmDB.deletePath(path);
+    this.triggerAutoPersist();
   }
 
   /**

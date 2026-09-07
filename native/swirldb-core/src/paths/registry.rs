@@ -201,11 +201,11 @@ mod tests {
 
         // Check obj1
         let obj1_path = registry.get_path(&obj1).unwrap();
-        assert_eq!(obj1_path.to_string(), "items[0]");
+        assert_eq!(obj1_path.to_string(), "items.0");
 
         // Check obj2
         let obj2_path = registry.get_path(&obj2).unwrap();
-        assert_eq!(obj2_path.to_string(), "items[1]");
+        assert_eq!(obj2_path.to_string(), "items.1");
 
         // Check array index lookups
         assert_eq!(registry.get_array_index(&obj1), Some(0));
@@ -224,7 +224,7 @@ mod tests {
         let registry = PathRegistry::from_document(&doc).unwrap();
 
         let profile_path = registry.get_path(&profile).unwrap();
-        assert_eq!(profile_path.to_string(), "users[0].profile");
+        assert_eq!(profile_path.to_string(), "users.0.profile");
     }
 
     #[test]

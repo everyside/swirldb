@@ -24,6 +24,7 @@ pub mod test_server;
 mod browser_sync;
 mod cross_platform;
 mod ephemeral;
+mod list;
 mod multi_client_sync;
 mod multi_document;
 mod network_resilience;

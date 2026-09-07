@@ -277,8 +277,8 @@ impl SwirlDB {
 
         let mut doc = self.doc.lock().unwrap();
         if let Some(resolved) = resolve_path(&mut doc, &segments, true) {
-            let key = segments.last().unwrap();
-            doc.put(&resolved.parent, key.as_str(), value)
+            let prop = prop_in(&doc, &resolved.parent, segments.last().unwrap(), path)?;
+            doc.put(&resolved.parent, prop, value)
                 .map_err(|e| anyhow!("Failed to set value: {:?}", e))?;
             drop(doc); // Release lock before updating registry
 
@@ -369,17 +369,17 @@ impl SwirlDB {
         let Some(resolved) = resolve_path(&mut doc, &segments, true) else {
             return Err(anyhow!("Failed to resolve path: {}", path));
         };
-        let key = segments.last().unwrap();
+        let prop = prop_in(&doc, &resolved.parent, segments.last().unwrap(), path)?;
 
         // If a text was here before, its length is what a text observer must
         // be told was removed. Read it before the replacement makes it gone.
-        let replaced_length = match doc.get(&resolved.parent, key.as_str()) {
+        let replaced_length = match doc.get(&resolved.parent, prop.clone()) {
             Ok(Some((AutoValue::Object(ObjType::Text), previous))) => doc.length(&previous),
             _ => 0,
         };
 
         let text_id = doc
-            .put_object(&resolved.parent, key.as_str(), ObjType::Text)
+            .put_object(&resolved.parent, prop, ObjType::Text)
             .map_err(|e| anyhow!("Failed to create text: {:?}", e))?;
         if !text.is_empty() {
             doc.splice_text(&text_id, 0, 0, text)
@@ -467,6 +467,167 @@ impl SwirlDB {
         Ok(())
     }
 
+    /// Insert a value into the list at a path, so that it sits at `index` and
+    /// what was there and after it moves along by one. `index` may equal the
+    /// list's length, which appends. When the path holds nothing yet a list
+    /// is created there; when it holds something that is not a list this
+    /// fails.
+    ///
+    /// A list is the one collection two people can add to at once: two
+    /// inserts at the same index from two clients both land, in an order
+    /// every copy agrees on, where two `set_value` calls with whole arrays
+    /// would each replace the other's. `value` may be anything JSON — a
+    /// scalar, an array, an object — and an object becomes a map whose keys
+    /// merge in turn. The list reads back as a JSON array through
+    /// [`Self::get_value`], and an item as `path.<index>`.
+    pub fn insert_list_item(&self, path: &str, index: usize, value: JsonValue) -> Result<()> {
+        self.check_policy(Action::Write, path)?;
+
+        let segments = split_path(path);
+        if segments.is_empty() {
+            return Err(anyhow!("Empty path"));
+        }
+
+        let mut doc = self.doc.lock().unwrap();
+        let (list_id, created) = list_at_or_create(&mut doc, &segments, path)?;
+        let length = doc.length(&list_id);
+        if index > length {
+            return Err(anyhow!(
+                "Insert at {} is outside a list of length {}",
+                index,
+                length
+            ));
+        }
+        self.insert_value_at_index(&mut doc, &list_id, index, &value)?;
+        drop(doc);
+
+        self.register_created(&created);
+        self.check_observers_with_paths(vec![format!("{}.{}", path, index)]);
+        Ok(())
+    }
+
+    /// Edit the list at a path in place: remove `delete_count` items at
+    /// `index`, then insert `values` there, in order. A deletion has no
+    /// values, an insertion a `delete_count` of zero. Fails when the range
+    /// is outside the list. When the path holds nothing yet a list is
+    /// created there, so a splice that only inserts can be the first write.
+    ///
+    /// A splice removes the items that are there now and keeps whatever
+    /// someone else inserts beside them at the same moment; it does not
+    /// replace the list, which is what makes it safe to use for a reorder —
+    /// remove the item from where it was, insert it where it goes.
+    pub fn splice_list(
+        &self,
+        path: &str,
+        index: usize,
+        delete_count: usize,
+        values: Vec<JsonValue>,
+    ) -> Result<()> {
+        self.check_policy(Action::Write, path)?;
+
+        let segments = split_path(path);
+        if segments.is_empty() {
+            return Err(anyhow!("Empty path"));
+        }
+
+        let mut doc = self.doc.lock().unwrap();
+        let (list_id, created) = list_at_or_create(&mut doc, &segments, path)?;
+        let length = doc.length(&list_id);
+        if index > length || index + delete_count > length {
+            return Err(anyhow!(
+                "Splice at {} deleting {} is outside a list of length {}",
+                index,
+                delete_count,
+                length
+            ));
+        }
+        if delete_count > 0 {
+            doc.splice(&list_id, index, delete_count as isize, [])
+                .map_err(|e| anyhow!("Failed to splice list: {:?}", e))?;
+        }
+        for (offset, value) in values.iter().enumerate() {
+            self.insert_value_at_index(&mut doc, &list_id, index + offset, value)?;
+        }
+        drop(doc);
+
+        self.register_created(&created);
+        // The positions the splice touched: those removed and those put in,
+        // which is what a remote copy would be told for the same edit.
+        let touched = delete_count.max(values.len());
+        let changed = if touched == 0 {
+            vec![path.to_string()]
+        } else {
+            (index..index + touched)
+                .map(|position| format!("{}.{}", path, position))
+                .collect()
+        };
+        self.check_observers_with_paths(changed);
+        Ok(())
+    }
+
+    /// Remove whatever is at a path: a key from its map, or an item from its
+    /// list by index, together with everything under it. A path that holds
+    /// nothing is left alone and this returns `Ok`, since there is nothing
+    /// to remove and no error in that.
+    ///
+    /// An observer on the path is told the value is gone — `None` — and an
+    /// observer above it fires because something under it changed. A delete
+    /// that meets a concurrent write to the same key resolves as Automerge
+    /// resolves it: the write survives, because the delete removed only
+    /// what it had seen.
+    pub fn delete_path(&self, path: &str) -> Result<()> {
+        self.check_policy(Action::Write, path)?;
+
+        let segments = split_path(path);
+        if segments.is_empty() || (segments.len() == 1 && segments[0].is_empty()) {
+            return Err(anyhow!("Empty path"));
+        }
+
+        let mut doc = self.doc.lock().unwrap();
+        let Some(parent) = resolve_path_read(&doc, &segments) else {
+            return Ok(());
+        };
+        let key = segments.last().unwrap();
+        let in_list = doc
+            .object_type(&parent)
+            .map_err(|e| anyhow!("Failed to read parent of {}: {:?}", path, e))?
+            == ObjType::List;
+        if in_list {
+            let Ok(index) = key.parse::<usize>() else {
+                return Err(anyhow!("{} names a list item without an index", path));
+            };
+            if index >= doc.length(&parent) {
+                return Ok(());
+            }
+            doc.delete(&parent, index)
+                .map_err(|e| anyhow!("Failed to delete {}: {:?}", path, e))?;
+        } else {
+            if doc.get(&parent, key.as_str()).ok().flatten().is_none() {
+                return Ok(());
+            }
+            doc.delete(&parent, key.as_str())
+                .map_err(|e| anyhow!("Failed to delete {}: {:?}", path, e))?;
+        }
+        drop(doc);
+
+        self.check_observers_with_paths(vec![path.to_string()]);
+        Ok(())
+    }
+
+    /// Record the objects a write created on its way to a path.
+    fn register_created(&self, created: &[(ObjId, String)]) {
+        if created.is_empty() {
+            return;
+        }
+        let mut registry = self.path_registry.write().unwrap();
+        for (obj_id, obj_path) in created {
+            registry.register(
+                obj_id.clone(),
+                crate::paths::PathBuf::from_dot_path(obj_path),
+            );
+        }
+    }
+
     /// Set a value at the given dot-separated path (supports scalars, arrays, objects)
     ///
     /// This method accepts any JSON value and recursively converts it to native Automerge types:
@@ -486,8 +647,8 @@ impl SwirlDB {
 
         let mut doc = self.doc.lock().unwrap();
         if let Some(resolved) = resolve_path(&mut doc, &segments, true) {
-            let key = segments.last().unwrap();
-            self.insert_value(&mut doc, &resolved.parent, key, &value)?;
+            let prop = prop_in(&doc, &resolved.parent, segments.last().unwrap(), path)?;
+            self.insert_value(&mut doc, &resolved.parent, prop, &value)?;
             drop(doc);
 
             // Register any newly created intermediate objects
@@ -575,7 +736,7 @@ impl SwirlDB {
         &self,
         doc: &mut AutoCommit,
         parent: &ObjId,
-        key: &str,
+        key: Prop,
         value: &JsonValue,
     ) -> Result<()> {
         // Array Optimization: Smart diffing for existing optimized arrays
@@ -596,7 +757,7 @@ impl SwirlDB {
                 if let Ok(Some((
                     automerge::Value::Object(automerge::ObjType::Map),
                     existing_obj_id,
-                ))) = doc.get(parent, key)
+                ))) = doc.get(parent, key.clone())
                 {
                     // Existing optimized array found - perform smart diff!
                     // Only sync changed/added/removed items instead of the entire array
@@ -687,7 +848,7 @@ impl SwirlDB {
                             self.insert_value(
                                 doc,
                                 &map_id,
-                                &item_key,
+                                Prop::Map(item_key),
                                 &JsonValue::Object(item_with_key),
                             )?;
                         }
@@ -707,7 +868,7 @@ impl SwirlDB {
                     .put_object(parent, key, ObjType::Map)
                     .map_err(|e| anyhow!("Failed to create map: {:?}", e))?;
                 for (k, v) in obj.iter() {
-                    self.insert_value(doc, &map_id, k, v)?;
+                    self.insert_value(doc, &map_id, Prop::Map(k.clone()), v)?;
                 }
             }
         }
@@ -760,7 +921,7 @@ impl SwirlDB {
                     .insert_object(list_id, index, ObjType::Map)
                     .map_err(|e| anyhow!("Failed to insert map: {:?}", e))?;
                 for (k, v) in obj.iter() {
-                    self.insert_value(doc, &nested_map, k, v)?;
+                    self.insert_value(doc, &nested_map, Prop::Map(k.clone()), v)?;
                 }
             }
         }
@@ -857,7 +1018,7 @@ impl SwirlDB {
                     self.insert_value(
                         doc,
                         map_obj_id,
-                        item_key,
+                        Prop::Map(item_key.clone()),
                         &JsonValue::Object(item_with_key),
                     )?;
                 }
@@ -1424,6 +1585,67 @@ fn text_object_at<D: ReadDoc>(doc: &D, path: &str) -> Option<ObjId> {
     match found {
         Some((AutoValue::Object(ObjType::Text), id)) => Some(id),
         _ => None,
+    }
+}
+
+/// The property a path's last segment names inside its parent: a key in a
+/// map, or an index in a list, where the segment must be a number.
+fn prop_in(doc: &AutoCommit, parent: &ObjId, segment: &str, path: &str) -> Result<Prop> {
+    let parent_is_list = doc
+        .object_type(parent)
+        .map_err(|e| anyhow!("Failed to read parent of {}: {:?}", path, e))?
+        == ObjType::List;
+    if parent_is_list {
+        segment
+            .parse::<usize>()
+            .map(Prop::Seq)
+            .map_err(|_| anyhow!("{} names a list item without an index", path))
+    } else {
+        Ok(Prop::Map(segment.to_string()))
+    }
+}
+
+/// The list at a path, created if the path holds nothing. Fails when the
+/// path holds something else, or when the path would put a list at an index
+/// of a list that does not have one there yet — an item is inserted, not put.
+/// Returns the list with the objects created on the way to it.
+#[allow(clippy::type_complexity)]
+fn list_at_or_create(
+    doc: &mut AutoCommit,
+    segments: &[String],
+    path: &str,
+) -> Result<(ObjId, Vec<(ObjId, String)>)> {
+    let Some(resolved) = resolve_path(doc, segments, true) else {
+        return Err(anyhow!("Failed to resolve path: {}", path));
+    };
+    let key = segments.last().unwrap();
+    let parent_is_list = doc
+        .object_type(&resolved.parent)
+        .map_err(|e| anyhow!("Failed to read parent of {}: {:?}", path, e))?
+        == ObjType::List;
+    let existing = if parent_is_list {
+        match key.parse::<usize>() {
+            Ok(index) => doc.get(&resolved.parent, index).ok().flatten(),
+            Err(_) => return Err(anyhow!("{} names a list item without an index", path)),
+        }
+    } else {
+        doc.get(&resolved.parent, key.as_str()).ok().flatten()
+    };
+    match existing {
+        Some((AutoValue::Object(ObjType::List), id)) => Ok((id, resolved.created)),
+        Some(_) => Err(anyhow!("{} is not a list", path)),
+        None if parent_is_list => Err(anyhow!(
+            "{} is an index of a list with nothing there; insert a list there first",
+            path
+        )),
+        None => {
+            let id = doc
+                .put_object(&resolved.parent, key.as_str(), ObjType::List)
+                .map_err(|e| anyhow!("Failed to create list: {:?}", e))?;
+            let mut created = resolved.created;
+            created.push((id.clone(), path.to_string()));
+            Ok((id, created))
+        }
     }
 }
 
@@ -2047,6 +2269,221 @@ mod tests {
         };
         assert_eq!(applied.text_changes[0].splices, vec![expected.clone()]);
         assert_eq!(seen.lock().unwrap()[0].splices, vec![expected]);
+    }
+
+    #[test]
+    fn test_two_clients_inserting_into_one_list_keep_both_items() {
+        let alice = SwirlDB::new();
+        alice
+            .insert_list_item("stops", 0, json!({ "color": "#ff0000" }))
+            .unwrap();
+        alice
+            .insert_list_item("stops", 1, json!({ "color": "#0000ff" }))
+            .unwrap();
+        let bob = SwirlDB::new();
+        bob.apply_changes(alice.get_changes()).unwrap();
+        let common = alice.get_heads();
+
+        // Each inserts between the two stops without seeing the other.
+        alice
+            .insert_list_item("stops", 1, json!({ "color": "#00ff00" }))
+            .unwrap();
+        bob.insert_list_item("stops", 1, json!({ "color": "#ffff00" }))
+            .unwrap();
+
+        bob.apply_changes(alice.get_changes_since(&common)).unwrap();
+        alice.apply_changes(bob.get_changes_since(&common)).unwrap();
+
+        let merged = alice.get_value("stops").unwrap();
+        assert_eq!(merged, bob.get_value("stops").unwrap());
+        let colors: Vec<&str> = merged
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|stop| stop["color"].as_str().unwrap())
+            .collect();
+        assert_eq!(colors.len(), 4);
+        assert_eq!(colors[0], "#ff0000");
+        assert_eq!(colors[3], "#0000ff");
+        assert!(colors.contains(&"#00ff00") && colors.contains(&"#ffff00"));
+    }
+
+    #[test]
+    fn test_a_delete_and_a_concurrent_edit_resolve_as_automerge_does() {
+        let alice = SwirlDB::new();
+        alice
+            .set_path("user.name", ScalarValue::Str("Alice".into()))
+            .unwrap();
+        alice
+            .insert_list_item("stops", 0, json!({ "color": "#ff0000" }))
+            .unwrap();
+        alice
+            .insert_list_item("stops", 1, json!({ "color": "#0000ff" }))
+            .unwrap();
+        let bob = SwirlDB::new();
+        bob.apply_changes(alice.get_changes()).unwrap();
+        let common = alice.get_heads();
+
+        // Alice removes what Bob is writing: a map key he replaces, a list
+        // item he replaces whole, and a list item he edits inside. (From the
+        // back, since a delete shifts what follows it.)
+        alice.delete_path("user.name").unwrap();
+        alice.delete_path("stops.1").unwrap();
+        alice.delete_path("stops.0").unwrap();
+        bob.set_path("user.name", ScalarValue::Str("Bob".into()))
+            .unwrap();
+        bob.set_path("stops.0", ScalarValue::Str("replaced".into()))
+            .unwrap();
+        bob.set_path("stops.1.color", ScalarValue::Str("#00ff00".into()))
+            .unwrap();
+
+        bob.apply_changes(alice.get_changes_since(&common)).unwrap();
+        alice.apply_changes(bob.get_changes_since(&common)).unwrap();
+
+        // Automerge's rule: a delete removes what it had seen. A value put
+        // in the deleted one's place was not seen, so it survives; an edit
+        // inside a deleted container was inside what was seen, so it goes
+        // with the container. Both copies agree either way.
+        assert_eq!(
+            alice.get_path("user.name"),
+            Some(ScalarValue::Str("Bob".into()))
+        );
+        assert_eq!(alice.get_path("user.name"), bob.get_path("user.name"));
+        let stops = alice.get_value("stops").unwrap();
+        assert_eq!(stops, bob.get_value("stops").unwrap());
+        assert_eq!(stops, json!(["replaced"]));
+
+        // A delete nobody raced keeps what it removed removed.
+        let heads = alice.get_heads();
+        alice.delete_path("stops.0").unwrap();
+        bob.apply_changes(alice.get_changes_since(&heads)).unwrap();
+        assert_eq!(bob.get_value("stops"), Some(json!([])));
+    }
+
+    #[test]
+    fn test_a_list_renders_as_an_array_through_every_edit() {
+        let db = SwirlDB::new();
+        // The first insert creates the list; items may be anything JSON.
+        db.insert_list_item("palette.stops", 0, json!("#ff0000"))
+            .unwrap();
+        db.insert_list_item("palette.stops", 1, json!({ "id": "b", "color": "#0000ff" }))
+            .unwrap();
+        db.insert_list_item("palette.stops", 2, json!([1, 2]))
+            .unwrap();
+        assert_eq!(
+            db.get_value("palette.stops"),
+            Some(json!(["#ff0000", { "id": "b", "color": "#0000ff" }, [1, 2]]))
+        );
+        assert_eq!(
+            db.get_path("palette.stops.0"),
+            Some(ScalarValue::Str("#ff0000".into()))
+        );
+
+        // A splice removes and inserts in place; a reorder is one of each.
+        db.splice_list(
+            "palette.stops",
+            0,
+            1,
+            vec![json!("#00ff00"), json!("#ffffff")],
+        )
+        .unwrap();
+        assert_eq!(
+            db.get_value("palette.stops"),
+            Some(json!([
+                "#00ff00",
+                "#ffffff",
+                { "id": "b", "color": "#0000ff" },
+                [1, 2]
+            ]))
+        );
+        db.splice_list("palette.stops", 3, 1, vec![]).unwrap();
+        db.delete_path("palette.stops.2").unwrap();
+        assert_eq!(
+            db.get_value("palette.stops"),
+            Some(json!(["#00ff00", "#ffffff"]))
+        );
+        assert_eq!(
+            db.get_value("palette"),
+            Some(json!({ "stops": ["#00ff00", "#ffffff"] }))
+        );
+
+        // A splice that only inserts may be the first write to a path.
+        db.splice_list("zones", 0, 0, vec![json!("front"), json!("back")])
+            .unwrap();
+        assert_eq!(db.get_value("zones"), Some(json!(["front", "back"])));
+
+        // Outside the list is an error, not a panic; so is not-a-list.
+        assert!(db.insert_list_item("zones", 3, json!("x")).is_err());
+        assert!(db.splice_list("zones", 1, 2, vec![]).is_err());
+        db.set_path("name", ScalarValue::Str("Alice".into()))
+            .unwrap();
+        assert!(db.insert_list_item("name", 0, json!("x")).is_err());
+        assert!(db.splice_list("palette", 0, 0, vec![]).is_err());
+    }
+
+    #[test]
+    fn test_delete_path_tells_the_observer_the_value_is_gone() {
+        use std::sync::{Arc, Mutex};
+
+        let db = SwirlDB::new();
+        db.set_path("user.name", ScalarValue::Str("Alice".into()))
+            .unwrap();
+        db.set_path("user.email", ScalarValue::Str("a@example.com".into()))
+            .unwrap();
+
+        let seen: Arc<Mutex<Vec<ChangeNotification>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        db.observe("user.name".to_string(), move |notification| {
+            sink.lock().unwrap().push(notification);
+        });
+        let above: Arc<Mutex<Vec<Vec<String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = above.clone();
+        db.observe("user".to_string(), move |notification| {
+            sink.lock().unwrap().push(notification.changed_paths);
+        });
+
+        db.delete_path("user.name").unwrap();
+        assert_eq!(db.get_path("user.name"), None);
+        assert_eq!(
+            db.get_value("user"),
+            Some(json!({ "email": "a@example.com" }))
+        );
+        {
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.len(), 1);
+            assert_eq!(seen[0].value, None);
+            assert_eq!(seen[0].changed_paths, vec!["user.name".to_string()]);
+        }
+        assert_eq!(
+            above.lock().unwrap().clone(),
+            vec![vec!["user.name".to_string()]]
+        );
+
+        // Nothing there: nothing removed, nobody told, and no error.
+        db.delete_path("user.name").unwrap();
+        db.delete_path("nowhere.at.all").unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 1);
+
+        // Deleting a map takes everything under it.
+        db.delete_path("user").unwrap();
+        assert_eq!(db.get_value("user"), None);
+        assert!(db.get_root_keys().is_empty());
+    }
+
+    #[test]
+    fn test_affected_paths_name_list_items_by_index() {
+        let sender = SwirlDB::new();
+        sender.insert_list_item("stops", 0, json!("a")).unwrap();
+        let receiver = SwirlDB::new();
+        receiver.apply_changes(sender.get_changes()).unwrap();
+
+        let heads = sender.get_heads();
+        sender.insert_list_item("stops", 1, json!("b")).unwrap();
+        sender.delete_path("stops.0").unwrap();
+        let paths = receiver
+            .extract_affected_paths(&sender.get_changes_since(&heads))
+            .unwrap();
+        assert_eq!(paths, vec!["stops.0".to_string(), "stops.1".to_string()]);
     }
 
     #[test]

@@ -26,3 +26,6 @@ uuid = { version = "1.6", features = ["v4"] }
 
 # CRDT types (re-exported from core but needed for public API)
 automerge = "0.6.1"
+
+# List items are any JSON
+serde_json = "1.0"

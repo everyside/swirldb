@@ -13,10 +13,16 @@ pub enum PathSegment {
 
 /// A path through the document composed of segments.
 ///
+/// Rendered with a dot between every segment, an index included, because
+/// that is the one notation the rest of SwirlDB speaks: `get_path("items.2")`
+/// reads the third item, a subscription `items.**` covers it, and an
+/// observer on `items` is above it. A path is a path whether it was typed or
+/// derived from a patch.
+///
 /// Examples:
 /// - `users.alice.email` → [Key("users"), Key("alice"), Key("email")]
-/// - `items[2].name` → [Key("items"), Index(2), Key("name")]
-/// - `matrix[0][1]` → [Key("matrix"), Index(0), Index(1)]
+/// - `items.2.name` → [Key("items"), Index(2), Key("name")]
+/// - `matrix.0.1` → [Key("matrix"), Index(0), Index(1)]
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct PathBuf {
     segments: Vec<PathSegment>,
@@ -57,8 +63,9 @@ impl PathBuf {
 
     /// Create a PathBuf from a dot-separated path string (e.g., "user.profile").
     ///
-    /// Note: This only handles key segments. Array indices in paths like
-    /// "items[2].name" are not parsed by this method.
+    /// Every segment becomes a key, an index included: "items.2.name" is
+    /// three keys here, and it is the document that says whether "2" names
+    /// a list position when the path is resolved against it.
     pub fn from_dot_path(path: &str) -> Self {
         if path.is_empty() {
             return Self::new();
@@ -75,17 +82,12 @@ impl PathBuf {
 impl fmt::Display for PathBuf {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (i, segment) in self.segments.iter().enumerate() {
+            if i > 0 {
+                write!(f, ".")?;
+            }
             match segment {
-                PathSegment::Key(key) => {
-                    // Add dot separator if this is not the first segment
-                    if i > 0 {
-                        write!(f, ".")?;
-                    }
-                    write!(f, "{}", key)?;
-                }
-                PathSegment::Index(idx) => {
-                    write!(f, "[{}]", idx)?;
-                }
+                PathSegment::Key(key) => write!(f, "{}", key)?,
+                PathSegment::Index(index) => write!(f, "{}", index)?,
             }
         }
         Ok(())
@@ -127,7 +129,7 @@ mod tests {
         path.push_index(2);
         path.push_key("name");
 
-        assert_eq!(path.to_string(), "items[2].name");
+        assert_eq!(path.to_string(), "items.2.name");
     }
 
     #[test]
@@ -137,7 +139,7 @@ mod tests {
         path.push_index(0);
         path.push_index(1);
 
-        assert_eq!(path.to_string(), "matrix[0][1]");
+        assert_eq!(path.to_string(), "matrix.0.1");
     }
 
     #[test]
@@ -147,7 +149,7 @@ mod tests {
         path.push_index(5);
         path.push_key("name");
 
-        assert_eq!(path.to_string(), "users[5].name");
+        assert_eq!(path.to_string(), "users.5.name");
     }
 
     #[test]
@@ -159,7 +161,7 @@ mod tests {
         path.push_key("values");
         path.push_index(0);
 
-        assert_eq!(path.to_string(), "data.items[3].values[0]");
+        assert_eq!(path.to_string(), "data.items.3.values.0");
     }
 
     #[test]
@@ -184,6 +186,6 @@ mod tests {
         ];
 
         let path = PathBuf::from(segments);
-        assert_eq!(path.to_string(), "users[0].email");
+        assert_eq!(path.to_string(), "users.0.email");
     }
 }

@@ -17,6 +17,9 @@
 //! - Path-based reads/writes via Automerge
 //! - Text: `set_text` creates one, `splice_text` edits it in place, and
 //!   `on_text_change` reports every edit as splices with positions
+//! - Lists: `insert_list_item` and `splice_list` edit a list in place, so
+//!   two clients adding to one list both keep their items
+//! - `delete_path` removes a key from its map or an item from its list
 //! - Ephemeral pub/sub messaging (bypasses CRDT/storage for high-frequency data)
 //! - Broadcast channels for change and ephemeral notifications
 //!
@@ -567,6 +570,61 @@ impl SyncClient {
             local: true,
         });
         Ok(())
+    }
+
+    /// Insert `value` into the list at `path` so that it sits at `index`, and
+    /// push the insertion. The list is created when the path holds nothing;
+    /// `value` may be any JSON, and an object becomes a map inside the
+    /// list. Two clients inserting at once both keep their items.
+    pub async fn insert_list_item(
+        &self,
+        path: &str,
+        index: usize,
+        value: serde_json::Value,
+    ) -> Result<()> {
+        let frame = {
+            let db = self.db.write().await;
+            let before = db.get_heads();
+            db.insert_list_item(path, index, value)?;
+            self.push_frame_since(&db, &before)
+        };
+        self.send_frame(frame).await
+    }
+
+    /// Edit the list at `path` in place — remove `delete_count` items at
+    /// `index`, then insert `values` there — and push the edit. A reorder is
+    /// a removal and an insertion; a splice never replaces the list, so an
+    /// item somebody else inserts beside it at the same moment stays.
+    pub async fn splice_list(
+        &self,
+        path: &str,
+        index: usize,
+        delete_count: usize,
+        values: Vec<serde_json::Value>,
+    ) -> Result<()> {
+        let frame = {
+            let db = self.db.write().await;
+            let before = db.get_heads();
+            db.splice_list(path, index, delete_count, values)?;
+            self.push_frame_since(&db, &before)
+        };
+        self.send_frame(frame).await
+    }
+
+    /// Remove whatever is at `path` — a key from its map, an item from its
+    /// list by index, and everything under it — and push the removal. A
+    /// path that holds nothing is left alone and nothing is sent.
+    pub async fn delete_path(&self, path: &str) -> Result<()> {
+        let frame = {
+            let db = self.db.write().await;
+            let before = db.get_heads();
+            db.delete_path(path)?;
+            if db.get_heads() == before {
+                return Ok(());
+            }
+            self.push_frame_since(&db, &before)
+        };
+        self.send_frame(frame).await
     }
 
     /// A `Push` carrying only what happened since `before`. A text edit is
