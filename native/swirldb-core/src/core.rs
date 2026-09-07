@@ -1226,28 +1226,28 @@ impl SwirlDB {
     /// Takes a list of 32-byte change hashes and returns only changes not descended from them
     pub fn get_changes_since(&self, heads: &[Vec<u8>]) -> Vec<Vec<u8>> {
         let mut doc = self.doc.lock().unwrap();
-
-        // Convert byte vectors to ChangeHash
-        // Note: ChangeHash is a newtype around [u8; 32]
-        let head_hashes: Vec<automerge::ChangeHash> = heads
-            .iter()
-            .filter_map(|h| {
-                if h.len() == 32 {
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(h);
-                    // Safety: ChangeHash is repr(transparent) over [u8; 32]
-                    // We can safely transmute [u8; 32] back to ChangeHash
-                    let change_hash: automerge::ChangeHash = unsafe { std::mem::transmute(arr) };
-                    Some(change_hash)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let changes = doc.get_changes(&head_hashes);
+        let changes = doc.get_changes(&change_hashes(heads));
         changes
             .into_iter()
+            .map(|c| c.raw_bytes().to_vec())
+            .collect()
+    }
+
+    /// The changes this instance made since `heads`, as bytes: those not
+    /// descended from the heads whose actor is this document's own. A change
+    /// that arrived through [`Self::apply_changes`] is also "since" any heads
+    /// older than it, but it is another actor's and is not among these.
+    ///
+    /// This is what a client owes a server it last pushed at `heads`: what it
+    /// wrote itself, and not what the server sent it in between. Empty heads
+    /// mean everything this instance ever wrote.
+    pub fn local_changes_since(&self, heads: &[Vec<u8>]) -> Vec<Vec<u8>> {
+        let mut doc = self.doc.lock().unwrap();
+        let actor = doc.get_actor().clone();
+        let changes = doc.get_changes(&change_hashes(heads));
+        changes
+            .into_iter()
+            .filter(|c| c.actor_id() == &actor)
             .map(|c| c.raw_bytes().to_vec())
             .collect()
     }
@@ -1475,6 +1475,19 @@ impl Default for SwirlDB {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Heads as 32-byte runs to Automerge's own hash type; a run of another
+/// length is not a hash and is dropped.
+fn change_hashes(heads: &[Vec<u8>]) -> Vec<ChangeHash> {
+    heads
+        .iter()
+        .filter_map(|head| {
+            let bytes: [u8; 32] = head.as_slice().try_into().ok()?;
+            // Safety: ChangeHash is repr(transparent) over [u8; 32].
+            Some(unsafe { std::mem::transmute::<[u8; 32], ChangeHash>(bytes) })
+        })
+        .collect()
 }
 
 /// Split a dot-separated path into segments
@@ -2468,6 +2481,40 @@ mod tests {
         db.delete_path("user").unwrap();
         assert_eq!(db.get_value("user"), None);
         assert!(db.get_root_keys().is_empty());
+    }
+
+    #[test]
+    fn test_local_changes_since_leave_out_what_another_actor_wrote() {
+        let alice = SwirlDB::new();
+        alice
+            .set_path("title", ScalarValue::Str("Alice".into()))
+            .unwrap();
+        let bob = SwirlDB::new();
+        bob.apply_changes(alice.get_changes()).unwrap();
+        // Bob owes nothing: everything he holds came from Alice.
+        assert!(bob.local_changes_since(&[]).is_empty());
+
+        let pushed = bob.get_heads();
+        bob.set_path("subtitle", ScalarValue::Str("Bob".into()))
+            .unwrap();
+        // Alice writes again and Bob hears it before his next push.
+        let heard = alice.get_heads();
+        alice
+            .set_path("title", ScalarValue::Str("Alice again".into()))
+            .unwrap();
+        bob.apply_changes(alice.get_changes_since(&heard)).unwrap();
+
+        // Since his last push there are two changes; one is his.
+        assert_eq!(bob.get_changes_since(&pushed).len(), 2);
+        let owed = bob.local_changes_since(&pushed);
+        assert_eq!(owed.len(), 1);
+        let reader = SwirlDB::new();
+        reader.apply_changes(alice.get_changes()).unwrap();
+        reader.apply_changes(owed).unwrap();
+        assert_eq!(
+            reader.get_path("subtitle"),
+            Some(ScalarValue::Str("Bob".into()))
+        );
     }
 
     #[test]

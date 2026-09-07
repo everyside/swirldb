@@ -23,6 +23,7 @@ pub mod test_server;
 // Test modules
 mod browser_sync;
 mod cross_platform;
+mod delta_push;
 mod ephemeral;
 mod list;
 mod multi_client_sync;

@@ -184,8 +184,18 @@ documents still agree. In Rust, `SwirlDB::new_with_text_encoding` chooses.
 
 The Rust client has the same three: `set_text`, `splice_text`, and
 `on_text_change`, a broadcast receiver of `TextChange { path, splices, local }`.
-A `splice_text` pushes only the change it made, not the history, so typing
-costs a keystroke each time rather than everything typed so far.
+
+**Every write the Rust client makes pushes what it wrote since its last
+push, and nothing more.** The client remembers the document's heads as they
+stood when it last pushed, and a `set_path`, `set_text`, `splice_text`,
+`insert_list_item`, `splice_list` or `delete_path` sends the changes since
+those heads that the client's own actor made — not the history it was given
+at open, and not a change it heard from the server in between, which is the
+server's already. So typing costs a keystroke each time rather than
+everything typed so far, and a scalar on a long document costs the scalar.
+Writes made through `client.db()` directly — several scalars under one lock
+— ride with the next write that pushes, or with `client.push()`, which sends
+what is owed and nothing when nothing is.
 
 `setText` on a path that already holds a text replaces the whole text, which
 throws away edits others are making to it at that moment; it is for creating

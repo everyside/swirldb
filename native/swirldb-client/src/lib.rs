@@ -87,6 +87,11 @@ pub struct SyncClient {
     /// Local CRDT database (thread-safe)
     db: Arc<RwLock<SwirlDB>>,
 
+    /// The heads of the local document as of the last push, so the next
+    /// push carries only what this client wrote since. Taken under the
+    /// database's write lock, never held across an await.
+    pushed_heads: std::sync::Mutex<Vec<Vec<u8>>>,
+
     /// Channel to send WebSocket messages from any thread
     ws_tx: mpsc::Sender<Vec<u8>>,
 
@@ -342,6 +347,10 @@ impl SyncClient {
 
         info!("SyncClient {} connected on {}", client_id, document);
 
+        // Everything in the document now came from the server, so nothing is
+        // owed to it yet.
+        let pushed_heads = std::sync::Mutex::new(db.read().await.get_heads());
+
         // Spawn background task for receive loop and send forwarding
         let db_clone = Arc::clone(&db);
         let ephemeral_tx_clone = ephemeral_tx.clone();
@@ -448,6 +457,7 @@ impl SyncClient {
             document,
             access,
             db,
+            pushed_heads,
             ws_tx,
             ephemeral_tx,
             change_tx,
@@ -484,34 +494,34 @@ impl SyncClient {
     /// Set a value at the given path and push the change to the server.
     ///
     /// The change is first applied to the local CRDT database, then sent
-    /// to the server as a `Push` message. The server will broadcast the
-    /// change to other subscribers.
+    /// to the server as a `Push` carrying what this client wrote since its
+    /// last push — this write, and any made through [`Self::db`] since.
+    /// The server broadcasts it to the document's other subscribers.
     ///
     /// # Errors
     ///
     /// Returns an error if the path is invalid, the CRDT operation fails,
     /// or the WebSocket send channel is closed.
     pub async fn set_path(&self, path: &str, value: ScalarValue) -> Result<()> {
-        let changes = {
+        let frame = {
             let db = self.db.write().await;
             db.set_path(path, value)?;
-            let changes = db.get_changes();
-            let heads = db.get_heads();
-            let heads_bytes: Vec<u8> = heads.into_iter().flatten().collect();
-            Message::Push {
-                heads: heads_bytes,
-                changes,
-                document: self.document.clone(),
-            }
-            .encode()
+            self.push_frame(&db)
         };
+        self.send_frame(frame).await
+    }
 
-        self.ws_tx
-            .send(changes)
-            .await
-            .map_err(|_| anyhow::anyhow!("WebSocket send channel closed"))?;
-
-        Ok(())
+    /// Push whatever this client has written since its last push without
+    /// writing anything more. This is for writes made through [`Self::db`]
+    /// directly — several scalars changed under one lock, say — which
+    /// otherwise ride with the next write that pushes. Sends nothing when
+    /// there is nothing owed.
+    pub async fn push(&self) -> Result<()> {
+        let frame = {
+            let db = self.db.write().await;
+            self.push_frame(&db)
+        };
+        self.send_frame(frame).await
     }
 
     /// Put a text at a path, replacing whatever was there, and push it.
@@ -524,10 +534,9 @@ impl SyncClient {
     pub async fn set_text(&self, path: &str, text: &str) -> Result<()> {
         let (frame, replaced_length) = {
             let db = self.db.write().await;
-            let before = db.get_heads();
             let replaced_length = db.text_length(path).unwrap_or(0);
             db.set_text(path, text)?;
-            (self.push_frame_since(&db, &before), replaced_length)
+            (self.push_frame(&db), replaced_length)
         };
         self.send_frame(frame).await?;
         let _ = self.text_change_tx.send(TextChange {
@@ -555,9 +564,8 @@ impl SyncClient {
     ) -> Result<()> {
         let frame = {
             let db = self.db.write().await;
-            let before = db.get_heads();
             db.splice_text(path, position, delete_count, insert)?;
-            self.push_frame_since(&db, &before)
+            self.push_frame(&db)
         };
         self.send_frame(frame).await?;
         let _ = self.text_change_tx.send(TextChange {
@@ -584,9 +592,8 @@ impl SyncClient {
     ) -> Result<()> {
         let frame = {
             let db = self.db.write().await;
-            let before = db.get_heads();
             db.insert_list_item(path, index, value)?;
-            self.push_frame_since(&db, &before)
+            self.push_frame(&db)
         };
         self.send_frame(frame).await
     }
@@ -604,9 +611,8 @@ impl SyncClient {
     ) -> Result<()> {
         let frame = {
             let db = self.db.write().await;
-            let before = db.get_heads();
             db.splice_list(path, index, delete_count, values)?;
-            self.push_frame_since(&db, &before)
+            self.push_frame(&db)
         };
         self.send_frame(frame).await
     }
@@ -617,34 +623,47 @@ impl SyncClient {
     pub async fn delete_path(&self, path: &str) -> Result<()> {
         let frame = {
             let db = self.db.write().await;
-            let before = db.get_heads();
             db.delete_path(path)?;
-            if db.get_heads() == before {
-                return Ok(());
-            }
-            self.push_frame_since(&db, &before)
+            self.push_frame(&db)
         };
         self.send_frame(frame).await
     }
 
-    /// A `Push` carrying only what happened since `before`. A text edit is
-    /// one keystroke, and sending the whole history with each would make
-    /// typing cost the length of everything typed so far.
-    fn push_frame_since(&self, db: &SwirlDB, before: &[Vec<u8>]) -> Vec<u8> {
-        let changes = if before.is_empty() {
-            db.get_changes()
-        } else {
-            db.get_changes_since(before)
-        };
-        Message::Push {
-            heads: db.get_heads().into_iter().flatten().collect(),
+    /// A `Push` carrying what this client wrote since its last push, and
+    /// `None` when that is nothing. A keystroke is one change, and sending
+    /// the whole history with each would make typing cost the length of
+    /// everything typed so far; a scalar is no different.
+    ///
+    /// "Since the last push" is the document's heads as they stood then,
+    /// remembered here; "what this client wrote" is the changes since those
+    /// heads that this document's own actor made. The second half matters
+    /// because a change heard from the server in a `Broadcast` is also
+    /// "since" — it came from another actor, so it is left out rather than
+    /// sent back to the server that sent it.
+    ///
+    /// Called with the database's write lock held, so the heads it records
+    /// are the heads it read.
+    fn push_frame(&self, db: &SwirlDB) -> Option<Vec<u8>> {
+        let mut pushed = self.pushed_heads.lock().unwrap();
+        let changes = db.local_changes_since(&pushed);
+        if changes.is_empty() {
+            return None;
+        }
+        let heads = db.get_heads();
+        let frame = Message::Push {
+            heads: heads.iter().flatten().copied().collect(),
             changes,
             document: self.document.clone(),
         }
-        .encode()
+        .encode();
+        *pushed = heads;
+        Some(frame)
     }
 
-    async fn send_frame(&self, frame: Vec<u8>) -> Result<()> {
+    async fn send_frame(&self, frame: Option<Vec<u8>>) -> Result<()> {
+        let Some(frame) = frame else {
+            return Ok(());
+        };
         self.ws_tx
             .send(frame)
             .await
