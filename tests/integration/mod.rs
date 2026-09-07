@@ -29,6 +29,7 @@ mod list;
 mod multi_client_sync;
 mod multi_document;
 mod network_resilience;
+mod observers;
 mod policy_enforcement;
 mod subscription_filtering;
 mod text;

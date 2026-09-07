@@ -73,9 +73,15 @@ impl PathExtractor {
             {
                 path.push_index(*index);
             }
+            // A counter bumped, or two concurrent puts of one property: the
+            // property is what changed.
+            PatchAction::Increment { prop, .. } | PatchAction::Conflict { prop } => match prop {
+                Prop::Map(key) => path.push_key(key),
+                Prop::Seq(index) => path.push_index(*index),
+            },
             _ => {
-                // Other actions (Increment, SpliceText, Mark, Conflict) and
-                // anything inside a text don't add to the path
+                // SpliceText, Mark, Unmark and anything inside a text change
+                // the object's own path
             }
         }
 

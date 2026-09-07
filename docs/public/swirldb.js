@@ -365,13 +365,28 @@ var SwirlDB = class _SwirlDB {
     return this.wasmDB.getRootKeys();
   }
   /**
-   * Observe changes to a path
+   * Observe a path. The callback is handed the value at the path — a
+   * scalar, an object for a map, an array for a list, `null` for nothing —
+   * and a `PathChange`, whenever the path, anything under it, or anything
+   * above it is written. This handle's own writes fire it with `local`
+   * true; writes that arrive from the server, or through `applyChanges`,
+   * with `local` false.
+   *
+   * @example
+   * db.observe('stops', (stops, { local }) => {
+   *   if (local) return;   // this handle wrote it and already knows
+   *   render(stops);
+   * });
    */
   observe(path, callback) {
     this.wasmDB.observe(path, callback);
   }
   /**
-   * Manually trigger observer checks
+   * Compare every observed scalar with the one last seen and fire the
+   * observers whose differ. Every write through this handle fires its
+   * observers itself, so this is for a change made some other way; the
+   * change it hands over says `local: false`, since a check cannot say
+   * whose a difference was.
    */
   checkObservers() {
     this.wasmDB.checkObservers();

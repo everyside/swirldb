@@ -18,7 +18,8 @@ Cross-platform CRDT database built on Automerge. Runs in browsers via WebAssembl
 - **Many documents**: a server holds any number of documents, each its own Automerge history, synced whole to whoever has it open; a browser holds several over one connection
 - **Identity and access from an authority**: who a connection is, and which documents it may open, are asked of the application that owns sessions and membership, not authored a second time in SwirlDB
 - **Text that merges**: a text at a path is a sequence of characters, not a string; two people splicing into one both keep their characters, and observers hear the edits as splices with positions
-- **Observable**: Field-level change tracking via observers
+- **Lists that merge**: a list at a path is edited in place — insert, splice, delete — so two people adding to one both keep their items, and a delete is a delete rather than a tombstone
+- **Observable**: an observer on a path hears every write to it, under it or above it, local or remote, and is told which
 - **Policy engine**: Access control for subscriptions within a document
 
 ## Architecture
@@ -250,6 +251,42 @@ as the last segment of a path, so `stops.0.color` and `stops.0` are
 writable like any other path. Changed paths name a list item by index with
 a dot — `stops.2`, the same notation `getPath` takes and a subscription
 `stops.**` covers.
+
+## Observers, and who made the change
+
+An observer on a path hears every write to it, under it, or above it. A
+`setPath` at `user.name` fires an observer on `user.name` and one on `user`;
+a `setValue` replacing `user` fires one on `user.name`. Segments are
+compared whole, so `user` and `username` are strangers. It is handed the
+value at its path — a scalar, an object for a map, an array for a list,
+`null` for nothing — and beside it a change saying what happened.
+
+```javascript
+palette.observe('stops', (stops, { path, changedPaths, local }) => {
+  if (local) return;      // this handle wrote it and already knows
+  render(stops);          // ['#ff0000', ...] — the list, as an array
+});
+palette.data.stops.$observe((stops, change) => { /* the same */ });
+```
+
+**Local writes and remote ones fire an observer alike, and `local` says
+which.** This handle's own `setPath`, `setValue`, `setText`, `spliceText`,
+`insertListItem`, `spliceList` and `deletePath` fire its observers with
+`local` true, the way `observeText` has always marked the handle's own
+splices; a write that arrives from the server, or through `applyChanges`,
+fires them with `local` false. `changedPaths` names what was written —
+`stops.2` for a list item, `user.name` for a key, the text's own path for a
+splice — and `['**']` when the whole document arrived. A panel that reads
+back what it wrote can pass its own by; a panel that renders the document
+need not know who wrote it.
+
+Before this, a map observer fired only from a socket frame, because the glue
+compared the scalar at the observed path and a map has none. Every write now
+reports the paths it touched, and a remote change reports the paths its
+patches touched, so nothing depends on a scalar being there. In Rust,
+`ChangeNotification` carries the same `local`, and `Applied` — what
+`apply_changes` returns — carries `changed_paths` for a layer that keeps
+observers of its own.
 
 ## Development
 

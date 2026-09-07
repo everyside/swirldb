@@ -38,6 +38,19 @@ export interface TextChange {
   local: boolean;
 }
 
+/**
+ * What an `observe` callback is handed beside the value: the observed path,
+ * the paths the change touched (`['**']` when the whole document arrived),
+ * and whether this handle made the change itself. A local write and a
+ * remote one fire an observer alike; `local` is how the writer passes its
+ * own by.
+ */
+export interface PathChange {
+  path: string;
+  changedPaths: string[];
+  local: boolean;
+}
+
 /** The document a handle is on when it was not opened by name. */
 export const DEFAULT_DOCUMENT = 'default';
 
@@ -86,7 +99,7 @@ class SwirlDBProxy implements ProxyHandler<object> {
     }
 
     if (prop === '$observe') {
-      return (callback: (value: any) => void) => {
+      return (callback: (value: any, change: PathChange) => void) => {
         this.db.observe(this.path.join('.'), callback);
       };
     }
@@ -466,14 +479,29 @@ export class SwirlDB {
   }
 
   /**
-   * Observe changes to a path
+   * Observe a path. The callback is handed the value at the path — a
+   * scalar, an object for a map, an array for a list, `null` for nothing —
+   * and a `PathChange`, whenever the path, anything under it, or anything
+   * above it is written. This handle's own writes fire it with `local`
+   * true; writes that arrive from the server, or through `applyChanges`,
+   * with `local` false.
+   *
+   * @example
+   * db.observe('stops', (stops, { local }) => {
+   *   if (local) return;   // this handle wrote it and already knows
+   *   render(stops);
+   * });
    */
-  observe(path: string, callback: (value: any) => void): void {
+  observe(path: string, callback: (value: any, change: PathChange) => void): void {
     this.wasmDB.observe(path, callback);
   }
 
   /**
-   * Manually trigger observer checks
+   * Compare every observed scalar with the one last seen and fire the
+   * observers whose differ. Every write through this handle fires its
+   * observers itself, so this is for a change made some other way; the
+   * change it hands over says `local: false`, since a check cannot say
+   * whose a difference was.
    */
   checkObservers(): void {
     this.wasmDB.checkObservers();
@@ -619,7 +647,7 @@ export class SwirlDB {
   /**
    * Subscribe to changes with unsubscribe function
    */
-  subscribe(path: string, callback: (value: any) => void): () => void {
+  subscribe(path: string, callback: (value: any, change: PathChange) => void): () => void {
     this.observe(path, callback);
     return () => {};
   }

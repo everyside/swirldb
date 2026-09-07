@@ -190,32 +190,55 @@ fn json_to_js(value: Option<serde_json::Value>) -> JsValue {
     }
 }
 
-/// Fire observers for paths affected by remote changes
-/// Only fires observers whose paths match the affected paths
-fn fire_observers_for_paths(handle_id: usize, core: &CoreSwirlDB, affected_paths: &[String]) {
+/// What an observer is handed beside the value: its own path, the paths
+/// the change touched, and whether this handle made the change.
+fn change_to_js(path: &str, changed_paths: &[String], local: bool) -> JsValue {
+    let change = js_sys::Object::new();
+    let _ = js_sys::Reflect::set(&change, &"path".into(), &JsValue::from_str(path));
+    let _ = js_sys::Reflect::set(
+        &change,
+        &"changedPaths".into(),
+        &strings_to_array(changed_paths.to_vec()),
+    );
+    let _ = js_sys::Reflect::set(&change, &"local".into(), &JsValue::from_bool(local));
+    change.into()
+}
+
+/// Fire a handle's observers for the paths a change touched — this handle's
+/// own write or one that arrived from the server, `local` says which. An
+/// observer fires when a touched path is its path, under it, or above it,
+/// segments compared whole; it is handed the value at its path, read fresh,
+/// and the change. The value it last saw is updated so a later manual
+/// `checkObservers` does not report the same change twice.
+fn fire_observers_for_paths(
+    handle_id: usize,
+    core: &CoreSwirlDB,
+    changed_paths: &[String],
+    local: bool,
+) {
     // Collect first, call after: a callback may re-enter and register an observer.
-    let callbacks: Vec<(Function, JsValue)> = OBSERVERS.with(|observers| {
+    let callbacks: Vec<(Function, JsValue, JsValue)> = OBSERVERS.with(|observers| {
+        let mut observers = observers.borrow_mut();
         observers
-            .borrow()
-            .iter()
+            .iter_mut()
             .filter(|(id, path, _, _)| {
                 *id == handle_id
-                    && affected_paths.iter().any(|affected| {
-                        // Match if observer path is a prefix of affected path, or vice versa
-                        // e.g., observer="messages" matches affected="messages.msg_123"
-                        // Also handles glob patterns like "**"
-                        affected.starts_with(path.as_str())
-                            || path.starts_with(affected.as_str())
-                            || affected == "**"
-                            || path == "**"
-                    })
+                    && changed_paths
+                        .iter()
+                        .any(|changed| swirldb_core::core::paths_touch(changed, path))
             })
-            .map(|(_, path, callback, _)| (callback.clone(), json_to_js(core.get_value(path))))
+            .map(|(_, path, callback, last_value)| {
+                *last_value = core.get_path(path);
+                (
+                    callback.clone(),
+                    json_to_js(core.get_value(path)),
+                    change_to_js(path, changed_paths, local),
+                )
+            })
             .collect()
     });
-    for (callback, value) in callbacks {
-        // Always fire for broadcast changes: the server sent changes, so it changed.
-        let _ = callback.call1(&JsValue::NULL, &value);
+    for (callback, value, change) in callbacks {
+        let _ = callback.call2(&JsValue::NULL, &value, &change);
     }
 }
 
@@ -246,23 +269,10 @@ fn fire_text_observers(handle_id: usize, changes: &[TextChange]) {
     }
 }
 
-/// Fire all observers for a handle (used for Sync messages without affected_paths)
-fn fire_all_observers(handle_id: usize, core: &CoreSwirlDB) {
-    let callbacks: Vec<(Function, JsValue)> = OBSERVERS.with(|observers| {
-        let mut observers = observers.borrow_mut();
-        observers
-            .iter_mut()
-            .filter(|(id, _, _, _)| *id == handle_id)
-            .map(|(_, path, callback, last_value)| {
-                // Update last_value for change detection (use scalar for comparison)
-                *last_value = core.get_path(path);
-                (callback.clone(), json_to_js(core.get_value(path)))
-            })
-            .collect()
-    });
-    for (callback, value) in callbacks {
-        let _ = callback.call1(&JsValue::NULL, &value);
-    }
+/// Fire every observer of a handle: the whole document arrived or was
+/// replaced, and nothing narrower is honest. The change names `**`.
+fn fire_all_observers(handle_id: usize, core: &CoreSwirlDB, local: bool) {
+    fire_observers_for_paths(handle_id, core, &["**".to_string()], local);
 }
 
 /// Fire ephemeral handlers for incoming ephemeral updates
@@ -340,7 +350,7 @@ fn dispatch(connection_id: usize, msg: Message) {
                 );
                 match core.apply_changes(changes) {
                     Ok(applied) => {
-                        fire_all_observers(handle_id, &core);
+                        fire_all_observers(handle_id, &core, false);
                         fire_text_observers(handle_id, &applied.text_changes);
                     }
                     Err(e) => {
@@ -383,7 +393,7 @@ fn dispatch(connection_id: usize, msg: Message) {
             );
             match core.apply_changes(changes) {
                 Ok(applied) => {
-                    fire_observers_for_paths(handle_id, &core, &affected_paths);
+                    fire_observers_for_paths(handle_id, &core, &affected_paths, false);
                     fire_text_observers(handle_id, &applied.text_changes);
                 }
                 Err(e) => {
@@ -843,10 +853,13 @@ impl SwirlDB {
         self.core
             .set_path(&path, scalar)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-        // Check observers after mutation
-        self.check_observers();
+        self.fire_local(&[path]);
         Ok(())
+    }
+
+    /// Tell this handle's observers about a write it just made.
+    fn fire_local(&self, changed_paths: &[String]) {
+        fire_observers_for_paths(self.id, &self.core, changed_paths, true);
     }
 
     /// Get a value at the given dot-separated path
@@ -876,7 +889,7 @@ impl SwirlDB {
         self.core
             .set_text(&path, &text)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        self.check_observers();
+        self.fire_local(std::slice::from_ref(&path));
         fire_text_observers(
             self.id,
             &[TextChange {
@@ -914,7 +927,7 @@ impl SwirlDB {
         self.core
             .splice_text(&path, position, delete_count, &insert)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        self.check_observers();
+        self.fire_local(std::slice::from_ref(&path));
         fire_text_observers(
             self.id,
             &[TextChange {
@@ -985,9 +998,7 @@ impl SwirlDB {
         self.core
             .set_value(&path, json_value)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-        // Check observers after mutation
-        self.check_observers();
+        self.fire_local(&[path]);
         Ok(())
     }
 
@@ -1015,7 +1026,7 @@ impl SwirlDB {
         self.core
             .insert_list_item(&path, index, value)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        self.check_observers();
+        self.fire_local(&[format!("{}.{}", path, index)]);
         Ok(())
     }
 
@@ -1043,7 +1054,7 @@ impl SwirlDB {
         self.core
             .splice_list(&path, index, delete_count, values)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        self.check_observers();
+        self.fire_local(&[path]);
         Ok(())
     }
 
@@ -1059,10 +1070,13 @@ impl SwirlDB {
     /// ```
     #[wasm_bindgen(js_name = deletePath)]
     pub fn delete_path(&mut self, path: String) -> Result<(), JsValue> {
-        self.core
+        let removed = self
+            .core
             .delete_path(&path)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
-        self.check_observers();
+        if removed {
+            self.fire_local(&[path]);
+        }
         Ok(())
     }
 
@@ -1113,8 +1127,8 @@ impl SwirlDB {
             .load_state(&vec)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-        // Check observers after loading
-        self.check_observers();
+        // The document was replaced: every observer hears it.
+        fire_all_observers(self.id, &self.core, false);
         fire_text_observers(self.id, &applied.text_changes);
         Ok(())
     }
@@ -1139,8 +1153,8 @@ impl SwirlDB {
             .apply_changes(change_vecs)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
-        // Check observers after applying changes
-        self.check_observers();
+        // Changes applied by hand are heard the way a Broadcast's are.
+        fire_observers_for_paths(self.id, &self.core, &applied.changed_paths, false);
         fire_text_observers(self.id, &applied.text_changes);
         Ok(())
     }
@@ -1209,7 +1223,21 @@ impl SwirlDB {
 
     /// Observe changes to a specific path
     ///
-    /// The callback will be invoked with the new value whenever it changes
+    /// The callback is invoked with the value at the path — a scalar, an
+    /// object for a map, an array for a list, `null` for nothing — and a
+    /// change `{ path, changedPaths, local }`, whenever the path, anything
+    /// under it, or anything above it is written. This handle's own writes
+    /// fire it with `local` true; writes that arrive from the server, or
+    /// through `applyChanges`, with `local` false. `changedPaths` names what
+    /// was written, `['**']` when the whole document arrived.
+    ///
+    /// Example:
+    /// ```javascript
+    /// db.observe('stops', (stops, { local }) => {
+    ///   if (local) return;          // this handle wrote it and already knows
+    ///   render(stops);
+    /// });
+    /// ```
     #[wasm_bindgen(js_name = observe)]
     pub fn observe(&self, path: String, callback: Function) -> Result<(), JsValue> {
         let current_value = self.core.get_path(&path);
@@ -1329,13 +1357,16 @@ impl SwirlDB {
         })
     }
 
-    /// Manually trigger observer checks
+    /// Manually trigger observer checks: compare each observed scalar with
+    /// the one last seen and fire the observers whose differ. Every write
+    /// through this handle fires its observers itself, so this is for a
+    /// change made some other way.
     #[wasm_bindgen(js_name = checkObservers)]
     pub fn check_observers(&self) {
         let handle_id = self.id;
 
         // Decide what changed under the borrow; call back with it released.
-        let callbacks: Vec<(Function, JsValue)> = OBSERVERS.with(|observers| {
+        let callbacks: Vec<(Function, JsValue, JsValue)> = OBSERVERS.with(|observers| {
             let mut observers = observers.borrow_mut();
             let mut fired = Vec::new();
             for (id, path, callback, last_value) in observers.iter_mut() {
@@ -1353,15 +1384,20 @@ impl SwirlDB {
                 };
 
                 if changed {
-                    // Full value (supports arrays/objects) for the callback
-                    fired.push((callback.clone(), json_to_js(self.core.get_value(path))));
+                    // Full value (supports arrays/objects) for the callback.
+                    // A manual check cannot say who made the difference.
+                    fired.push((
+                        callback.clone(),
+                        json_to_js(self.core.get_value(path)),
+                        change_to_js(path, &[], false),
+                    ));
                     *last_value = current_scalar;
                 }
             }
             fired
         });
-        for (callback, value) in callbacks {
-            let _ = callback.call1(&JsValue::NULL, &value);
+        for (callback, value, change) in callbacks {
+            let _ = callback.call2(&JsValue::NULL, &value, &change);
         }
     }
 
@@ -1964,6 +2000,74 @@ mod tests {
         db.set_path("name".into(), JsValue::from_str("Alice"))
             .unwrap();
         assert!(db.insert_list_item("name".into(), 0, stop("#fff")).is_err());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_a_map_observer_hears_this_handles_own_writes_as_local() {
+        let mut db = SwirlDB::new();
+        let seen = js_sys::Array::new();
+        let sink = seen.clone();
+        let callback = Closure::wrap(Box::new(move |value: JsValue, change: JsValue| {
+            let pair = js_sys::Array::new();
+            pair.push(&value);
+            pair.push(&change);
+            sink.push(&pair);
+        }) as Box<dyn FnMut(JsValue, JsValue)>);
+        db.observe(
+            "user".into(),
+            callback.as_ref().unchecked_ref::<Function>().clone(),
+        )
+        .unwrap();
+
+        db.set_path("user.name".into(), JsValue::from_str("Alice"))
+            .unwrap();
+        db.set_value(
+            "user.profile".into(),
+            js_sys::JSON::parse(r#"{"avatar":"a.png"}"#).unwrap(),
+        )
+        .unwrap();
+        db.set_path("other".into(), JsValue::from_str("x")).unwrap();
+        assert_eq!(seen.length(), 2, "a write elsewhere is not heard");
+
+        let first: js_sys::Array = seen.get(0).into();
+        let value: String = js_sys::JSON::stringify(&first.get(0)).unwrap().into();
+        assert_eq!(value, r#"{"name":"Alice"}"#);
+        let change = first.get(1);
+        assert_eq!(
+            js_sys::Reflect::get(&change, &"local".into())
+                .unwrap()
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            js_sys::Reflect::get(&change, &"path".into())
+                .unwrap()
+                .as_string()
+                .as_deref(),
+            Some("user")
+        );
+        let changed: js_sys::Array = js_sys::Reflect::get(&change, &"changedPaths".into())
+            .unwrap()
+            .into();
+        assert_eq!(changed.get(0).as_string().as_deref(), Some("user.name"));
+
+        // Changes applied by hand are heard too, and are not local.
+        let mut peer = SwirlDB::new();
+        peer.apply_changes(db.get_changes()).unwrap();
+        let heads = peer.get_heads_array();
+        peer.core
+            .set_path("user.email", ScalarValue::Str("a@example.com".into()))
+            .unwrap();
+        db.apply_changes(peer.get_changes_since(heads)).unwrap();
+        assert_eq!(seen.length(), 3);
+        let third: js_sys::Array = seen.get(2).into();
+        assert_eq!(
+            js_sys::Reflect::get(&third.get(1), &"local".into())
+                .unwrap()
+                .as_bool(),
+            Some(false)
+        );
+        drop(callback);
     }
 
     #[wasm_bindgen_test]

@@ -44,6 +44,16 @@ enum IpcCommand {
     },
     #[serde(rename = "getDocumentPath")]
     GetDocumentPath { document: String, path: String },
+    #[serde(rename = "getDocumentValue")]
+    GetDocumentValue { document: String, path: String },
+    #[serde(rename = "deleteDocumentPath")]
+    DeleteDocumentPath { document: String, path: String },
+    #[serde(rename = "observeDocumentPath")]
+    ObserveDocumentPath { document: String, path: String },
+    #[serde(rename = "takeDocumentObservations")]
+    TakeDocumentObservations { document: String, path: String },
+    #[serde(rename = "waitForDocumentObservation")]
+    WaitForDocumentObservation { document: String, path: String },
     #[serde(rename = "setDocumentText")]
     SetDocumentText {
         document: String,
@@ -120,6 +130,17 @@ pub struct SeenTextSplice {
 pub struct SeenTextChange {
     pub path: String,
     pub splices: Vec<SeenTextSplice>,
+    pub local: bool,
+}
+
+/// One call of an `observe` callback in the browser: the value it was
+/// handed and the change beside it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SeenObservation {
+    pub value: serde_json::Value,
+    pub path: String,
+    #[serde(rename = "changedPaths")]
+    pub changed_paths: Vec<String>,
     pub local: bool,
 }
 
@@ -411,6 +432,87 @@ impl BrowserTestClient {
         })
         .await?;
         self.value_response().await
+    }
+
+    /// Read a path from one open document's local copy as JSON: a list as
+    /// an array, a map as an object.
+    pub async fn get_document_value(
+        &self,
+        document: &str,
+        path: &str,
+    ) -> Result<Option<serde_json::Value>> {
+        self.send_command(IpcCommand::GetDocumentValue {
+            document: document.to_string(),
+            path: path.to_string(),
+        })
+        .await?;
+        self.value_response().await
+    }
+
+    /// Delete a path on one open document and push the deletion.
+    pub async fn delete_document_path(&self, document: &str, path: &str) -> Result<()> {
+        self.send_command(IpcCommand::DeleteDocumentPath {
+            document: document.to_string(),
+            path: path.to_string(),
+        })
+        .await?;
+        self.wait_for_response(|r| matches!(r, IpcResponse::SetComplete))
+            .await?;
+        Ok(())
+    }
+
+    /// Observe a path on one open document and start recording every call
+    /// of the observer, this browser's own writes included.
+    pub async fn observe_document_path(&self, document: &str, path: &str) -> Result<()> {
+        self.send_command(IpcCommand::ObserveDocumentPath {
+            document: document.to_string(),
+            path: path.to_string(),
+        })
+        .await?;
+        self.wait_for_response(|r| matches!(r, IpcResponse::SetComplete))
+            .await?;
+        Ok(())
+    }
+
+    /// The observer calls recorded for a path since last taken.
+    pub async fn take_document_observations(
+        &self,
+        document: &str,
+        path: &str,
+    ) -> Result<Vec<SeenObservation>> {
+        self.send_command(IpcCommand::TakeDocumentObservations {
+            document: document.to_string(),
+            path: path.to_string(),
+        })
+        .await?;
+        match self
+            .wait_for_response(|r| matches!(r, IpcResponse::Value { .. }))
+            .await?
+        {
+            IpcResponse::Value { value } => Ok(serde_json::from_value(value)?),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// Wait until the observer on a path has been called at least once.
+    pub async fn wait_for_document_observation(&self, document: &str, path: &str) -> Result<()> {
+        self.send_command(IpcCommand::WaitForDocumentObservation {
+            document: document.to_string(),
+            path: path.to_string(),
+        })
+        .await?;
+        match self
+            .wait_for_response(|r| {
+                matches!(
+                    r,
+                    IpcResponse::BroadcastReceived | IpcResponse::Error { .. }
+                )
+            })
+            .await?
+        {
+            IpcResponse::Error { error } => anyhow::bail!("{}", error),
+            _ => Ok(()),
+        }
     }
 
     /// What the server granted on the document: "read", "write", or null.

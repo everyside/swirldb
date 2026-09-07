@@ -165,6 +165,45 @@ rl.on('line', async (line) => {
                 }
                 break;
 
+            case 'getDocumentValue':
+                const documentJson = await page.evaluate(({ document, path }) => {
+                    return window.testAPI.getDocumentValue(document, path);
+                }, { document: msg.document, path: msg.path });
+                sendIPC({ type: 'value', value: documentJson });
+                break;
+
+            case 'deleteDocumentPath':
+                await page.evaluate(({ document, path }) => {
+                    window.testAPI.deleteDocumentPath(document, path);
+                }, { document: msg.document, path: msg.path });
+                sendIPC({ type: 'set_complete' });
+                break;
+
+            case 'observeDocumentPath':
+                await page.evaluate(({ document, path }) => {
+                    window.testAPI.observeDocumentPath(document, path);
+                }, { document: msg.document, path: msg.path });
+                sendIPC({ type: 'set_complete' });
+                break;
+
+            case 'takeDocumentObservations':
+                const observations = await page.evaluate(({ document, path }) => {
+                    return window.testAPI.takeDocumentObservations(document, path);
+                }, { document: msg.document, path: msg.path });
+                sendIPC({ type: 'value', value: observations });
+                break;
+
+            case 'waitForDocumentObservation':
+                try {
+                    await page.evaluate(async ({ document, path }) => {
+                        await window.testAPI.waitForDocumentObservation(document, path);
+                    }, { document: msg.document, path: msg.path });
+                    sendIPC({ type: 'broadcast_received' });
+                } catch (err) {
+                    sendIPC({ type: 'error', error: err.message });
+                }
+                break;
+
             case 'getDocumentPath':
                 const documentValue = await page.evaluate(({ document, path }) => {
                     return window.testAPI.getDocumentPath(document, path);

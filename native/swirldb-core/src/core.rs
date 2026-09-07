@@ -27,6 +27,13 @@ pub struct ChangeNotification {
     pub value: Option<ScalarValue>,
     /// List of field paths that changed (e.g., ["user.email", "user.profile.avatar"])
     pub changed_paths: Vec<String>,
+    /// True when this instance made the change itself — a `set_path`, a
+    /// splice, a delete — and false when it arrived through
+    /// [`SwirlDB::apply_changes`] or [`SwirlDB::load_state`], or when a
+    /// manual [`SwirlDB::check_observers`] found a difference and cannot say
+    /// whose it was. An observer that is also the writer can pass its own
+    /// by.
+    pub local: bool,
 }
 
 /// Observer callback signature
@@ -79,6 +86,11 @@ struct TextObserver {
 pub struct Applied {
     /// Every text the changes edited, with the splices that edited it
     pub text_changes: Vec<TextChange>,
+    /// Every path the changes touched, sorted and without repeats: a key
+    /// put or deleted, a list item by index, a text by its own path. Empty
+    /// when the whole document was replaced, as by [`SwirlDB::load_state`],
+    /// where nothing narrower is honest.
+    pub changed_paths: Vec<String>,
 }
 
 /// Core SwirlDB engine - pure Rust, platform-agnostic
@@ -294,7 +306,7 @@ impl SwirlDB {
             }
 
             // Notify observers with the path that was changed
-            self.check_observers_with_paths(vec![path.to_string()]);
+            self.check_observers_with_paths(vec![path.to_string()], true);
 
             Ok(())
         } else {
@@ -399,7 +411,7 @@ impl SwirlDB {
             registry.register(text_id, crate::paths::PathBuf::from_dot_path(path));
         }
 
-        self.check_observers_with_paths(vec![path.to_string()]);
+        self.check_observers_with_paths(vec![path.to_string()], true);
         if replaced_length > 0 || inserted_length > 0 {
             self.notify_text_observers(&[TextChange {
                 path: path.to_string(),
@@ -454,7 +466,7 @@ impl SwirlDB {
             .map_err(|e| anyhow!("Failed to splice text: {:?}", e))?;
         drop(doc);
 
-        self.check_observers_with_paths(vec![path.to_string()]);
+        self.check_observers_with_paths(vec![path.to_string()], true);
         self.notify_text_observers(&[TextChange {
             path: path.to_string(),
             splices: vec![TextSplice {
@@ -502,7 +514,7 @@ impl SwirlDB {
         drop(doc);
 
         self.register_created(&created);
-        self.check_observers_with_paths(vec![format!("{}.{}", path, index)]);
+        self.check_observers_with_paths(vec![format!("{}.{}", path, index)], true);
         Ok(())
     }
 
@@ -561,21 +573,22 @@ impl SwirlDB {
                 .map(|position| format!("{}.{}", path, position))
                 .collect()
         };
-        self.check_observers_with_paths(changed);
+        self.check_observers_with_paths(changed, true);
         Ok(())
     }
 
     /// Remove whatever is at a path: a key from its map, or an item from its
-    /// list by index, together with everything under it. A path that holds
-    /// nothing is left alone and this returns `Ok`, since there is nothing
-    /// to remove and no error in that.
+    /// list by index, together with everything under it. Returns whether
+    /// something was there to remove: a path that holds nothing is left
+    /// alone and answers `Ok(false)`, since there is nothing to remove and
+    /// no error in that.
     ///
     /// An observer on the path is told the value is gone — `None` — and an
     /// observer above it fires because something under it changed. A delete
     /// that meets a concurrent write to the same key resolves as Automerge
     /// resolves it: the write survives, because the delete removed only
     /// what it had seen.
-    pub fn delete_path(&self, path: &str) -> Result<()> {
+    pub fn delete_path(&self, path: &str) -> Result<bool> {
         self.check_policy(Action::Write, path)?;
 
         let segments = split_path(path);
@@ -585,7 +598,7 @@ impl SwirlDB {
 
         let mut doc = self.doc.lock().unwrap();
         let Some(parent) = resolve_path_read(&doc, &segments) else {
-            return Ok(());
+            return Ok(false);
         };
         let key = segments.last().unwrap();
         let in_list = doc
@@ -597,21 +610,21 @@ impl SwirlDB {
                 return Err(anyhow!("{} names a list item without an index", path));
             };
             if index >= doc.length(&parent) {
-                return Ok(());
+                return Ok(false);
             }
             doc.delete(&parent, index)
                 .map_err(|e| anyhow!("Failed to delete {}: {:?}", path, e))?;
         } else {
             if doc.get(&parent, key.as_str()).ok().flatten().is_none() {
-                return Ok(());
+                return Ok(false);
             }
             doc.delete(&parent, key.as_str())
                 .map_err(|e| anyhow!("Failed to delete {}: {:?}", path, e))?;
         }
         drop(doc);
 
-        self.check_observers_with_paths(vec![path.to_string()]);
-        Ok(())
+        self.check_observers_with_paths(vec![path.to_string()], true);
+        Ok(true)
     }
 
     /// Record the objects a write created on its way to a path.
@@ -662,7 +675,7 @@ impl SwirlDB {
                 }
             }
 
-            self.check_observers();
+            self.check_observers_with_paths(vec![path.to_string()], true);
             Ok(())
         } else {
             Err(anyhow!("Failed to resolve path: {}", path))
@@ -1204,9 +1217,12 @@ impl SwirlDB {
         drop(registry_guard);
 
         // Document replaced - all paths potentially changed
-        self.check_observers_with_paths(vec![]);
+        self.check_observers_with_paths(vec![], false);
         self.notify_text_observers(&text_changes);
-        Ok(Applied { text_changes })
+        Ok(Applied {
+            text_changes,
+            changed_paths: Vec::new(),
+        })
     }
 
     /// Get all changes from the document as bytes
@@ -1339,16 +1355,23 @@ impl SwirlDB {
 
         // Rebuild path registry after applying changes
         let registry = PathRegistry::from_document(&*doc).unwrap_or_else(|_| PathRegistry::new());
+        // The paths the patches touched, so an observer above one of them
+        // hears a remote write the way it hears a local one.
+        let changed_paths = crate::paths::PathExtractor::new(registry.clone())
+            .extract_paths_from_patches(&*doc, &patches)
+            .unwrap_or_default();
         drop(doc);
 
         let mut registry_guard = self.path_registry.write().unwrap();
         *registry_guard = registry;
         drop(registry_guard);
 
-        // Changes applied - paths may have changed
-        self.check_observers_with_paths(vec![]);
+        self.check_observers_with_paths(changed_paths.clone(), false);
         self.notify_text_observers(&text_changes);
-        Ok(Applied { text_changes })
+        Ok(Applied {
+            text_changes,
+            changed_paths,
+        })
     }
 
     /// Get the current heads (tips of the change graph) as bytes
@@ -1377,7 +1400,13 @@ impl SwirlDB {
 
     /// Observe changes to a specific path
     ///
-    /// The callback will be invoked whenever the value at the path changes
+    /// The callback is invoked when the value at the path changes, and when
+    /// anything under or above it is written: a `set_path` at `user.name`
+    /// fires an observer on `user`, and a `set_value` replacing `user`
+    /// fires an observer on `user.name`. Local writes and remote ones fire
+    /// alike; the notification's `local` says which. For a map or a list
+    /// the notification's `value` is `None` — there is no scalar there —
+    /// and the observer reads the value it wants with [`Self::get_value`].
     pub fn observe<F>(&self, path: String, callback: F)
     where
         F: Fn(ChangeNotification) + Send + Sync + 'static,
@@ -1425,50 +1454,63 @@ impl SwirlDB {
     /// Manually trigger observer checks
     ///
     /// This compares current values with cached values and fires callbacks
-    /// for any that have changed
+    /// for any that have changed. Nothing here knows who made a difference
+    /// it finds, so the notification says `local: false`.
     pub fn check_observers(&self) {
-        self.check_observers_with_paths(vec![]);
+        self.check_observers_with_paths(vec![], false);
     }
 
     /// Check observers and notify with specific changed paths
-    fn check_observers_with_paths(&self, changed_paths: Vec<String>) {
+    ///
+    /// An observer fires when the scalar at its path changed, or when one
+    /// of `changed_paths` is its path, under it, or above it. With no
+    /// changed paths given only the scalar comparison decides.
+    fn check_observers_with_paths(&self, changed_paths: Vec<String>, local: bool) {
         let mut observers = self.observers.lock().unwrap();
 
         for observer in observers.iter_mut() {
             let current = self.get_path(&observer.path);
 
-            // Check if value changed
             let value_changed = match (&observer.last_value, &current) {
                 (None, None) => false,
                 (Some(_), None) | (None, Some(_)) => true,
                 (Some(a), Some(b)) => !scalar_values_equal(a, b),
             };
 
-            // Early exit if no value change and we have changed_paths to check
-            if !value_changed && !changed_paths.is_empty() {
-                // Check if any changed path affects this observer
-                let affects_observer = changed_paths.iter().any(|changed_path| {
-                    // Observer fires if:
-                    // 1. Exact match: changed_path == observer.path
-                    // 2. Child changed: changed_path is under observer.path
-                    changed_path == &observer.path
-                        || changed_path.starts_with(&format!("{}.", observer.path))
-                });
-
-                if !affects_observer {
-                    continue; // Skip this observer
-                }
+            if !value_changed
+                && !changed_paths.is_empty()
+                && !changed_paths
+                    .iter()
+                    .any(|changed| paths_touch(changed, &observer.path))
+            {
+                continue;
             }
 
-            // Observer should fire
             let notification = ChangeNotification {
                 value: current.clone(),
                 changed_paths: changed_paths.clone(),
+                local,
             };
             (observer.callback)(notification);
             observer.last_value = current;
         }
     }
+}
+
+/// Whether a change at `changed` is something an observer on `observed`
+/// should hear: the same path, a path under it, or a path above it. Segments
+/// are compared whole, so `user` and `username` are strangers. `**` on
+/// either side is everything.
+pub fn paths_touch(changed: &str, observed: &str) -> bool {
+    changed == observed
+        || changed == "**"
+        || observed == "**"
+        || changed
+            .strip_prefix(observed)
+            .is_some_and(|rest| rest.starts_with('.'))
+        || observed
+            .strip_prefix(changed)
+            .is_some_and(|rest| rest.starts_with('.'))
 }
 
 impl Default for SwirlDB {
@@ -2455,7 +2497,7 @@ mod tests {
             sink.lock().unwrap().push(notification.changed_paths);
         });
 
-        db.delete_path("user.name").unwrap();
+        assert!(db.delete_path("user.name").unwrap());
         assert_eq!(db.get_path("user.name"), None);
         assert_eq!(
             db.get_value("user"),
@@ -2473,14 +2515,102 @@ mod tests {
         );
 
         // Nothing there: nothing removed, nobody told, and no error.
-        db.delete_path("user.name").unwrap();
-        db.delete_path("nowhere.at.all").unwrap();
+        assert!(!db.delete_path("user.name").unwrap());
+        assert!(!db.delete_path("nowhere.at.all").unwrap());
         assert_eq!(seen.lock().unwrap().len(), 1);
 
         // Deleting a map takes everything under it.
         db.delete_path("user").unwrap();
         assert_eq!(db.get_value("user"), None);
         assert!(db.get_root_keys().is_empty());
+    }
+
+    #[test]
+    fn test_a_map_observer_hears_local_and_remote_writes_under_it() {
+        use std::sync::{Arc, Mutex};
+
+        let db = SwirlDB::new();
+        db.set_path("user.name", ScalarValue::Str("Alice".into()))
+            .unwrap();
+        let seen: Arc<Mutex<Vec<ChangeNotification>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        // A map has no scalar, so only the changed paths can fire this.
+        db.observe("user".to_string(), move |notification| {
+            sink.lock().unwrap().push(notification);
+        });
+        let take = || std::mem::take(&mut *seen.lock().unwrap());
+
+        // Local writes of every kind, each marked local.
+        db.set_path("user.email", ScalarValue::Str("a@example.com".into()))
+            .unwrap();
+        db.set_value("user.profile", json!({ "avatar": "a.png" }))
+            .unwrap();
+        db.set_text("user.bio", "hi").unwrap();
+        db.splice_text("user.bio", 2, 0, "!").unwrap();
+        db.insert_list_item("user.tags", 0, json!("x")).unwrap();
+        db.delete_path("user.email").unwrap();
+        let heard = take();
+        let paths: Vec<Vec<String>> = heard.iter().map(|n| n.changed_paths.clone()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                vec!["user.email".to_string()],
+                vec!["user.profile".to_string()],
+                vec!["user.bio".to_string()],
+                vec!["user.bio".to_string()],
+                vec!["user.tags.0".to_string()],
+                vec!["user.email".to_string()],
+            ]
+        );
+        assert!(heard.iter().all(|n| n.local && n.value.is_none()));
+
+        // A write elsewhere is not heard.
+        db.set_path("other", ScalarValue::Int(1)).unwrap();
+        assert!(take().is_empty());
+
+        // A remote write under it is heard once, marked not local, naming
+        // the path; a remote write elsewhere is not.
+        let peer = SwirlDB::new();
+        peer.apply_changes(db.get_changes()).unwrap();
+        let heads = peer.get_heads();
+        peer.set_path("user.name", ScalarValue::Str("Alicia".into()))
+            .unwrap();
+        peer.set_path("other", ScalarValue::Int(2)).unwrap();
+        let applied = db.apply_changes(peer.get_changes_since(&heads)).unwrap();
+        assert_eq!(
+            applied.changed_paths,
+            vec!["other".to_string(), "user.name".to_string()]
+        );
+        let heard = take();
+        assert_eq!(heard.len(), 1);
+        assert!(!heard[0].local);
+        assert_eq!(heard[0].changed_paths, applied.changed_paths);
+
+        // An observer below a replaced map hears the replacement.
+        let below: Arc<Mutex<Vec<ChangeNotification>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = below.clone();
+        db.observe("user.profile.avatar".to_string(), move |notification| {
+            sink.lock().unwrap().push(notification);
+        });
+        db.set_value("user.profile", json!({ "avatar": "b.png" }))
+            .unwrap();
+        let heard = below.lock().unwrap();
+        assert_eq!(heard.len(), 1);
+        assert_eq!(heard[0].value, Some(ScalarValue::Str("b.png".into())));
+        assert!(heard[0].local);
+    }
+
+    #[test]
+    fn test_paths_touch_compares_whole_segments() {
+        assert!(paths_touch("user.name", "user"));
+        assert!(paths_touch("user", "user.name"));
+        assert!(paths_touch("user", "user"));
+        assert!(paths_touch("stops.2", "stops"));
+        assert!(paths_touch("anything", "**"));
+        assert!(paths_touch("**", "anything"));
+        assert!(!paths_touch("username", "user"));
+        assert!(!paths_touch("user", "username"));
+        assert!(!paths_touch("user.email", "user.name"));
     }
 
     #[test]

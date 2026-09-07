@@ -17,6 +17,8 @@
         const presence = new Map();
         // Per document, the text changes heard from the server, in order.
         const textChanges = new Map();
+        // Per document and path, every observer call: { value, path, changedPaths, local }.
+        const observations = new Map();
 
         window.testAPI = {
             async connect(wsUrl, subscriptions) {
@@ -115,8 +117,11 @@
                     changes.set(document, 0);
                     presence.set(document, []);
                     textChanges.set(document, []);
-                    // An observer on "**" fires for every broadcast on this document.
-                    handle.observe('**', () => {
+                    // An observer on "**" fires for every write on this document;
+                    // the ones this browser made are passed by, so the count is
+                    // what arrived from the server.
+                    handle.observe('**', (value, change) => {
+                        if (change.local) return;
                         changes.set(document, changes.get(document) + 1);
                     });
                     handle.onEphemeral('presence.*', (path, data) => {
@@ -176,6 +181,56 @@
 
             getDocumentPath(document, path) {
                 return handles.get(document).getPath(path);
+            },
+
+            getDocumentValue(document, path) {
+                return handles.get(document).getValue(path);
+            },
+
+            deleteDocumentPath(document, path) {
+                const handle = handles.get(document);
+                handle.deletePath(path);
+                handle.syncChanges();
+            },
+
+            // ---- observers ----
+
+            /// Observe a path on a document and record every call, local or not.
+            observeDocumentPath(document, path) {
+                const key = `${document}\n${path}`;
+                observations.set(key, []);
+                handles.get(document).observe(path, (value, change) => {
+                    observations.get(key).push({
+                        value: value === undefined ? null : value,
+                        path: change.path,
+                        changedPaths: change.changedPaths,
+                        local: change.local,
+                    });
+                });
+            },
+
+            takeDocumentObservations(document, path) {
+                const key = `${document}\n${path}`;
+                const seen = observations.get(key) ?? [];
+                observations.set(key, []);
+                return seen;
+            },
+
+            waitForDocumentObservation(document, path, timeout = 2000) {
+                const key = `${document}\n${path}`;
+                return new Promise((resolve, reject) => {
+                    const start = Date.now();
+                    const check = () => {
+                        if ((observations.get(key) ?? []).length > 0) {
+                            resolve();
+                        } else if (Date.now() - start > timeout) {
+                            reject(new Error(`Timeout waiting for an observation of ${path} on ${document}`));
+                        } else {
+                            setTimeout(check, 10);
+                        }
+                    };
+                    check();
+                });
             },
 
             documentAccess(document) {
