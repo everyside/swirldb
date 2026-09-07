@@ -11,8 +11,8 @@
 /// - Lock-free data structures for scalability
 use anyhow::Result;
 use axum::{
-    extract::{ws::WebSocketUpgrade, State as AxumState},
-    http::StatusCode,
+    extract::{ws::WebSocketUpgrade, Query, State as AxumState},
+    http::{HeaderMap, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
@@ -20,6 +20,7 @@ use axum::{
     routing::get,
     Json, Router,
 };
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -87,16 +88,20 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Who decides which documents a subject may open. Without AUTHORITY_URL
-    // every document is open to everyone who can reach the server, which is
-    // right for a laptop and wrong for anything else.
+    // Who decides who a connection is and which documents it may open.
+    // Without AUTHORITY_URL every connection is whoever it says it is and
+    // every document is open to it, which is right for a laptop and wrong
+    // for anything else.
     let authority: Arc<dyn Authority> = match env::var("AUTHORITY_URL") {
         Ok(url) if !url.is_empty() => {
-            info!("Documents open as {}/may-open allows", url);
+            info!(
+                "Connections are who {}/whoami says; documents open as {}/may-open allows",
+                url, url
+            );
             Arc::new(HttpAuthority::new(url))
         }
         _ => {
-            warn!("No AUTHORITY_URL: every document is open to every client");
+            warn!("No AUTHORITY_URL: every connection is whoever it claims, every document open to it");
             Arc::new(OpenToAll)
         }
     };
@@ -290,12 +295,17 @@ fn load_tls_config(
     ))
 }
 
-/// WebSocket upgrade handler
+/// WebSocket upgrade handler. The bearer token, from the `Authorization`
+/// header or the `token` query parameter, travels with the socket to the
+/// handler, which has the authority verify it at `Connect`.
 async fn websocket_handler(
     ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
     AxumState(state): AxumState<ServerState>,
 ) -> Response {
-    ws.on_upgrade(|socket| swirldb_server::handler::handle_websocket(socket, state))
+    let token = swirldb_server::handler::bearer_token(&headers, &query);
+    ws.on_upgrade(move |socket| swirldb_server::handler::handle_websocket(socket, state, token))
 }
 
 /// Health check endpoint

@@ -16,7 +16,7 @@ Cross-platform CRDT database built on Automerge. Runs in browsers via WebAssembl
 - **Pluggable storage**: In-memory, LocalStorage, IndexedDB, or redb
 - **Real-time sync**: WebSocket-based synchronization server
 - **Many documents**: a server holds any number of documents, each its own Automerge history, synced whole to whoever has it open; a browser holds several over one connection
-- **Access from an authority**: who may open a document is asked of the application that owns membership, not authored a second time in SwirlDB
+- **Identity and access from an authority**: who a connection is, and which documents it may open, are asked of the application that owns sessions and membership, not authored a second time in SwirlDB
 - **Text that merges**: a text at a path is a sequence of characters, not a string; two people splicing into one both keep their characters, and observers hear the edits as splices with positions
 - **Observable**: Field-level change tracking via observers
 - **Policy engine**: Access control for subscriptions within a document
@@ -99,7 +99,7 @@ working unchanged.
 ```javascript
 import { SwirlDBConnection } from '@swirldb/js';
 
-const connection = await SwirlDBConnection.open('wss://example/ws', 'alice');
+const connection = await SwirlDBConnection.open('wss://example/ws', 'alice', sessionToken);
 const pattern = await connection.openDocument('pattern.7');   // rejects if refused
 const palette = await connection.openDocument('palette.3');   // same socket
 pattern.data.source = '...';
@@ -107,22 +107,36 @@ pattern.syncChanges();
 pattern.sendPresence('alice', { cursor: 42 });               // per document, ephemeral
 ```
 
-**Who may open a document is decided by an `Authority`**, a server trait with
-one question: `may_open(subject, document) -> Read | Write | None`. Three
+**Who a connection is, and what it may open, is decided by an `Authority`**,
+a server trait with two questions. `subject(token, client_id) -> Actor | None`
+is asked once per connection, about the bearer token it presented on the
+WebSocket upgrade; `may_open(subject, document) -> Read | Write | None` is
+asked once per open, about the subject the first answer named. Three
 implementations ship:
 
 | Authority | When |
 |---|---|
-| `OpenToAll` | The default. Every document open to every client — a laptop, a demo, the test suite |
-| `PolicyAuthority` | The policy file *is* where access is decided; rules are written over document ids |
-| `HttpAuthority` | An application owns membership. `POST <AUTHORITY_URL>/may-open` with `{"subject": <actor>, "document": "<id>"}` is answered `{"access": "read" \| "write" \| "none"}`; answers are cached ten seconds; an unreachable authority refuses |
+| `OpenToAll` | The default. Every connection is whoever it says it is and every document is open to it — a laptop, a demo, the test suite. It says so in the log |
+| `PolicyAuthority` | The policy file *is* where access is decided; rules are written over document ids. A policy file knows no sessions, so connections under it are anonymous and self-named, and its rules are written for `Anonymous` or `Any` |
+| `HttpAuthority` | An application owns sessions and membership. `POST <AUTHORITY_URL>/whoami` with `{"token": "…"}` is answered `{"subject": {"actor_type": "User", "id": "…"}}` or `401`; `POST <AUTHORITY_URL>/may-open` with `{"subject": <actor>, "document": "<id>"}` is answered `{"access": "read" \| "write" \| "none"}`. Both answers are cached ten seconds; a connection without a token is refused; an unreachable authority refuses everything |
 
-The rule this protects is that access is **derived here and authored there**.
-Two places that both know who may read a document disagree eventually, and
-when they do the disagreement is a disclosure. So SwirlDB never carries a copy
-of an application's membership; it asks, briefly remembers, and enforces: a
-reader receives the document and may send presence, but its `Push` is
-refused; a refused subject never receives the history. See
+The token travels on the upgrade, not in a message: `Authorization: Bearer …`
+from the Rust client (`SyncClient::open_authenticated`), or a `token` query
+parameter from the browser, whose `WebSocket` cannot set a header. The header
+is the right instrument and wins when both are present; the query parameter
+is the concession a browser needs. The `client_id` in `Connect` names the
+connection for routing and is believed about nothing else: a connection
+calling itself `alice` on `bob`'s token is `bob` to every `may-open`.
+
+The rule this protects is that identity and access are **derived here and
+authored there**. Two places that both know who may read a document disagree
+eventually, and when they do the disagreement is a disclosure; a subject the
+client named for itself is a subject anyone can name, and a decision about it
+protects nothing. So SwirlDB never carries a copy of an application's sessions
+or membership; it asks, briefly remembers, and enforces: a reader receives the
+document and may send presence, but its `Push` is refused; a refused subject
+never receives the history; an unauthenticated connection is told
+`OpenDenied` on the document it asked for and closed. See
 `native/swirldb-server/src/authority.rs`.
 
 What stays single-document: server-to-server peer sync (`connect_to_peer`,

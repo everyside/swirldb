@@ -391,13 +391,17 @@ var SwirlDB = class _SwirlDB {
    * @param url - WebSocket URL (e.g., 'ws://demo.swirldb.org:3030/ws')
    * @param clientId - Unique client identifier
    * @param subscriptions - Array of subscription patterns (e.g., ['/**'])
+   * @param token - Bearer token the server's authority verifies to learn who
+   *   this connection is. Sent as a `token` query parameter, since a browser
+   *   WebSocket cannot carry a header. A server with an authority refuses a
+   *   connection without one.
    *
    * @example
-   * db.connect('ws://demo.swirldb.org:3030/ws', 'alice', ['/**']);
+   * db.connect('ws://demo.swirldb.org:3030/ws', 'alice', ['/**'], sessionToken);
    */
-  connect(url, clientId, subscriptions) {
+  connect(url, clientId, subscriptions, token) {
     if (typeof this.wasmDB.connect === "function") {
-      this.wasmDB.connect(url, clientId, subscriptions);
+      this.wasmDB.connect(url, clientId, subscriptions, token);
     } else {
       throw new Error("connect() not available in WASM layer");
     }
@@ -457,11 +461,18 @@ var SwirlDBConnection = class _SwirlDBConnection {
   constructor(connection) {
     this.connection = connection;
   }
-  /** Open a socket to `url` as `clientId`. Nothing is sent until the first document. */
-  static async open(url, clientId) {
+  /**
+   * Open a socket to `url` as `clientId`. Nothing is sent until the first
+   * document. `token` is the bearer token the server's authority verifies to
+   * learn who this connection is — the subject every `may-open` is asked
+   * about — sent as a `token` query parameter because a browser WebSocket
+   * cannot carry a header. A server with an authority refuses a connection
+   * without one; `clientId` is only a name.
+   */
+  static async open(url, clientId, token) {
     await ensureWasmInit();
     const { Connection: WasmConnection } = await import("./wasm/swirldb_browser.js");
-    return new _SwirlDBConnection(new WasmConnection(url, clientId));
+    return new _SwirlDBConnection(new WasmConnection(url, clientId, token));
   }
   /**
    * Open a document. Resolves once the server has sent its history; rejects

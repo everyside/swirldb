@@ -221,14 +221,22 @@ fn default_log_format() -> String {
 // Runtime Actor Model
 // =============================================================================
 
+/// Who is acting. Serialized as it is, and deserialized leniently: an
+/// authority answering `whoami` need only say the type and the id, and
+/// everything else defaults to absent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Actor {
     pub actor_type: ActorType,
     pub id: String,
+    #[serde(default)]
     pub org_id: Option<String>,
+    #[serde(default)]
     pub team_id: Option<String>,
+    #[serde(default)]
     pub app_id: Option<String>,
+    #[serde(default)]
     pub role: Option<String>,
+    #[serde(default)]
     pub claims: HashMap<String, serde_json::Value>,
 }
 

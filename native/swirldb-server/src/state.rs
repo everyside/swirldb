@@ -516,6 +516,12 @@ impl ServerState {
         }
     }
 
+    /// Who a connection is, per the authority. `None` refuses it: nothing
+    /// should be registered for a connection the authority does not know.
+    pub async fn authenticate(&self, token: Option<&str>, client_id: &str) -> Option<Actor> {
+        self.authority.subject(token, client_id).await
+    }
+
     /// Register a client connection. Documents are opened separately with
     /// [`Self::open_document`].
     pub async fn register_client(

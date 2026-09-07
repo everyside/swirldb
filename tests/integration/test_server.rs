@@ -7,11 +7,13 @@
 
 use anyhow::Result;
 use axum::{
-    extract::{ws::WebSocketUpgrade, State as AxumState},
+    extract::{ws::WebSocketUpgrade, Query, State as AxumState},
+    http::HeaderMap,
     response::Response,
     routing::get,
     Router,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 use swirldb_core::storage::InMemoryDocStorage;
 use swirldb_server::authority::{Authority, OpenToAll};
@@ -126,9 +128,12 @@ impl Drop for TestServer {
 /// WebSocket upgrade handler — delegates to the shared handler in swirldb_server
 async fn websocket_handler(
     ws: WebSocketUpgrade,
+    headers: HeaderMap,
+    Query(query): Query<HashMap<String, String>>,
     AxumState(state): AxumState<ServerState>,
 ) -> Response {
-    ws.on_upgrade(|socket| swirldb_server::handler::handle_websocket(socket, state))
+    let token = swirldb_server::handler::bearer_token(&headers, &query);
+    ws.on_upgrade(move |socket| swirldb_server::handler::handle_websocket(socket, state, token))
 }
 
 #[cfg(test)]

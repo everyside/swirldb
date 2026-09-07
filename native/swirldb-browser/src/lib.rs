@@ -467,10 +467,32 @@ fn handle_for(connection_id: usize, document: &str) -> Option<usize> {
     })
 }
 
+/// The URL a socket is opened at: `url`, with the bearer token as a `token`
+/// query parameter when there is one.
+///
+/// A browser's WebSocket cannot carry an `Authorization` header — the
+/// constructor takes a URL and nothing else — so the token rides in the
+/// query string, which the server accepts for exactly this reason. It is
+/// encoded so nothing in it can be read as URL structure.
+fn url_with_token(url: &str, token: Option<&str>) -> String {
+    match token.filter(|token| !token.is_empty()) {
+        Some(token) => {
+            let separator = if url.contains('?') { '&' } else { '?' };
+            let encoded: String = js_sys::encode_uri_component(token).into();
+            format!("{}{}token={}", url, separator, encoded)
+        }
+        None => url.to_string(),
+    }
+}
+
 /// Open a WebSocket and register the connection. Nothing is sent until a
 /// document is opened on it; a connection exists to carry documents.
-fn create_connection(url: &str, client_id: String) -> Result<usize, JsValue> {
-    let ws = WebSocket::new(url)
+fn create_connection(
+    url: &str,
+    client_id: String,
+    token: Option<&str>,
+) -> Result<usize, JsValue> {
+    let ws = WebSocket::new(&url_with_token(url, token))
         .map_err(|e| JsValue::from_str(&format!("Failed to create WebSocket: {:?}", e)))?;
     ws.set_binary_type(BinaryType::Arraybuffer);
 
@@ -597,7 +619,7 @@ fn open_on(
 /// One WebSocket to a server, carrying any number of documents.
 ///
 /// ```javascript
-/// const connection = new Connection('ws://localhost:3030/ws', 'alice');
+/// const connection = new Connection('ws://localhost:3030/ws', 'alice', sessionToken);
 /// const pattern = await connection.openDocument('pattern.7');
 /// const palette = await connection.openDocument('palette.3');
 /// pattern.setPath('source', '...'); pattern.syncChanges();
@@ -611,11 +633,17 @@ pub struct Connection {
 #[wasm_bindgen]
 impl Connection {
     /// Open a socket to `url` as `client_id`. Nothing is sent until the first
-    /// `openDocument`.
+    /// `openDocument`. `token` is the bearer token the server's authority
+    /// verifies to learn who this connection is; a server with an authority
+    /// refuses a connection without one, and `client_id` is only a name.
     #[wasm_bindgen(constructor)]
-    pub fn new(url: String, client_id: String) -> Result<Connection, JsValue> {
+    pub fn new(
+        url: String,
+        client_id: String,
+        token: Option<String>,
+    ) -> Result<Connection, JsValue> {
         console_error_panic_hook::set_once();
-        let id = create_connection(&url, client_id.clone())?;
+        let id = create_connection(&url, client_id.clone(), token.as_deref())?;
         Ok(Connection { id, client_id })
     }
 
@@ -1276,6 +1304,9 @@ impl SwirlDB {
     /// the single-document API: one `SwirlDB`, one connection, the default
     /// document. For several documents on one connection use `Connection`.
     ///
+    /// `token`, when given, is the bearer token the server's authority
+    /// verifies to learn who this connection is.
+    ///
     /// Example:
     /// ```javascript
     /// db.connect('ws://localhost:3030/ws', 'alice', ['**']);
@@ -1288,11 +1319,12 @@ impl SwirlDB {
         url: String,
         client_id: String,
         subscriptions: Vec<String>,
+        token: Option<String>,
     ) -> Result<(), JsValue> {
         if self.connection.get().is_some() {
             return Err(JsValue::from_str("Already connected"));
         }
-        let connection_id = create_connection(&url, client_id)?;
+        let connection_id = create_connection(&url, client_id, token.as_deref())?;
         open_on(
             connection_id,
             &self.document,
@@ -1792,6 +1824,20 @@ mod tests {
         let db = SwirlDB::new();
         assert_eq!(db.document(), DEFAULT_DOCUMENT);
         assert!(db.access().is_null());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_token_rides_in_the_query_string() {
+        assert_eq!(url_with_token("ws://h/ws", None), "ws://h/ws");
+        assert_eq!(url_with_token("ws://h/ws", Some("")), "ws://h/ws");
+        assert_eq!(
+            url_with_token("ws://h/ws", Some("a b&c")),
+            "ws://h/ws?token=a%20b%26c"
+        );
+        assert_eq!(
+            url_with_token("ws://h/ws?room=1", Some("t")),
+            "ws://h/ws?room=1&token=t"
+        );
     }
 
     #[wasm_bindgen_test]

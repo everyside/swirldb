@@ -40,6 +40,7 @@ Environment variables:
 |----------|---------|-------------|
 | `PORT` | 3030 | WebSocket server port |
 | `RUST_LOG` | (none) | Log level: `error`, `warn`, `info`, `debug`, `trace` |
+| `AUTHORITY_URL` | (none) | Base URL of the application that answers `POST /whoami` (whose token is this) and `POST /may-open` (may this subject open this document). Without it every connection is whoever it says it is and every document is open to it, and the log says so |
 
 ## Endpoints
 
@@ -47,7 +48,15 @@ Environment variables:
 
 ```
 ws://localhost:3030/ws
+ws://localhost:3030/ws?token=<bearer token>
 ```
+
+A connection identifies itself on the upgrade, with `Authorization: Bearer <token>`
+or, from a browser that cannot set a header, the `token` query parameter. With
+`AUTHORITY_URL` set the authority is asked whose token it is, and that subject —
+not the `client_id` the connection names in `Connect` — is what every access
+decision is about; a connection without a token the authority knows is answered
+`OpenDenied` and closed.
 
 Binary protocol for real-time sync. Message types:
 

@@ -1,14 +1,22 @@
 // Copyright 2025 Everyside Innovations, LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//! Who may open which document.
+//! Who a connection is, and which documents it may open.
 //!
 //! SwirlDB enforces access to documents; it does not decide it. The decision
 //! belongs to whatever owns membership — an application's own database, a
-//! policy file, nobody at all — and it is asked one question, at one moment:
-//! when a subject asks to open a document. The answer is `Read`, `Write`, or
-//! `None`, and the server holds the connection to it from then on: a reader's
-//! `Push` is refused, a refused subject never receives the history.
+//! policy file, nobody at all — and it is asked two questions. First, once
+//! per connection: who is this? A connection presents a bearer token on its
+//! WebSocket upgrade, and the authority says whose it is, or that it is
+//! nobody's. Then, once per open: may this subject open this document? The
+//! answer is `Read`, `Write`, or `None`, and the server holds the connection
+//! to it from then on: a reader's `Push` is refused, a refused subject never
+//! receives the history.
+//!
+//! The first question is what makes the second one worth asking. A subject
+//! the client named for itself is a subject anyone can name, and an access
+//! decision about it protects nothing. So where there is an authority, the
+//! subject is what the authority says and nothing the client sent.
 //!
 //! This is the seam between two stores that both know about access, and the
 //! rule for it is that the answer is *derived* here and *authored* there. A
@@ -23,17 +31,40 @@
 use async_trait::async_trait;
 use dashmap::DashMap;
 use std::time::{Duration, Instant};
-use swirldb_core::policy::{Action, Actor, PolicyEngine};
+use swirldb_core::policy::{Action, Actor, ActorType, PolicyEngine};
 use swirldb_core::protocol::Access;
 use tracing::warn;
 
-/// Decides whether a subject may open a document, and how.
+/// Decides who a connection is and whether a subject may open a document.
 #[async_trait]
 pub trait Authority: Send + Sync {
+    /// Who a connection is. `token` is the bearer token it presented on the
+    /// upgrade, if any; `client_id` is the name it gave itself in `Connect`,
+    /// which is a routing label, not an identity. `None` refuses the
+    /// connection before any document is opened on it.
+    async fn subject(&self, token: Option<&str>, client_id: &str) -> Option<Actor>;
+
     /// `Some(Read)` opens the document read-only, `Some(Write)` opens it for
-    /// editing, `None` refuses. The subject is whoever the connection
-    /// authenticated as; the document is its id, opaque to SwirlDB.
+    /// editing, `None` refuses. The subject is whoever [`Self::subject`]
+    /// said the connection is; the document is its id, opaque to SwirlDB.
     async fn may_open(&self, subject: &Actor, document: &str) -> Option<Access>;
+}
+
+/// The subject a connection gets when nobody can verify one: anonymous,
+/// carrying the id the client chose for itself. This is what every
+/// connection was before authentication existed, and it is still right for
+/// a laptop and a demo — as long as it is never mistaken for a fact about
+/// who is on the other end.
+pub fn self_asserted(client_id: &str) -> Actor {
+    Actor {
+        actor_type: ActorType::Anonymous,
+        id: client_id.to_string(),
+        org_id: None,
+        team_id: None,
+        app_id: None,
+        role: None,
+        claims: Default::default(),
+    }
 }
 
 /// Everyone may write everything.
@@ -45,6 +76,21 @@ pub struct OpenToAll;
 
 #[async_trait]
 impl Authority for OpenToAll {
+    async fn subject(&self, token: Option<&str>, client_id: &str) -> Option<Actor> {
+        if token.is_some() {
+            warn!(
+                "{} presented a token, but with no authority configured nothing can verify it",
+                client_id
+            );
+        } else {
+            warn!(
+                "No authority configured: {} is whoever it says it is",
+                client_id
+            );
+        }
+        Some(self_asserted(client_id))
+    }
+
     async fn may_open(&self, _subject: &Actor, _document: &str) -> Option<Access> {
         Some(Access::Write)
     }
@@ -69,6 +115,19 @@ impl PolicyAuthority {
 
 #[async_trait]
 impl Authority for PolicyAuthority {
+    /// A policy file knows rules, not sessions, so it cannot say whose a
+    /// token is. Connections under it are self-asserted and anonymous, and
+    /// its rules should be written for `Anonymous` or `Any` actors.
+    async fn subject(&self, token: Option<&str>, client_id: &str) -> Option<Actor> {
+        if token.is_some() {
+            warn!(
+                "{} presented a token, but a policy file cannot verify one; the connection is anonymous",
+                client_id
+            );
+        }
+        Some(self_asserted(client_id))
+    }
+
     async fn may_open(&self, subject: &Actor, document: &str) -> Option<Access> {
         if self
             .engine
@@ -88,7 +147,20 @@ impl Authority for PolicyAuthority {
     }
 }
 
-/// What `HttpAuthority` sends.
+/// What `HttpAuthority` sends to `/whoami`.
+#[derive(Debug, serde::Serialize)]
+struct WhoAmIRequest<'a> {
+    token: &'a str,
+}
+
+/// What `HttpAuthority` expects back from `/whoami`: `{"subject": <actor>}`,
+/// where the actor need carry only `actor_type` and `id`.
+#[derive(Debug, serde::Deserialize)]
+struct WhoAmIResponse {
+    subject: Actor,
+}
+
+/// What `HttpAuthority` sends to `/may-open`.
 #[derive(Debug, serde::Serialize)]
 struct MayOpenRequest<'a> {
     subject: &'a Actor,
@@ -119,19 +191,28 @@ impl From<AccessAnswer> for Option<Access> {
     }
 }
 
-/// Asks the owning application: `POST <endpoint>/may-open` with
-/// `{"subject": <actor>, "document": "<id>"}`, answered by
-/// `{"access": "read" | "write" | "none"}`.
+/// Asks the owning application two questions over HTTP.
 ///
-/// Answers are cached per (subject, document) for a short time — ten seconds
-/// by default — so an editor that reconnects or opens the same document twice
-/// does not cost the application a query each time, while a revoked
-/// membership takes effect within that window rather than never. Anything
-/// that is not a well-formed `200` is a refusal: an authority that is down
-/// must not open documents, because failing open here is a disclosure.
+/// `POST <endpoint>/whoami` with `{"token": "<bearer token>"}` is answered by
+/// `{"subject": <actor>}` — at least `{"actor_type": "User", "id": "…"}` —
+/// or by `401` for a token the application does not recognize. A connection
+/// that presents no token is refused without asking: under this authority
+/// there is no such thing as an anonymous connection.
+///
+/// `POST <endpoint>/may-open` with `{"subject": <actor>, "document": "<id>"}`
+/// is answered by `{"access": "read" | "write" | "none"}`.
+///
+/// Both answers are cached for a short time — ten seconds by default: whoami
+/// per token, may-open per (subject, document) — so an editor that reconnects
+/// or opens the same document twice does not cost the application a query
+/// each time, while a revoked session or membership takes effect within that
+/// window rather than never. Anything that is not a well-formed `200` is a
+/// refusal: an authority that is down must not admit connections or open
+/// documents, because failing open here is a disclosure.
 pub struct HttpAuthority {
     endpoint: String,
     client: reqwest::Client,
+    subjects: DashMap<String, (Option<Actor>, Instant)>,
     cache: DashMap<(String, String), (Option<Access>, Instant)>,
     time_to_live: Duration,
 }
@@ -154,8 +235,67 @@ impl HttpAuthority {
                 .timeout(Duration::from_secs(5))
                 .build()
                 .expect("an HTTP client with a timeout builds"),
+            subjects: DashMap::new(),
             cache: DashMap::new(),
             time_to_live,
+        }
+    }
+
+    fn cached_subject(&self, token: &str) -> Option<Option<Actor>> {
+        let entry = self.subjects.get(token)?;
+        let (subject, asked_at) = &*entry;
+        if asked_at.elapsed() < self.time_to_live {
+            Some(subject.clone())
+        } else {
+            None
+        }
+    }
+
+    fn remember_subject(&self, token: &str, subject: Option<Actor>) {
+        if self.subjects.len() >= CACHE_SWEEP_THRESHOLD {
+            let time_to_live = self.time_to_live;
+            self.subjects
+                .retain(|_, (_, asked_at)| asked_at.elapsed() < time_to_live);
+        }
+        self.subjects
+            .insert(token.to_string(), (subject, Instant::now()));
+    }
+
+    async fn ask_who(&self, token: &str) -> Option<Actor> {
+        let url = format!("{}/whoami", self.endpoint);
+        let response = match self
+            .client
+            .post(&url)
+            .json(&WhoAmIRequest { token })
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                warn!(
+                    "Authority at {} unreachable, refusing connection: {}",
+                    url, error
+                );
+                return None;
+            }
+        };
+        if !response.status().is_success() {
+            warn!(
+                "Authority at {} answered {}, refusing connection",
+                url,
+                response.status()
+            );
+            return None;
+        }
+        match response.json::<WhoAmIResponse>().await {
+            Ok(answer) => Some(answer.subject),
+            Err(error) => {
+                warn!(
+                    "Authority at {} answered badly, refusing connection: {}",
+                    url, error
+                );
+                None
+            }
         }
     }
 
@@ -217,6 +357,19 @@ impl HttpAuthority {
 
 #[async_trait]
 impl Authority for HttpAuthority {
+    async fn subject(&self, token: Option<&str>, client_id: &str) -> Option<Actor> {
+        let Some(token) = token else {
+            warn!("{} presented no token; refusing the connection", client_id);
+            return None;
+        };
+        if let Some(subject) = self.cached_subject(token) {
+            return subject;
+        }
+        let subject = self.ask_who(token).await;
+        self.remember_subject(token, subject.clone());
+        subject
+    }
+
     async fn may_open(&self, subject: &Actor, document: &str) -> Option<Access> {
         let key = (subject.id.clone(), document.to_string());
         if let Some(answer) = self.cached(&key) {
@@ -251,6 +404,46 @@ mod tests {
             OpenToAll.may_open(&user("alice"), "anything").await,
             Some(Access::Write)
         );
+    }
+
+    #[tokio::test]
+    async fn open_to_all_takes_a_connection_at_its_word() {
+        let subject = OpenToAll.subject(None, "whoever").await.unwrap();
+        assert_eq!(subject.actor_type, ActorType::Anonymous);
+        assert_eq!(subject.id, "whoever");
+        // A token changes nothing: there is nobody to verify it.
+        let with_token = OpenToAll.subject(Some("t"), "whoever").await.unwrap();
+        assert_eq!(with_token.id, "whoever");
+    }
+
+    #[tokio::test]
+    async fn http_authority_refuses_a_connection_without_a_token() {
+        let authority = HttpAuthority::new("http://127.0.0.1:9/nowhere");
+        assert!(authority.subject(None, "alice").await.is_none());
+        // And one whose token it cannot verify.
+        assert!(authority.subject(Some("token"), "alice").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn http_authority_caches_subjects_within_time_to_live() {
+        let authority =
+            HttpAuthority::with_time_to_live("http://127.0.0.1:9/nowhere", Duration::from_secs(60));
+        authority.remember_subject("alice-token", Some(user("alice")));
+        assert_eq!(
+            authority
+                .subject(Some("alice-token"), "anything")
+                .await
+                .map(|subject| subject.id),
+            Some("alice".to_string())
+        );
+
+        let expired =
+            HttpAuthority::with_time_to_live("http://127.0.0.1:9/nowhere", Duration::ZERO);
+        expired.remember_subject("alice-token", Some(user("alice")));
+        assert!(expired
+            .subject(Some("alice-token"), "anything")
+            .await
+            .is_none());
     }
 
     #[tokio::test]

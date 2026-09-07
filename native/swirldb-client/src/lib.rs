@@ -12,6 +12,8 @@
 //! - Full CRDT sync handshake (Connect -> SubscribeAck -> Sync)
 //! - One document per client: `connect` opens the default document,
 //!   `open` names one; the server may answer read-only or refuse
+//! - A bearer token on the upgrade (`open_authenticated`), which is how a
+//!   server with an authority learns who the client is
 //! - Path-based reads/writes via Automerge
 //! - Text: `set_text` creates one, `splice_text` edits it in place, and
 //!   `on_text_change` reports every edit as splices with positions
@@ -44,6 +46,8 @@ use swirldb_core::core::{SwirlDB, TextChange};
 use swirldb_core::protocol::{Access, Message, DEFAULT_DOCUMENT};
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio::time::{timeout, Duration};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::{header::AUTHORIZATION, HeaderValue};
 use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -160,11 +164,57 @@ impl SyncClient {
         document: &str,
         subscriptions: Vec<String>,
     ) -> Result<Self> {
+        Self::establish(url, client_id, None, document, subscriptions).await
+    }
+
+    /// Connect with a bearer token and open the named document.
+    ///
+    /// The token goes in the `Authorization` header of the WebSocket upgrade,
+    /// and the server's authority says whose it is; that, not the client id,
+    /// is the subject every `may-open` is asked about. A server with an
+    /// authority refuses a connection that brings no token.
+    pub async fn open_authenticated(
+        url: &str,
+        token: &str,
+        document: &str,
+        subscriptions: Vec<String>,
+    ) -> Result<Self> {
+        let client_id = format!("rust-client-{}", Uuid::new_v4());
+        Self::establish(url, &client_id, Some(token), document, subscriptions).await
+    }
+
+    /// Connect with a specific client ID and a bearer token, and open the
+    /// named document.
+    pub async fn open_authenticated_with_id(
+        url: &str,
+        client_id: &str,
+        token: &str,
+        document: &str,
+        subscriptions: Vec<String>,
+    ) -> Result<Self> {
+        Self::establish(url, client_id, Some(token), document, subscriptions).await
+    }
+
+    async fn establish(
+        url: &str,
+        client_id: &str,
+        token: Option<&str>,
+        document: &str,
+        subscriptions: Vec<String>,
+    ) -> Result<Self> {
         let client_id = client_id.to_string();
         let document = document.to_string();
         let db = Arc::new(RwLock::new(SwirlDB::new()));
 
-        let (ws_stream, _) = connect_async(url).await?;
+        let mut request = url.into_client_request()?;
+        if let Some(token) = token {
+            request.headers_mut().insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {}", token))
+                    .map_err(|_| anyhow::anyhow!("The token is not a valid header value"))?,
+            );
+        }
+        let (ws_stream, _) = connect_async(request).await?;
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
 
         // Channel for sending messages to the WebSocket from any thread

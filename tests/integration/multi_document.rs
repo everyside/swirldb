@@ -206,10 +206,34 @@ async fn a_reader_may_receive_but_not_write() {
     server.shutdown().await.unwrap();
 }
 
-/// A stand-in for the application that owns membership: answers
-/// `POST /may-open` from a table, and counts how often it was asked.
+/// A stand-in for the application that owns sessions and membership:
+/// answers `POST /whoami` from a token table and `POST /may-open` from an
+/// access table, and records what it was asked.
 struct FakeApplication {
     asked: AtomicUsize,
+    whoami_asked: AtomicUsize,
+    /// The subject ids `may-open` was asked about, in order
+    subjects_asked: std::sync::Mutex<Vec<String>>,
+}
+
+#[derive(serde::Deserialize)]
+struct WhoAmI {
+    token: String,
+}
+
+async fn whoami(
+    State(application): State<Arc<FakeApplication>>,
+    Json(request): Json<WhoAmI>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    application.whoami_asked.fetch_add(1, Ordering::SeqCst);
+    let id = match request.token.as_str() {
+        "alice-token" => "alice",
+        "bob-token" => "bob",
+        _ => return Err(axum::http::StatusCode::UNAUTHORIZED),
+    };
+    Ok(Json(serde_json::json!({
+        "subject": { "actor_type": "User", "id": id }
+    })))
 }
 
 #[derive(serde::Deserialize)]
@@ -224,6 +248,11 @@ async fn may_open(
 ) -> Json<serde_json::Value> {
     application.asked.fetch_add(1, Ordering::SeqCst);
     let subject = request.subject["id"].as_str().unwrap_or_default();
+    application
+        .subjects_asked
+        .lock()
+        .unwrap()
+        .push(subject.to_string());
     let access = match (subject, request.document.as_str()) {
         ("alice", "draft.1") => "write",
         (_, "draft.1") => "read",
@@ -235,8 +264,11 @@ async fn may_open(
 async fn serve_fake_application() -> (String, Arc<FakeApplication>) {
     let application = Arc::new(FakeApplication {
         asked: AtomicUsize::new(0),
+        whoami_asked: AtomicUsize::new(0),
+        subjects_asked: std::sync::Mutex::new(Vec::new()),
     });
     let router = Router::new()
+        .route("/authority/whoami", post(whoami))
         .route("/authority/may-open", post(may_open))
         .with_state(application.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -247,20 +279,24 @@ async fn serve_fake_application() -> (String, Arc<FakeApplication>) {
     (format!("http://{}/authority", address), application)
 }
 
-#[tokio::test]
-async fn the_http_authority_asks_the_application_and_caches_briefly() {
-    init_test_logging();
+async fn server_with_fake_application() -> (TestServer, Arc<FakeApplication>) {
     let (endpoint, application) = serve_fake_application().await;
     let authority = Arc::new(HttpAuthority::with_time_to_live(
         endpoint,
         Duration::from_secs(30),
     ));
     let server = TestServer::start_with_authority(authority).await.unwrap();
+    (server, application)
+}
 
-    // The handler's subject is the client id until JWTs are wired in.
-    let alice = swirldb_client::SyncClient::open_with_id(
+#[tokio::test]
+async fn the_http_authority_asks_the_application_and_caches_briefly() {
+    init_test_logging();
+    let (server, application) = server_with_fake_application().await;
+
+    let alice = swirldb_client::SyncClient::open_authenticated(
         &server.ws_url(),
-        "alice",
+        "alice-token",
         "draft.1",
         everything(),
     )
@@ -268,15 +304,19 @@ async fn the_http_authority_asks_the_application_and_caches_briefly() {
     .unwrap();
     assert_eq!(alice.access(), Access::Write);
 
-    let bob =
-        swirldb_client::SyncClient::open_with_id(&server.ws_url(), "bob", "draft.1", everything())
-            .await
-            .unwrap();
+    let bob = swirldb_client::SyncClient::open_authenticated(
+        &server.ws_url(),
+        "bob-token",
+        "draft.1",
+        everything(),
+    )
+    .await
+    .unwrap();
     assert_eq!(bob.access(), Access::Read);
 
-    let stranger = swirldb_client::SyncClient::open_with_id(
+    let stranger = swirldb_client::SyncClient::open_authenticated(
         &server.ws_url(),
-        "carol",
+        "bob-token",
         "draft.2",
         everything(),
     )
@@ -284,11 +324,12 @@ async fn the_http_authority_asks_the_application_and_caches_briefly() {
     assert!(stranger.is_err());
     assert_eq!(application.asked.load(Ordering::SeqCst), 3);
 
-    // Alice again, within the cache window: the application is not asked.
+    // Alice again, within the cache window: the application is not asked,
+    // about her token or about her access.
     drop(alice);
-    let alice_again = swirldb_client::SyncClient::open_with_id(
+    let alice_again = swirldb_client::SyncClient::open_authenticated(
         &server.ws_url(),
-        "alice",
+        "alice-token",
         "draft.1",
         everything(),
     )
@@ -296,6 +337,75 @@ async fn the_http_authority_asks_the_application_and_caches_briefly() {
     .unwrap();
     assert_eq!(alice_again.access(), Access::Write);
     assert_eq!(application.asked.load(Ordering::SeqCst), 3);
+    assert_eq!(application.whoami_asked.load(Ordering::SeqCst), 2);
+
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_valid_token_yields_the_authority_subject_in_may_open() {
+    init_test_logging();
+    let (server, application) = server_with_fake_application().await;
+
+    // The client calls itself "alice" but carries bob's token. The subject
+    // the application is asked about is bob, and bob may only read.
+    let pretender = swirldb_client::SyncClient::open_authenticated_with_id(
+        &server.ws_url(),
+        "alice",
+        "bob-token",
+        "draft.1",
+        everything(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(pretender.access(), Access::Read);
+    assert_eq!(
+        *application.subjects_asked.lock().unwrap(),
+        vec!["bob".to_string()]
+    );
+
+    // And the claim buys nothing at write time either.
+    let mut errors = pretender.on_error();
+    pretender
+        .set_path("title", ScalarValue::Str("Defaced".into()))
+        .await
+        .unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(2), errors.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(error.contains("may not write draft.1"), "{}", error);
+
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_connection_the_authority_does_not_know_is_refused() {
+    init_test_logging();
+    let (server, application) = server_with_fake_application().await;
+
+    // No token at all: refused without troubling the application.
+    let unnamed = RustClient::open(&server.ws_url(), "draft.1", everything()).await;
+    let message = unnamed.err().expect("no token is refused").to_string();
+    assert!(message.contains("not authenticated"), "{}", message);
+    assert_eq!(application.whoami_asked.load(Ordering::SeqCst), 0);
+
+    // A token the application does not recognize: refused, and the refusal
+    // is remembered so a second try does not ask again.
+    for _ in 0..2 {
+        let forged = swirldb_client::SyncClient::open_authenticated_with_id(
+            &server.ws_url(),
+            "alice",
+            "forged-token",
+            "draft.1",
+            everything(),
+        )
+        .await;
+        let message = forged.err().expect("a forged token is refused").to_string();
+        assert!(message.contains("not authenticated"), "{}", message);
+    }
+    assert_eq!(application.whoami_asked.load(Ordering::SeqCst), 1);
+    assert_eq!(application.asked.load(Ordering::SeqCst), 0);
 
     server.shutdown().await.unwrap();
 }
@@ -308,5 +418,13 @@ async fn an_unreachable_http_authority_refuses_everything() {
     assert!(RustClient::open(&server.ws_url(), "draft.1", everything())
         .await
         .is_err());
+    assert!(swirldb_client::SyncClient::open_authenticated(
+        &server.ws_url(),
+        "alice-token",
+        "draft.1",
+        everything()
+    )
+    .await
+    .is_err());
     server.shutdown().await.unwrap();
 }

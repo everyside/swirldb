@@ -501,13 +501,17 @@ export class SwirlDB {
    * @param url - WebSocket URL (e.g., 'ws://demo.swirldb.org:3030/ws')
    * @param clientId - Unique client identifier
    * @param subscriptions - Array of subscription patterns (e.g., ['/**'])
+   * @param token - Bearer token the server's authority verifies to learn who
+   *   this connection is. Sent as a `token` query parameter, since a browser
+   *   WebSocket cannot carry a header. A server with an authority refuses a
+   *   connection without one.
    *
    * @example
-   * db.connect('ws://demo.swirldb.org:3030/ws', 'alice', ['/**']);
+   * db.connect('ws://demo.swirldb.org:3030/ws', 'alice', ['/**'], sessionToken);
    */
-  connect(url: string, clientId: string, subscriptions: string[]): void {
+  connect(url: string, clientId: string, subscriptions: string[], token?: string): void {
     if (typeof this.wasmDB.connect === 'function') {
-      this.wasmDB.connect(url, clientId, subscriptions);
+      this.wasmDB.connect(url, clientId, subscriptions, token);
     } else {
       throw new Error('connect() not available in WASM layer');
     }
@@ -578,7 +582,7 @@ export class SwirlDB {
  * another, and presence sent on one stays on it.
  *
  * @example
- * const connection = await SwirlDBConnection.open('ws://localhost:3030/ws', 'alice');
+ * const connection = await SwirlDBConnection.open('ws://localhost:3030/ws', 'alice', sessionToken);
  * const pattern = await connection.openDocument('pattern.7');
  * const palette = await connection.openDocument('palette.3');
  * pattern.data.source = '...';
@@ -587,11 +591,18 @@ export class SwirlDB {
 export class SwirlDBConnection {
   private constructor(private connection: WasmConnection) {}
 
-  /** Open a socket to `url` as `clientId`. Nothing is sent until the first document. */
-  static async open(url: string, clientId: string): Promise<SwirlDBConnection> {
+  /**
+   * Open a socket to `url` as `clientId`. Nothing is sent until the first
+   * document. `token` is the bearer token the server's authority verifies to
+   * learn who this connection is — the subject every `may-open` is asked
+   * about — sent as a `token` query parameter because a browser WebSocket
+   * cannot carry a header. A server with an authority refuses a connection
+   * without one; `clientId` is only a name.
+   */
+  static async open(url: string, clientId: string, token?: string): Promise<SwirlDBConnection> {
     await ensureWasmInit();
     const { Connection: WasmConnection } = await import('./wasm/swirldb_browser.js');
-    return new SwirlDBConnection(new WasmConnection(url, clientId));
+    return new SwirlDBConnection(new WasmConnection(url, clientId, token));
   }
 
   /**

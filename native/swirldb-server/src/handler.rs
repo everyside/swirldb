@@ -8,16 +8,45 @@
 //! `Close` drops one. Every `Push`, `Broadcast` and ephemeral frame names its
 //! document, and the server routes each to that document's subscribers only.
 //!
+//! Who the connection *is* comes from the bearer token it presented on the
+//! WebSocket upgrade, verified by the server's authority at `Connect`. The
+//! `client_id` in `Connect` names the connection for routing; it is not
+//! believed about anything else.
+//!
 //! Shared between the production server and integration test infrastructure.
 
 use crate::state::{BroadcastMessage, EphemeralMessage, OpenError, ServerState};
 use axum::extract::ws::{Message as WsMessage, WebSocket};
+use axum::http::{header::AUTHORIZATION, HeaderMap};
 use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
-use swirldb_core::policy::{Actor, ActorType};
+use std::collections::HashMap;
 use swirldb_core::protocol::Message;
 use tracing::{error, info, warn};
 use uuid::Uuid;
+
+/// The bearer token a WebSocket upgrade carried, if any.
+///
+/// The `Authorization: Bearer …` header is the right instrument: it is what
+/// every HTTP client sends credentials in, and it never appears in a URL, so
+/// it stays out of access logs, proxy logs and browser history. A browser
+/// cannot set it — the WebSocket constructor takes a URL and nothing else —
+/// so a `token` query parameter is accepted as well, and that is what the
+/// browser bindings send. The header wins when both are present.
+pub fn bearer_token(headers: &HeaderMap, query: &HashMap<String, String>) -> Option<String> {
+    let from_header = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty());
+    from_header.or_else(|| {
+        query
+            .get("token")
+            .map(|token| token.trim().to_string())
+            .filter(|token| !token.is_empty())
+    })
+}
 
 /// Size of an Automerge change hash (SHA-256).
 const AUTOMERGE_HEAD_SIZE: usize = 32;
@@ -153,8 +182,9 @@ async fn open_and_answer(
 /// Handle an individual WebSocket connection with the SwirlDB sync protocol.
 ///
 /// Manages the full lifecycle: Connect handshake, further opens, Push/Broadcast
-/// relay, ephemeral pub/sub, and cleanup on disconnect.
-pub async fn handle_websocket(socket: WebSocket, state: ServerState) {
+/// relay, ephemeral pub/sub, and cleanup on disconnect. `token` is what
+/// [`bearer_token`] found on the upgrade; the authority decides who it is.
+pub async fn handle_websocket(socket: WebSocket, state: ServerState, token: Option<String>) {
     let connection_id = Uuid::new_v4();
     let (mut sender, mut receiver) = socket.split();
 
@@ -185,17 +215,19 @@ pub async fn handle_websocket(socket: WebSocket, state: ServerState) {
                                 info!("📱 Client {} connected, opening {} ({} subscriptions)",
                                       client_id, document, subscriptions.len());
 
-                                // TODO: Extract actor from JWT token instead of using anonymous.
-                                // Until then the subject an authority sees is the client id.
-                                let actor = Actor {
-                                    actor_type: ActorType::Anonymous,
-                                    id: client_id.clone(),
-                                    org_id: None,
-                                    team_id: None,
-                                    app_id: None,
-                                    role: None,
-                                    claims: std::collections::HashMap::new(),
+                                // The subject is the authority's answer about the
+                                // token, never the client's own claim. A connection
+                                // the authority does not know is told so on the
+                                // document it asked for, and closed.
+                                let Some(actor) = state.authenticate(token.as_deref(), &client_id).await else {
+                                    warn!("🚫 {} is not authenticated; closing", client_id);
+                                    send(&mut sender, Message::OpenDenied {
+                                        document,
+                                        reason: "not authenticated".to_string(),
+                                    }).await;
+                                    break;
                                 };
+                                info!("🔑 {} is {} ({:?})", client_id, actor.id, actor.actor_type);
 
                                 state.register_client(
                                     connection_id,
