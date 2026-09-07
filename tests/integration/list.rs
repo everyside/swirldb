@@ -12,19 +12,25 @@
 use super::{init_test_logging, rust_client::RustClient, test_server::TestServer};
 use serde_json::json;
 use std::time::Duration;
-use swirldb_client::SyncClient;
+use swirldb_client::{Change, SyncClient};
 use tokio::sync::broadcast;
 
 fn everything() -> Vec<String> {
     vec!["**".to_string()]
 }
 
-/// The next broadcast a client hears, within a bound.
-async fn next_change(receiver: &mut broadcast::Receiver<Vec<String>>) -> Vec<String> {
-    tokio::time::timeout(Duration::from_secs(2), receiver.recv())
-        .await
-        .expect("a change arrives in time")
-        .expect("the change channel is open")
+/// The paths of the next broadcast a client hears, within a bound. Its own
+/// writes are on the same channel, marked local, and are passed by.
+async fn next_change(receiver: &mut broadcast::Receiver<Change>) -> Vec<String> {
+    loop {
+        let change = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("a change arrives in time")
+            .expect("the change channel is open");
+        if !change.local {
+            return change.changed_paths;
+        }
+    }
 }
 
 #[tokio::test]

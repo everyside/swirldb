@@ -9,14 +9,14 @@
 
 use anyhow::Result;
 use automerge::ScalarValue;
-use swirldb_client::SyncClient;
+use swirldb_client::{Change, SyncClient};
 use swirldb_core::protocol::Access;
 use tokio::sync::broadcast;
 use tracing::warn;
 
 pub struct RustClient {
     inner: SyncClient,
-    change_rx: broadcast::Receiver<Vec<String>>,
+    change_rx: broadcast::Receiver<Change>,
     ephemeral_rx: broadcast::Receiver<Vec<(String, Vec<u8>)>>,
     error_rx: broadcast::Receiver<String>,
 }
@@ -85,16 +85,21 @@ impl RustClient {
     ///
     /// The SyncClient background task applies changes automatically,
     /// so this just waits for the change notification. Returns an empty
-    /// vec since the changes are already applied to the local DB.
+    /// vec since the changes are already applied to the local DB. This
+    /// client's own writes are heard on the same channel, marked local,
+    /// and are passed by here: a broadcast is somebody else's.
     pub async fn wait_for_broadcast(&mut self) -> Result<Vec<Vec<u8>>> {
-        match self.change_rx.recv().await {
-            Ok(_paths) => Ok(Vec::new()),
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                warn!("Change receiver lagged by {} messages", n);
-                // Changes are already applied by background task, just return
-                Ok(Vec::new())
+        loop {
+            match self.change_rx.recv().await {
+                Ok(change) if change.local => continue,
+                Ok(_) => return Ok(Vec::new()),
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!("Change receiver lagged by {} messages", n);
+                    // Changes are already applied by background task, just return
+                    return Ok(Vec::new());
+                }
+                Err(e) => anyhow::bail!("Change receiver error: {}", e),
             }
-            Err(e) => anyhow::bail!("Change receiver error: {}", e),
         }
     }
 

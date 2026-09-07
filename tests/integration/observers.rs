@@ -17,7 +17,7 @@ use super::{
 use automerge::ScalarValue;
 use serde_json::json;
 use std::time::Duration;
-use swirldb_client::SyncClient;
+use swirldb_client::{Change, SyncClient};
 
 fn everything() -> Vec<String> {
     vec!["**".to_string()]
@@ -162,11 +162,12 @@ async fn a_list_observer_in_the_browser_is_handed_the_array() {
     assert_eq!(heard.len(), 1);
     assert!(heard[0].local);
     assert_eq!(heard[0].value, json!([]));
-    let paths = tokio::time::timeout(Duration::from_secs(2), rust_changes.recv())
+    let change = tokio::time::timeout(Duration::from_secs(2), rust_changes.recv())
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(paths, vec!["stops.0".to_string()]);
+    assert_eq!(change.changed_paths, vec!["stops.0".to_string()]);
+    assert!(!change.local);
     assert_eq!(rust.db().await.get_value("stops"), Some(json!([])));
 
     // Deleting what is not there fires nothing and sends nothing.
@@ -226,6 +227,150 @@ async fn a_rust_observer_hears_a_remote_write_under_a_map() {
     assert!(heard[0]
         .changed_paths
         .contains(&"stops.a.color".to_string()));
+
+    server.shutdown().await.unwrap();
+}
+
+/// The next change a client hears, within a bound.
+async fn next_change(receiver: &mut tokio::sync::broadcast::Receiver<Change>) -> Change {
+    tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+        .await
+        .expect("a change arrives in time")
+        .expect("the change channel is open")
+}
+
+#[tokio::test]
+async fn a_rust_client_hears_its_own_writes_as_local_and_a_peers_as_remote() {
+    init_test_logging();
+    let server = TestServer::start().await.unwrap();
+
+    let alice = SyncClient::open(&server.ws_url(), "palette.4", everything())
+        .await
+        .unwrap();
+    let bob = SyncClient::open(&server.ws_url(), "palette.4", everything())
+        .await
+        .unwrap();
+    let mut alice_changes = alice.on_change();
+    let mut bob_changes = bob.on_change();
+
+    // Alice's own set_path is heard by her first, marked local, naming the
+    // path she wrote; Bob hears it as a broadcast, not local, naming what
+    // the server saw the change touch — the maps it made on the way too.
+    alice
+        .set_path("stops.a.color", ScalarValue::Str("#ff0000".into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        next_change(&mut alice_changes).await,
+        Change {
+            changed_paths: vec!["stops.a.color".to_string()],
+            local: true
+        }
+    );
+    let heard = next_change(&mut bob_changes).await;
+    assert!(!heard.local);
+    assert!(
+        heard.changed_paths.contains(&"stops.a.color".to_string()),
+        "{:?}",
+        heard
+    );
+
+    // Every other write path is heard the same way, naming what the
+    // browser's observer would be told for the same write.
+    alice.set_text("notes", "warm").await.unwrap();
+    assert_eq!(
+        next_change(&mut alice_changes).await,
+        Change {
+            changed_paths: vec!["notes".to_string()],
+            local: true
+        }
+    );
+    alice.splice_text("notes", 4, 0, " palette").await.unwrap();
+    assert_eq!(
+        next_change(&mut alice_changes).await,
+        Change {
+            changed_paths: vec!["notes".to_string()],
+            local: true
+        }
+    );
+    alice
+        .insert_list_item("order", 0, json!("#ff0000"))
+        .await
+        .unwrap();
+    assert_eq!(
+        next_change(&mut alice_changes).await,
+        Change {
+            changed_paths: vec!["order.0".to_string()],
+            local: true
+        }
+    );
+    alice
+        .splice_list("order", 1, 0, vec![json!("#00ff00"), json!("#0000ff")])
+        .await
+        .unwrap();
+    assert_eq!(
+        next_change(&mut alice_changes).await,
+        Change {
+            changed_paths: vec!["order.1".to_string(), "order.2".to_string()],
+            local: true
+        }
+    );
+    alice.delete_path("order.1").await.unwrap();
+    assert_eq!(
+        next_change(&mut alice_changes).await,
+        Change {
+            changed_paths: vec!["order.1".to_string()],
+            local: true
+        }
+    );
+
+    // A write made through the core is a write of hers too.
+    alice
+        .db()
+        .await
+        .set_path("stops.b.color", ScalarValue::Str("#0000ff".into()))
+        .unwrap();
+    assert_eq!(
+        next_change(&mut alice_changes).await,
+        Change {
+            changed_paths: vec!["stops.b.color".to_string()],
+            local: true
+        }
+    );
+    alice.push().await.unwrap();
+
+    // A delete of nothing is not a change.
+    alice.delete_path("nowhere").await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), alice_changes.recv())
+            .await
+            .is_err()
+    );
+
+    // Bob heard the other six from the server, none of them as his own,
+    // and his copy agrees with hers.
+    let mut heard = Vec::new();
+    while heard.len() < 6 {
+        heard.push(next_change(&mut bob_changes).await);
+    }
+    assert!(heard.iter().all(|change| !change.local), "{:?}", heard);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), bob_changes.recv())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        bob.db().await.get_value("stops"),
+        alice.db().await.get_value("stops")
+    );
+    assert_eq!(
+        bob.db().await.get_value("order"),
+        Some(json!(["#ff0000", "#0000ff"]))
+    );
+    assert_eq!(
+        bob.get_path("notes").await,
+        Some(ScalarValue::Str("warm palette".into()))
+    );
 
     server.shutdown().await.unwrap();
 }

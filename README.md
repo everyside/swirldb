@@ -302,6 +302,25 @@ patches touched, so nothing depends on a scalar being there. In Rust,
 `apply_changes` returns — carries `changed_paths` for a layer that keeps
 observers of its own.
 
+The Rust client's `on_change` hears the same. It yields a `Change` — the
+`changed_paths` and `local` of the browser's change, without the observer's
+`path`, since the channel is for the whole document — for every write this
+client makes, through its own methods or through `db()`, and for every
+`Broadcast` the server sends, with the paths the server named. Before, the
+channel carried only broadcasts, so a server holding a document could not
+hear its own writes the way a browser tab now can, and could not tell whose
+a change was. A server that projects every change it hears passes its own
+by; the projection it would make of its own write is the one it just made,
+and a stamp written after a projection would otherwise wake the next.
+
+```rust
+let mut changes = client.on_change();
+while let Ok(change) = changes.recv().await {
+    if change.local { continue; }   // this client wrote it and already knows
+    project(&client).await;         // change.changed_paths says what moved
+}
+```
+
 ## Development
 
 ### Building from Source

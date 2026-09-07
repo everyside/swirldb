@@ -13,7 +13,7 @@ use super::{init_test_logging, test_server::TestServer};
 use automerge::ScalarValue;
 use serde_json::json;
 use std::time::Duration;
-use swirldb_client::SyncClient;
+use swirldb_client::{Change, SyncClient};
 use swirldb_server::state::ActivityEvent;
 use tokio::sync::broadcast;
 
@@ -21,7 +21,8 @@ fn everything() -> Vec<String> {
     vec!["**".to_string()]
 }
 
-async fn next_change(receiver: &mut broadcast::Receiver<Vec<String>>) -> Vec<String> {
+/// The next change a client hears, within a bound — its own or another's.
+async fn next_change(receiver: &mut broadcast::Receiver<Change>) -> Change {
     tokio::time::timeout(Duration::from_secs(2), receiver.recv())
         .await
         .expect("a change arrives in time")
@@ -132,8 +133,9 @@ async fn writes_made_through_the_core_ride_the_next_push() {
         }
     }
     alice.set_path("d", ScalarValue::Int(4)).await.unwrap();
-    let paths = next_change(&mut bob_changes).await;
-    assert_eq!(paths, vec!["a", "b", "c", "d"]);
+    let change = next_change(&mut bob_changes).await;
+    assert_eq!(change.changed_paths, vec!["a", "b", "c", "d"]);
+    assert!(!change.local);
     // The server broadcasts before it logs, so the log is waited for.
     wait_for_pushes(&server, "alice", "batch.1", 1).await;
     assert_eq!(pushes_from(&server, "alice", "batch.1").await, vec![1]);
@@ -143,7 +145,7 @@ async fn writes_made_through_the_core_ride_the_next_push() {
     // Or a push on its own, with nothing more written.
     alice.db().await.set_path("e", ScalarValue::Int(5)).unwrap();
     alice.push().await.unwrap();
-    assert_eq!(next_change(&mut bob_changes).await, vec!["e"]);
+    assert_eq!(next_change(&mut bob_changes).await.changed_paths, vec!["e"]);
     wait_for_pushes(&server, "alice", "batch.1", 2).await;
     assert_eq!(pushes_from(&server, "alice", "batch.1").await, vec![1, 1]);
 
@@ -174,22 +176,30 @@ async fn a_change_heard_from_the_server_is_not_pushed_back() {
     let mut alice_changes = alice.on_change();
     let mut bob_changes = bob.on_change();
 
-    // Alice writes; Bob hears it. Bob's next write is one change, not two:
-    // what he heard is the server's already.
+    // Alice writes and hears herself, marked local; Bob hears it as a
+    // broadcast. Bob's next write is one change, not two: what he heard is
+    // the server's already.
     alice
         .set_path("title", ScalarValue::Str("Alice".into()))
         .await
         .unwrap();
-    next_change(&mut bob_changes).await;
+    let own = next_change(&mut alice_changes).await;
+    assert!(own.local);
+    assert_eq!(own.changed_paths, vec!["title"]);
+    let heard = next_change(&mut bob_changes).await;
+    assert!(!heard.local);
+    assert_eq!(heard.changed_paths, vec!["title"]);
     bob.set_path("subtitle", ScalarValue::Str("Bob".into()))
         .await
         .unwrap();
-    next_change(&mut alice_changes).await;
+    let heard = next_change(&mut alice_changes).await;
+    assert!(!heard.local);
+    assert_eq!(heard.changed_paths, vec!["subtitle"]);
     wait_for_pushes(&server, "bob", "echo.1", 1).await;
     assert_eq!(pushes_from(&server, "bob", "echo.1").await, vec![1]);
 
-    // And nothing came back around: Alice heard Bob's write once and her
-    // own not at all.
+    // And nothing came back around: Alice heard her own write once, as
+    // hers, and Bob's once, as his — never her own from the server.
     assert!(
         tokio::time::timeout(Duration::from_millis(300), alice_changes.recv())
             .await

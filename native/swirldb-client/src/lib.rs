@@ -21,7 +21,9 @@
 //!   two clients adding to one list both keep their items
 //! - `delete_path` removes a key from its map or an item from its list
 //! - Ephemeral pub/sub messaging (bypasses CRDT/storage for high-frequency data)
-//! - Broadcast channels for change and ephemeral notifications
+//! - Broadcast channels for change and ephemeral notifications: `on_change`
+//!   hears this client's own writes as well as the server's, each
+//!   [`Change`] saying which with `local`
 //!
 //! # Example
 //!
@@ -68,6 +70,22 @@ pub struct Denied {
     pub reason: String,
 }
 
+/// A change to the document, heard on [`SyncClient::on_change`]: the paths
+/// it touched, and whether this client made it.
+///
+/// `changed_paths` names what was written — `user.name` for a key, `stops.2`
+/// for a list item by index, the text's own path for a splice — as the
+/// core reports it for this client's writes and as the server reports it
+/// for everyone else's. `local` is true for a write this client made, through
+/// its own methods or through [`SyncClient::db`], and false for one that
+/// arrived in a `Broadcast`. A server that holds a document and projects
+/// every change it hears can pass its own by.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Change {
+    pub changed_paths: Vec<String>,
+    pub local: bool,
+}
+
 /// Native Rust client for SwirlDB sync
 ///
 /// Manages a WebSocket connection to a SwirlDB server with a background
@@ -108,8 +126,8 @@ pub struct SyncClient {
     /// Broadcast channel for incoming ephemeral messages
     ephemeral_tx: broadcast::Sender<Vec<(String, Vec<u8>)>>,
 
-    /// Broadcast channel for CRDT change notifications (affected paths)
-    change_tx: broadcast::Sender<Vec<String>>,
+    /// Broadcast channel for changes to the document, local and remote
+    change_tx: broadcast::Sender<Change>,
 
     /// Broadcast channel for edits to texts, local and remote
     text_change_tx: broadcast::Sender<TextChange>,
@@ -244,8 +262,26 @@ impl SyncClient {
         // Ephemeral broadcast (capacity 100 for backpressure)
         let (ephemeral_tx, _) = broadcast::channel(100);
 
-        // Change notification broadcast
+        // Change notification broadcast. The core tells an observer on `**`
+        // about every write, whoever made it, marked local or not; this
+        // client's own writes are forwarded from there, so a write made
+        // through `db` is heard the same as one made through `set_path`.
+        // A remote change is announced by the receive loop instead, with
+        // the paths the server named, so the observer passes those by.
         let (change_tx, _) = broadcast::channel(100);
+        {
+            let local_changes = change_tx.clone();
+            db.read()
+                .await
+                .observe("**".to_string(), move |notification| {
+                    if notification.local {
+                        let _ = local_changes.send(Change {
+                            changed_paths: notification.changed_paths,
+                            local: true,
+                        });
+                    }
+                });
+        }
 
         // Text edits, one message per text per batch of changes
         let (text_change_tx, _) = broadcast::channel(256);
@@ -426,7 +462,10 @@ impl SyncClient {
                                                 Err(e) => error!("Failed to apply broadcast changes: {}", e),
                                             }
                                         }
-                                        let _ = change_tx_clone.send(affected_paths);
+                                        let _ = change_tx_clone.send(Change {
+                                            changed_paths: affected_paths,
+                                            local: false,
+                                        });
                                     }
                                     Ok(Message::PushAck { .. }) => {
                                         // Push acknowledged
@@ -752,11 +791,15 @@ impl SyncClient {
         self.ephemeral_tx.subscribe()
     }
 
-    /// Subscribe to CRDT change notifications.
+    /// Subscribe to changes to the document.
     ///
-    /// Returns a broadcast receiver that yields lists of affected paths
-    /// whenever a `Broadcast` message is received from the server.
-    pub fn on_change(&self) -> broadcast::Receiver<Vec<String>> {
+    /// Yields one [`Change`] per write: this client's own — `set_path`,
+    /// `set_text`, `splice_text`, `insert_list_item`, `splice_list`,
+    /// `delete_path`, or a write made through [`Self::db`] — as soon as it
+    /// is made, with `local` true; and each `Broadcast` from the server,
+    /// with the paths the server named and `local` false. A delete of
+    /// nothing is not a change and is not heard.
+    pub fn on_change(&self) -> broadcast::Receiver<Change> {
         self.change_tx.subscribe()
     }
 
