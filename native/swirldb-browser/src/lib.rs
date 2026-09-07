@@ -16,6 +16,12 @@
 //! to the handle bound to that document; observers and ephemeral handlers are
 //! registered per handle, so presence and cursors on one document never reach
 //! another.
+//!
+//! Text positions are UTF-16 code units. That is what a JavaScript string
+//! index is and what an editor offset is, so a splice from an editor goes to
+//! `spliceText` unconverted and a splice from `observeText` goes back
+//! unconverted. Every handle here is built with that encoding; a Rust peer on
+//! the same document counts in code points and the two still merge.
 
 use automerge::ScalarValue;
 use js_sys::{Function, Promise, Uint8Array};
@@ -24,9 +30,10 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-use swirldb_core::core::SwirlDB as CoreSwirlDB;
+use swirldb_core::core::{SwirlDB as CoreSwirlDB, TextChange};
 use swirldb_core::policy::PolicyEngine;
 use swirldb_core::protocol::{Access, Message, DEFAULT_DOCUMENT};
+use swirldb_core::TextEncoding;
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
@@ -51,6 +58,15 @@ thread_local! {
     #[allow(clippy::type_complexity)]
     static EPHEMERAL_HANDLERS: RefCell<Vec<(usize, u32, String, Function)>> = const { RefCell::new(Vec::new()) };
     static NEXT_HANDLER_ID: RefCell<u32> = const { RefCell::new(0) };
+    /// Text observers: (handle id, path, callback)
+    static TEXT_OBSERVERS: RefCell<Vec<(usize, String, Function)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The text encoding every handle in the browser is built with.
+const TEXT_ENCODING: TextEncoding = TextEncoding::Utf16CodeUnit;
+
+fn new_core() -> CoreSwirlDB {
+    CoreSwirlDB::new_with_text_encoding(TEXT_ENCODING)
 }
 
 fn next_handle_id() -> usize {
@@ -203,6 +219,33 @@ fn fire_observers_for_paths(handle_id: usize, core: &CoreSwirlDB, affected_paths
     }
 }
 
+/// Fire the text observers of a handle for the texts these changes edited.
+fn fire_text_observers(handle_id: usize, changes: &[TextChange]) {
+    if changes.is_empty() {
+        return;
+    }
+    let callbacks: Vec<(Function, JsValue)> = TEXT_OBSERVERS.with(|observers| {
+        let observers = observers.borrow();
+        changes
+            .iter()
+            .flat_map(|change| {
+                observers
+                    .iter()
+                    .filter(|(id, path, _)| *id == handle_id && path == &change.path)
+                    .map(|(_, _, callback)| {
+                        (
+                            callback.clone(),
+                            serde_wasm_bindgen::to_value(change).unwrap_or(JsValue::NULL),
+                        )
+                    })
+            })
+            .collect()
+    });
+    for (callback, change) in callbacks {
+        let _ = callback.call1(&JsValue::NULL, &change);
+    }
+}
+
 /// Fire all observers for a handle (used for Sync messages without affected_paths)
 fn fire_all_observers(handle_id: usize, core: &CoreSwirlDB) {
     let callbacks: Vec<(Function, JsValue)> = OBSERVERS.with(|observers| {
@@ -295,10 +338,14 @@ fn dispatch(connection_id: usize, msg: Message) {
                     )
                     .into(),
                 );
-                if let Err(e) = core.apply_changes(changes) {
-                    web_sys::console::error_1(&format!("Failed to apply changes: {}", e).into());
-                } else {
-                    fire_all_observers(handle_id, &core);
+                match core.apply_changes(changes) {
+                    Ok(applied) => {
+                        fire_all_observers(handle_id, &core);
+                        fire_text_observers(handle_id, &applied.text_changes);
+                    }
+                    Err(e) => web_sys::console::error_1(
+                        &format!("Failed to apply changes: {}", e).into(),
+                    ),
                 }
             }
             if let Some((resolve, _reject, handle)) = waiting {
@@ -334,10 +381,14 @@ fn dispatch(connection_id: usize, msg: Message) {
                 )
                 .into(),
             );
-            if let Err(e) = core.apply_changes(changes) {
-                web_sys::console::error_1(&format!("Failed to apply changes: {}", e).into());
-            } else {
-                fire_observers_for_paths(handle_id, &core, &affected_paths);
+            match core.apply_changes(changes) {
+                Ok(applied) => {
+                    fire_observers_for_paths(handle_id, &core, &affected_paths);
+                    fire_text_observers(handle_id, &applied.text_changes);
+                }
+                Err(e) => {
+                    web_sys::console::error_1(&format!("Failed to apply changes: {}", e).into())
+                }
             }
         }
 
@@ -583,7 +634,7 @@ impl Connection {
                 );
                 return;
             }
-            let core = Rc::new(CoreSwirlDB::new());
+            let core = Rc::new(new_core());
             let handle_id = next_handle_id();
             let handle = JsValue::from(SwirlDB {
                 core: core.clone(),
@@ -692,7 +743,7 @@ impl SwirlDB {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
         console_error_panic_hook::set_once();
-        Self::from_core(CoreSwirlDB::new())
+        Self::from_core(new_core())
     }
 
     /// Create a new SwirlDB instance with LocalStorage persistence
@@ -707,7 +758,9 @@ impl SwirlDB {
             console_error_panic_hook::set_once();
             let storage = LocalDocumentStorage::new(&storage_key)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
-            let core = CoreSwirlDB::with_storage(Arc::new(storage), "db").await;
+            let core =
+                CoreSwirlDB::with_storage_and_text_encoding(Arc::new(storage), "db", TEXT_ENCODING)
+                    .await;
             Ok(JsValue::from(SwirlDB::from_core(core)))
         })
     }
@@ -725,7 +778,9 @@ impl SwirlDB {
             let storage = IndexedDBAdapter::new(&db_name)
                 .await
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
-            let core = CoreSwirlDB::with_storage(Arc::new(storage), "db").await;
+            let core =
+                CoreSwirlDB::with_storage_and_text_encoding(Arc::new(storage), "db", TEXT_ENCODING)
+                    .await;
             Ok(JsValue::from(SwirlDB::from_core(core)))
         })
     }
@@ -777,6 +832,110 @@ impl SwirlDB {
             Some(value) => scalar_to_js(&value),
             None => JsValue::NULL,
         }
+    }
+
+    /// Put a text at a path, replacing whatever was there.
+    ///
+    /// A text merges: two people splicing into one text both keep their
+    /// characters, where two people assigning one string each replace the
+    /// other's. It reads back as a string through `getPath` and `getValue`.
+    /// Replacing an existing text discards edits others are making to it, so
+    /// this creates; `spliceText` edits.
+    ///
+    /// Example:
+    /// ```javascript
+    /// db.setText('source', 'hue = t');
+    /// ```
+    #[wasm_bindgen(js_name = setText)]
+    pub fn set_text(&mut self, path: String, text: String) -> Result<(), JsValue> {
+        let replaced_length = self.core.text_length(&path).unwrap_or(0);
+        self.core
+            .set_text(&path, &text)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        self.check_observers();
+        fire_text_observers(
+            self.id,
+            &[TextChange {
+                path,
+                splices: vec![swirldb_core::core::TextSplice {
+                    position: 0,
+                    delete_count: replaced_length,
+                    insert: text,
+                }],
+                local: true,
+            }],
+        );
+        Ok(())
+    }
+
+    /// Edit the text at a path in place: remove `deleteCount` UTF-16 code
+    /// units at `position`, then insert `insert` there. Positions are string
+    /// indices as JavaScript counts them, so an editor's change applies as it
+    /// is. Throws when the path does not hold a text.
+    ///
+    /// Example:
+    /// ```javascript
+    /// db.spliceText('source', 4, 0, 'black ');   // insert
+    /// db.spliceText('source', 0, 3, '');         // delete
+    /// db.syncChanges();
+    /// ```
+    #[wasm_bindgen(js_name = spliceText)]
+    pub fn splice_text(
+        &mut self,
+        path: String,
+        position: usize,
+        delete_count: usize,
+        insert: String,
+    ) -> Result<(), JsValue> {
+        self.core
+            .splice_text(&path, position, delete_count, &insert)
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+        self.check_observers();
+        fire_text_observers(
+            self.id,
+            &[TextChange {
+                path,
+                splices: vec![swirldb_core::core::TextSplice {
+                    position,
+                    delete_count,
+                    insert,
+                }],
+                local: true,
+            }],
+        );
+        Ok(())
+    }
+
+    /// The length of the text at a path in UTF-16 code units, or `null` when
+    /// the path holds no text.
+    #[wasm_bindgen(js_name = textLength)]
+    pub fn text_length(&self, path: String) -> Option<usize> {
+        self.core.text_length(&path)
+    }
+
+    /// Observe edits to the text at a path.
+    ///
+    /// Where `observe` hands a callback the new value, this hands it the
+    /// edits: `{ path, splices: [{ position, deleteCount, insert }], local }`,
+    /// the splices in the order they happened and each against the text as
+    /// the ones before left it. `local` is true for this handle's own
+    /// `spliceText` and `setText`, so an editor that made the edit can pass
+    /// it by, and false for edits that arrived from the server.
+    ///
+    /// Example:
+    /// ```javascript
+    /// db.observeText('source', ({ splices, local }) => {
+    ///   if (local) return;
+    ///   for (const { position, deleteCount, insert } of splices) {
+    ///     view.dispatch({ changes: { from: position, to: position + deleteCount, insert } });
+    ///   }
+    /// });
+    /// ```
+    #[wasm_bindgen(js_name = observeText)]
+    pub fn observe_text(&self, path: String, callback: Function) {
+        TEXT_OBSERVERS.with(|observers| {
+            observers.borrow_mut().push((self.id, path, callback));
+        });
     }
 
     /// Set any JavaScript value (scalar, array, or object) at the given path
@@ -850,12 +1009,14 @@ impl SwirlDB {
     #[wasm_bindgen(js_name = loadState)]
     pub fn load_state(&mut self, input: Uint8Array) -> Result<(), JsValue> {
         let vec = input.to_vec();
-        self.core
+        let applied = self
+            .core
             .load_state(&vec)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         // Check observers after loading
         self.check_observers();
+        fire_text_observers(self.id, &applied.text_changes);
         Ok(())
     }
 
@@ -874,12 +1035,14 @@ impl SwirlDB {
     pub fn apply_changes(&mut self, changes: Vec<Uint8Array>) -> Result<(), JsValue> {
         let change_vecs: Vec<Vec<u8>> = changes.into_iter().map(|arr| arr.to_vec()).collect();
 
-        self.core
+        let applied = self
+            .core
             .apply_changes(change_vecs)
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
 
         // Check observers after applying changes
         self.check_observers();
+        fire_text_observers(self.id, &applied.text_changes);
         Ok(())
     }
 
@@ -1015,7 +1178,7 @@ impl SwirlDB {
         console_error_panic_hook::set_once();
         let engine =
             PolicyEngine::from_json(&json_str).map_err(|e| JsValue::from_str(&e.to_string()))?;
-        Ok(SwirlDB::from_core(CoreSwirlDB::new().with_policy(engine)))
+        Ok(SwirlDB::from_core(new_core().with_policy(engine)))
     }
 
     /// Authenticate with a JWT token
@@ -1629,6 +1792,19 @@ mod tests {
         let db = SwirlDB::new();
         assert_eq!(db.document(), DEFAULT_DOCUMENT);
         assert!(db.access().is_null());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_text_reads_as_a_string_and_splices_in_utf16_units() {
+        let mut db = SwirlDB::new();
+        db.set_text("source".into(), "😀 cat".into()).unwrap();
+        assert_eq!(db.text_length("source".into()), Some(6));
+        db.splice_text("source".into(), 3, 0, "black ".into()).unwrap();
+        assert_eq!(
+            db.get_path("source".into()).as_string().as_deref(),
+            Some("😀 black cat")
+        );
+        assert!(db.splice_text("missing".into(), 0, 0, "x".into()).is_err());
     }
 
     #[wasm_bindgen_test]

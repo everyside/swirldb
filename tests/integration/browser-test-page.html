@@ -15,6 +15,8 @@
         // Per document, broadcasts seen since last asked for, and a waiter for the next.
         const changes = new Map();
         const presence = new Map();
+        // Per document, the text changes heard from the server, in order.
+        const textChanges = new Map();
 
         window.testAPI = {
             async connect(wsUrl, subscriptions) {
@@ -112,6 +114,7 @@
                     handles.set(document, handle);
                     changes.set(document, 0);
                     presence.set(document, []);
+                    textChanges.set(document, []);
                     // An observer on "**" fires for every broadcast on this document.
                     handle.observe('**', () => {
                         changes.set(document, changes.get(document) + 1);
@@ -127,6 +130,48 @@
                 const handle = handles.get(document);
                 handle.setPath(path, value);
                 handle.syncChanges();
+            },
+
+            // ---- text ----
+
+            /// Put a text at a path and start recording what the server does to it.
+            setDocumentText(document, path, text) {
+                const handle = handles.get(document);
+                handle.setText(path, text);
+                handle.observeText(path, (change) => {
+                    if (!change.local) {
+                        textChanges.get(document).push(change);
+                    }
+                });
+                handle.syncChanges();
+            },
+
+            spliceDocumentText(document, path, position, deleteCount, insert) {
+                const handle = handles.get(document);
+                handle.spliceText(path, position, deleteCount, insert);
+                handle.syncChanges();
+            },
+
+            takeDocumentTextChanges(document) {
+                const seen = textChanges.get(document);
+                textChanges.set(document, []);
+                return seen;
+            },
+
+            waitForDocumentTextChange(document, timeout = 2000) {
+                return new Promise((resolve, reject) => {
+                    const start = Date.now();
+                    const check = () => {
+                        if (textChanges.get(document).length > 0) {
+                            resolve();
+                        } else if (Date.now() - start > timeout) {
+                            reject(new Error(`Timeout waiting for a text change on ${document}`));
+                        } else {
+                            setTimeout(check, 10);
+                        }
+                    };
+                    check();
+                });
             },
 
             getDocumentPath(document, path) {

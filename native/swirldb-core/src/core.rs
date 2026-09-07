@@ -5,10 +5,12 @@ use crate::auth::{AnonymousAuth, AuthProvider};
 use crate::paths::PathRegistry;
 use crate::policy::{Action, PolicyEngine};
 use anyhow::{anyhow, Result};
+use automerge::patches::{Patch, PatchAction};
 use automerge::{
-    transaction::Transactable, AutoCommit, ObjId, ObjType, ReadDoc, ScalarValue,
-    Value as AutoValue, ROOT,
+    transaction::Transactable, AutoCommit, ChangeHash, LoadOptions, ObjId, ObjType, Prop, ReadDoc,
+    ScalarValue, TextEncoding, Value as AutoValue, ROOT,
 };
+use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -37,6 +39,48 @@ struct Observer {
     last_value: Option<ScalarValue>,
 }
 
+/// One edit to a text: `delete_count` units removed at `position`, then
+/// `insert` put in their place. An insertion has `delete_count` zero, a
+/// deletion an empty `insert`. Positions and counts are in the document's
+/// [`TextEncoding`] — code points unless the instance was built with another —
+/// so an editor that works in the same units can apply a splice as it is.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextSplice {
+    pub position: usize,
+    pub delete_count: usize,
+    pub insert: String,
+}
+
+/// What happened to one text, handed to a text observer. The splices are in
+/// the order they happened, each expressed against the text as the ones before
+/// it left it. `local` is true when this instance made the edit itself, so an
+/// editor that is the source of local edits can pass those by.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextChange {
+    pub path: String,
+    pub splices: Vec<TextSplice>,
+    pub local: bool,
+}
+
+/// Text observer callback signature
+pub type TextObserverCallback = Box<dyn Fn(TextChange) + Send + Sync>;
+
+struct TextObserver {
+    path: String,
+    callback: TextObserverCallback,
+}
+
+/// What applying changes did that a caller may want to pass on. Observers
+/// registered on this instance are already told; this is for a layer that
+/// keeps its own, such as the browser bindings.
+#[derive(Clone, Debug, Default)]
+pub struct Applied {
+    /// Every text the changes edited, with the splices that edited it
+    pub text_changes: Vec<TextChange>,
+}
+
 /// Core SwirlDB engine - pure Rust, platform-agnostic
 ///
 /// This is the pure Rust core with no binding attributes.
@@ -45,6 +89,9 @@ struct Observer {
 pub struct SwirlDB {
     doc: Arc<Mutex<AutoCommit>>,
     observers: Arc<Mutex<Vec<Observer>>>,
+    text_observers: Arc<Mutex<Vec<TextObserver>>>,
+    /// The units text positions are counted in, fixed for the instance's life
+    text_encoding: TextEncoding,
     storage: Arc<dyn DocumentStorage>,
     storage_key: String,
     auto_persist: bool,
@@ -56,20 +103,53 @@ pub struct SwirlDB {
 impl SwirlDB {
     /// Create a new SwirlDB instance with default in-memory storage
     pub fn new() -> Self {
-        let doc = AutoCommit::new();
+        Self::new_with_text_encoding(TextEncoding::UnicodeCodePoint)
+    }
+
+    /// Create an in-memory instance whose text positions are counted in the
+    /// given units.
+    ///
+    /// The encoding is a property of this instance's view, not of the
+    /// document: two peers may hold the same text under different encodings
+    /// and every splice still merges, because what is stored is characters
+    /// and what the encoding decides is only how they are counted. A browser
+    /// wants UTF-16 code units, which is what a JavaScript string index and
+    /// an editor offset already are; Rust code is happier in code points.
+    pub fn new_with_text_encoding(text_encoding: TextEncoding) -> Self {
+        Self::build(
+            AutoCommit::new_with_encoding(text_encoding),
+            Arc::new(crate::storage::InMemoryDocStorage::new()),
+            "default",
+            text_encoding,
+        )
+    }
+
+    fn build(
+        doc: AutoCommit,
+        storage: Arc<dyn DocumentStorage>,
+        storage_key: &str,
+        text_encoding: TextEncoding,
+    ) -> Self {
         let path_registry =
             PathRegistry::from_document(&doc).unwrap_or_else(|_| PathRegistry::new());
-
         Self {
             doc: Arc::new(Mutex::new(doc)),
             observers: Arc::new(Mutex::new(Vec::new())),
-            storage: Arc::new(crate::storage::InMemoryDocStorage::new()),
-            storage_key: "default".to_string(),
+            text_observers: Arc::new(Mutex::new(Vec::new())),
+            text_encoding,
+            storage,
+            storage_key: storage_key.to_string(),
             auto_persist: false,
             policy_engine: None,
             auth_provider: Arc::new(Mutex::new(Box::new(AnonymousAuth::new()))),
             path_registry: Arc::new(RwLock::new(path_registry)),
         }
+    }
+
+    /// Load a saved document under this instance's text encoding.
+    fn load_document(&self, bytes: &[u8]) -> Result<AutoCommit> {
+        AutoCommit::load_with_options(bytes, LoadOptions::new().text_encoding(self.text_encoding))
+            .map_err(|e| anyhow!("Failed to load state: {:?}", e))
     }
 
     /// Create a SwirlDB instance with a custom storage adapter
@@ -85,26 +165,33 @@ impl SwirlDB {
     /// # }
     /// ```
     pub async fn with_storage(storage: Arc<dyn DocumentStorage>, storage_key: &str) -> Self {
+        Self::with_storage_and_text_encoding(storage, storage_key, TextEncoding::UnicodeCodePoint)
+            .await
+    }
+
+    /// Create a SwirlDB instance with a custom storage adapter and text
+    /// encoding; see [`Self::new_with_text_encoding`] for what the encoding
+    /// decides.
+    pub async fn with_storage_and_text_encoding(
+        storage: Arc<dyn DocumentStorage>,
+        storage_key: &str,
+        text_encoding: TextEncoding,
+    ) -> Self {
         // Try to load existing state from storage
         let doc = match storage.load(storage_key).await {
-            Ok(Some(bytes)) => AutoCommit::load(&bytes).unwrap_or_else(|_| AutoCommit::new()),
-            _ => AutoCommit::new(),
+            Ok(Some(bytes)) => AutoCommit::load_with_options(
+                &bytes,
+                LoadOptions::new().text_encoding(text_encoding),
+            )
+            .unwrap_or_else(|_| AutoCommit::new_with_encoding(text_encoding)),
+            _ => AutoCommit::new_with_encoding(text_encoding),
         };
+        Self::build(doc, storage, storage_key, text_encoding)
+    }
 
-        // Build path registry from document
-        let path_registry =
-            PathRegistry::from_document(&doc).unwrap_or_else(|_| PathRegistry::new());
-
-        Self {
-            doc: Arc::new(Mutex::new(doc)),
-            observers: Arc::new(Mutex::new(Vec::new())),
-            storage,
-            storage_key: storage_key.to_string(),
-            auto_persist: false,
-            policy_engine: None,
-            auth_provider: Arc::new(Mutex::new(Box::new(AnonymousAuth::new()))),
-            path_registry: Arc::new(RwLock::new(path_registry)),
-        }
+    /// The units this instance counts text positions in.
+    pub fn text_encoding(&self) -> TextEncoding {
+        self.text_encoding
     }
 
     /// Set the policy engine for authorization
@@ -245,10 +332,139 @@ impl SwirlDB {
                 doc.get(&parent, key.as_str()).ok().flatten()
             };
 
-            result.and_then(|(val, _)| val.into_scalar().ok())
+            result.and_then(|(val, obj_id)| match val {
+                // A text reads as the string it currently spells, so the one
+                // get path serves scalars and texts alike.
+                AutoValue::Object(ObjType::Text) => doc
+                    .text(&obj_id)
+                    .ok()
+                    .map(|text| ScalarValue::Str(text.into())),
+                other => other.into_scalar().ok(),
+            })
         } else {
             None
         }
+    }
+
+    /// Put a text at the given dot-separated path, replacing whatever was there.
+    ///
+    /// A text is the one value two people can edit at once: it is a sequence
+    /// of characters under Automerge, and a [`Self::splice_text`] into it
+    /// merges with everyone else's rather than replacing theirs, which is what
+    /// a string set with [`Self::set_path`] would do. It still reads as a
+    /// string through [`Self::get_path`] and [`Self::get_value`].
+    ///
+    /// Replacing a text that already exists throws away edits others may be
+    /// making to it at that moment, so this is for creating one, and
+    /// [`Self::splice_text`] is for changing it.
+    pub fn set_text(&self, path: &str, text: &str) -> Result<()> {
+        self.check_policy(Action::Write, path)?;
+
+        let segments = split_path(path);
+        if segments.is_empty() {
+            return Err(anyhow!("Empty path"));
+        }
+
+        let mut doc = self.doc.lock().unwrap();
+        let Some(resolved) = resolve_path(&mut doc, &segments, true) else {
+            return Err(anyhow!("Failed to resolve path: {}", path));
+        };
+        let key = segments.last().unwrap();
+
+        // If a text was here before, its length is what a text observer must
+        // be told was removed. Read it before the replacement makes it gone.
+        let replaced_length = match doc.get(&resolved.parent, key.as_str()) {
+            Ok(Some((AutoValue::Object(ObjType::Text), previous))) => doc.length(&previous),
+            _ => 0,
+        };
+
+        let text_id = doc
+            .put_object(&resolved.parent, key.as_str(), ObjType::Text)
+            .map_err(|e| anyhow!("Failed to create text: {:?}", e))?;
+        if !text.is_empty() {
+            doc.splice_text(&text_id, 0, 0, text)
+                .map_err(|e| anyhow!("Failed to fill text: {:?}", e))?;
+        }
+        let inserted_length = doc.length(&text_id);
+        drop(doc);
+
+        {
+            let mut registry = self.path_registry.write().unwrap();
+            for (obj_id, obj_path) in &resolved.created {
+                registry.register(
+                    obj_id.clone(),
+                    crate::paths::PathBuf::from_dot_path(obj_path),
+                );
+            }
+            registry.register(text_id, crate::paths::PathBuf::from_dot_path(path));
+        }
+
+        self.check_observers_with_paths(vec![path.to_string()]);
+        if replaced_length > 0 || inserted_length > 0 {
+            self.notify_text_observers(&[TextChange {
+                path: path.to_string(),
+                splices: vec![TextSplice {
+                    position: 0,
+                    delete_count: replaced_length,
+                    insert: text.to_string(),
+                }],
+                local: true,
+            }]);
+        }
+        Ok(())
+    }
+
+    /// The length of the text at a path in this instance's
+    /// [`Self::text_encoding`] units, or `None` when the path holds no text.
+    /// This is the bound a [`Self::splice_text`] position must stay within.
+    pub fn text_length(&self, path: &str) -> Option<usize> {
+        if self.check_policy(Action::Read, path).is_err() {
+            return None;
+        }
+        let doc = self.doc.lock().unwrap();
+        text_object_at(&*doc, path).map(|id| doc.length(&id))
+    }
+
+    /// Edit the text at a path: remove `delete_count` units at `position`,
+    /// then insert `insert` there. Units are this instance's
+    /// [`Self::text_encoding`]. Fails when the path does not hold a text.
+    pub fn splice_text(
+        &self,
+        path: &str,
+        position: usize,
+        delete_count: usize,
+        insert: &str,
+    ) -> Result<()> {
+        self.check_policy(Action::Write, path)?;
+
+        let mut doc = self.doc.lock().unwrap();
+        let Some(text_id) = text_object_at(&*doc, path) else {
+            return Err(anyhow!("{} is not a text; create one with set_text", path));
+        };
+        let length = doc.length(&text_id);
+        if position > length || position + delete_count > length {
+            return Err(anyhow!(
+                "Splice at {} deleting {} is outside a text of length {}",
+                position,
+                delete_count,
+                length
+            ));
+        }
+        doc.splice_text(&text_id, position, delete_count as isize, insert)
+            .map_err(|e| anyhow!("Failed to splice text: {:?}", e))?;
+        drop(doc);
+
+        self.check_observers_with_paths(vec![path.to_string()]);
+        self.notify_text_observers(&[TextChange {
+            path: path.to_string(),
+            splices: vec![TextSplice {
+                position,
+                delete_count,
+                insert: insert.to_string(),
+            }],
+            local: true,
+        }]);
+        Ok(())
     }
 
     /// Set a value at the given dot-separated path (supports scalars, arrays, objects)
@@ -740,7 +956,10 @@ impl SwirlDB {
                             JsonValue::Object(json_obj)
                         }
                     }
-                    automerge::ObjType::List | automerge::ObjType::Text => {
+                    automerge::ObjType::Text => {
+                        JsonValue::String(doc.text(obj_id).unwrap_or_default())
+                    }
+                    automerge::ObjType::List => {
                         let mut json_arr = Vec::new();
                         // Use obj_id directly - it's the ID of this list
                         let len = doc.length(obj_id);
@@ -771,15 +990,52 @@ impl SwirlDB {
         doc.save()
     }
 
-    /// Load state from bytes
-    pub fn load_state(&self, bytes: &[u8]) -> Result<()> {
-        let doc = AutoCommit::load(bytes).map_err(|e| anyhow!("Failed to load state: {:?}", e))?;
+    /// Load state from bytes (REPLACES the current document)
+    ///
+    /// A text observer whose text differs between the old document and the
+    /// new one is told the whole text was replaced: one splice deleting all
+    /// of the old and inserting all of the new. Nothing finer is honest here,
+    /// because the new document need not share any history with the old.
+    pub fn load_state(&self, bytes: &[u8]) -> Result<Applied> {
+        let doc = self.load_document(bytes)?;
 
         // Rebuild path registry from new document
         let registry = PathRegistry::from_document(&doc).unwrap_or_else(|_| PathRegistry::new());
 
+        let observed_paths: Vec<String> = self
+            .text_observers
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|observer| observer.path.clone())
+            .collect();
+
         let mut doc_guard = self.doc.lock().unwrap();
+        let before: Vec<(String, Option<(usize, String)>)> = observed_paths
+            .iter()
+            .map(|path| (path.clone(), text_and_length_at(&*doc_guard, path)))
+            .collect();
         *doc_guard = doc;
+        let text_changes: Vec<TextChange> = before
+            .into_iter()
+            .filter_map(|(path, old)| {
+                let new = text_and_length_at(&*doc_guard, &path);
+                let old_text = old.as_ref().map(|(_, text)| text.as_str());
+                let new_text = new.as_ref().map(|(_, text)| text.as_str());
+                if old_text == new_text {
+                    return None;
+                }
+                Some(TextChange {
+                    path,
+                    splices: vec![TextSplice {
+                        position: 0,
+                        delete_count: old.map(|(length, _)| length).unwrap_or(0),
+                        insert: new.map(|(_, text)| text).unwrap_or_default(),
+                    }],
+                    local: false,
+                })
+            })
+            .collect();
         drop(doc_guard);
 
         let mut registry_guard = self.path_registry.write().unwrap();
@@ -788,7 +1044,8 @@ impl SwirlDB {
 
         // Document replaced - all paths potentially changed
         self.check_observers_with_paths(vec![]);
-        Ok(())
+        self.notify_text_observers(&text_changes);
+        Ok(Applied { text_changes })
     }
 
     /// Get all changes from the document as bytes
@@ -883,7 +1140,7 @@ impl SwirlDB {
 
             // Extract paths from patches
             let patches = temp_doc.make_patches(&mut patch_log);
-            let paths = extractor.extract_paths_from_patches(&patches)?;
+            let paths = extractor.extract_paths_from_patches(&temp_doc, &patches)?;
             all_paths.extend(paths);
         }
 
@@ -894,19 +1151,30 @@ impl SwirlDB {
         Ok(all_paths)
     }
 
-    pub fn apply_changes(&self, changes: Vec<Vec<u8>>) -> Result<()> {
+    pub fn apply_changes(&self, changes: Vec<Vec<u8>>) -> Result<Applied> {
         use automerge::Change;
 
         let mut doc = self.doc.lock().unwrap();
 
-        // Convert bytes to Change objects
-        for change_bytes in changes {
-            let change = Change::from_bytes(change_bytes)
-                .map_err(|e| anyhow!("Failed to parse change: {:?}", e))?;
-
-            doc.apply_changes([change])
-                .map_err(|e| anyhow!("Failed to apply change: {:?}", e))?;
-        }
+        // Automerge can log patches while changes are applied and hand them
+        // back afterwards. The cursor is set right before applying so the log
+        // holds only what these changes did, and cleared right after so no
+        // index is kept up between calls.
+        let before = doc.get_heads();
+        doc.update_diff_cursor();
+        let applied = (|| {
+            for change_bytes in changes {
+                let change = Change::from_bytes(change_bytes)
+                    .map_err(|e| anyhow!("Failed to parse change: {:?}", e))?;
+                doc.apply_changes([change])
+                    .map_err(|e| anyhow!("Failed to apply change: {:?}", e))?;
+            }
+            Ok::<(), anyhow::Error>(())
+        })();
+        let patches = doc.diff_incremental();
+        doc.reset_diff_cursor();
+        applied?;
+        let text_changes = text_changes_from_patches(&doc, &before, &patches);
 
         // Rebuild path registry after applying changes
         let registry = PathRegistry::from_document(&*doc).unwrap_or_else(|_| PathRegistry::new());
@@ -918,7 +1186,8 @@ impl SwirlDB {
 
         // Changes applied - paths may have changed
         self.check_observers_with_paths(vec![]);
-        Ok(())
+        self.notify_text_observers(&text_changes);
+        Ok(Applied { text_changes })
     }
 
     /// Get the current heads (tips of the change graph) as bytes
@@ -960,6 +1229,36 @@ impl SwirlDB {
             callback: Box::new(callback),
             last_value: current_value,
         });
+    }
+
+    /// Observe edits to the text at a path
+    ///
+    /// Where [`Self::observe`] hands an observer the new value, this hands it
+    /// the edits: each [`TextChange`] carries the splices that happened, with
+    /// positions, so an editor can apply them to what it is showing rather
+    /// than replace it. Fires for this instance's own [`Self::splice_text`]
+    /// and [`Self::set_text`] (with `local` true) and for changes that arrive
+    /// through [`Self::apply_changes`] and [`Self::load_state`].
+    pub fn observe_text<F>(&self, path: String, callback: F)
+    where
+        F: Fn(TextChange) + Send + Sync + 'static,
+    {
+        self.text_observers.lock().unwrap().push(TextObserver {
+            path,
+            callback: Box::new(callback),
+        });
+    }
+
+    fn notify_text_observers(&self, changes: &[TextChange]) {
+        if changes.is_empty() {
+            return;
+        }
+        let observers = self.text_observers.lock().unwrap();
+        for change in changes {
+            for observer in observers.iter().filter(|o| o.path == change.path) {
+                (observer.callback)(change.clone());
+            }
+        }
     }
 
     /// Manually trigger observer checks
@@ -1075,6 +1374,11 @@ fn resolve_path(doc: &mut AutoCommit, path: &[String], create: bool) -> Option<R
 
 /// Resolve a path for reading (no mutation)
 fn resolve_path_read(doc: &AutoCommit, path: &[String]) -> Option<ObjId> {
+    resolve_path_read_in(doc, path)
+}
+
+/// Resolve a path for reading in any readable document
+fn resolve_path_read_in<D: ReadDoc>(doc: &D, path: &[String]) -> Option<ObjId> {
     let mut current = ROOT;
 
     // Traverse all but the last segment
@@ -1102,6 +1406,121 @@ fn resolve_path_read(doc: &AutoCommit, path: &[String]) -> Option<ObjId> {
     }
 
     Some(current)
+}
+
+/// The text object at a dot path, if the path holds one.
+fn text_object_at<D: ReadDoc>(doc: &D, path: &str) -> Option<ObjId> {
+    let segments = split_path(path);
+    if segments.is_empty() || (segments.len() == 1 && segments[0].is_empty()) {
+        return None;
+    }
+    let parent = resolve_path_read_in(doc, &segments)?;
+    let key = segments.last().unwrap();
+    let found = if doc.object_type(&parent).ok()? == ObjType::List {
+        doc.get(&parent, key.parse::<usize>().ok()?).ok()?
+    } else {
+        doc.get(&parent, key.as_str()).ok()?
+    };
+    match found {
+        Some((AutoValue::Object(ObjType::Text), id)) => Some(id),
+        _ => None,
+    }
+}
+
+/// The text at a path with its length in the document's encoding units.
+fn text_and_length_at<D: ReadDoc>(doc: &D, path: &str) -> Option<(usize, String)> {
+    let id = text_object_at(doc, path)?;
+    Some((doc.length(&id), doc.text(&id).ok()?))
+}
+
+/// The dot path of the object a patch touches, from the patch's own path.
+fn patch_object_path(patch: &Patch) -> String {
+    let mut path = crate::paths::PathBuf::new();
+    for (_, prop) in &patch.path {
+        match prop {
+            Prop::Map(key) => path.push_key(key),
+            Prop::Seq(index) => path.push_index(*index),
+        }
+    }
+    path.to_string()
+}
+
+/// Turn the patches Automerge logged for a batch of remote changes into text
+/// changes, one per text touched, in the order the edits happened.
+///
+/// Two patch shapes are edits: `SpliceText` inserts, and `DeleteSeq` on an
+/// object that is a text deletes. A third is a replacement: a `PutMap` whose
+/// new value is a text, or a `DeleteMap` that removes one. Those carry no
+/// length, so the length of what was there is read from the document as it
+/// stood before the changes, at `before`, and reported as one deletion; the
+/// new text's content then follows as the `SpliceText` that filled it.
+fn text_changes_from_patches(
+    doc: &AutoCommit,
+    before: &[ChangeHash],
+    patches: &[Patch],
+) -> Vec<TextChange> {
+    let mut changes: Vec<TextChange> = Vec::new();
+    let mut record = |path: String, splice: TextSplice| match changes.last_mut() {
+        Some(change) if change.path == path => change.splices.push(splice),
+        _ => changes.push(TextChange {
+            path,
+            splices: vec![splice],
+            local: false,
+        }),
+    };
+
+    for patch in patches {
+        match &patch.action {
+            PatchAction::SpliceText { index, value, .. } => {
+                record(
+                    patch_object_path(patch),
+                    TextSplice {
+                        position: *index,
+                        delete_count: 0,
+                        insert: value.make_string(),
+                    },
+                );
+            }
+            PatchAction::DeleteSeq { index, length }
+                if doc.object_type(&patch.obj).ok() == Some(ObjType::Text) =>
+            {
+                record(
+                    patch_object_path(patch),
+                    TextSplice {
+                        position: *index,
+                        delete_count: *length,
+                        insert: String::new(),
+                    },
+                );
+            }
+            PatchAction::PutMap { key, .. } | PatchAction::DeleteMap { key } => {
+                let removed_length = match doc.get_at(&patch.obj, key.as_str(), before) {
+                    Ok(Some((AutoValue::Object(ObjType::Text), previous))) => {
+                        doc.length_at(&previous, before)
+                    }
+                    _ => continue,
+                };
+                let mut path = crate::paths::PathBuf::new();
+                for (_, prop) in &patch.path {
+                    match prop {
+                        Prop::Map(key) => path.push_key(key),
+                        Prop::Seq(index) => path.push_index(*index),
+                    }
+                }
+                path.push_key(key.clone());
+                record(
+                    path.to_string(),
+                    TextSplice {
+                        position: 0,
+                        delete_count: removed_length,
+                        insert: String::new(),
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
+    changes
 }
 
 /// Compare two scalar values for equality
@@ -1399,5 +1818,250 @@ mod tests {
 
         // Registry size shouldn't grow since "user" already existed
         assert_eq!(count_after_first, count_after_second);
+    }
+
+    #[test]
+    fn test_text_reads_as_a_string_and_converts_to_json() {
+        let db = SwirlDB::new();
+        db.set_text("pattern.source", "hue = t").unwrap();
+
+        assert_eq!(
+            db.get_path("pattern.source"),
+            Some(ScalarValue::Str("hue = t".into()))
+        );
+        assert_eq!(
+            db.get_value("pattern"),
+            Some(json!({ "source": "hue = t" }))
+        );
+    }
+
+    #[test]
+    fn test_splice_text_edits_in_place() {
+        let db = SwirlDB::new();
+        db.set_text("source", "hello world").unwrap();
+
+        db.splice_text("source", 5, 0, ",").unwrap();
+        db.splice_text("source", 7, 5, "there").unwrap();
+        assert_eq!(
+            db.get_path("source"),
+            Some(ScalarValue::Str("hello, there".into()))
+        );
+
+        // Outside the text is an error, not a panic.
+        assert!(db.splice_text("source", 13, 0, "!").is_err());
+        assert!(db.splice_text("source", 10, 5, "").is_err());
+        // A scalar string is not a text.
+        db.set_path("name", ScalarValue::Str("Alice".into()))
+            .unwrap();
+        assert!(db.splice_text("name", 0, 0, "x").is_err());
+        assert!(db.splice_text("missing", 0, 0, "x").is_err());
+    }
+
+    #[test]
+    fn test_text_observer_receives_splices_with_positions() {
+        use std::sync::{Arc, Mutex};
+
+        let writer = SwirlDB::new();
+        writer.set_text("source", "abc").unwrap();
+
+        let reader = SwirlDB::new();
+        reader.apply_changes(writer.get_changes()).unwrap();
+
+        let seen: Arc<Mutex<Vec<TextChange>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        reader.observe_text("source".to_string(), move |change| {
+            sink.lock().unwrap().push(change);
+        });
+
+        // Remote edits: an insertion and then a deletion, applied as one batch.
+        let heads = writer.get_heads();
+        writer.splice_text("source", 3, 0, "def").unwrap();
+        writer.splice_text("source", 0, 2, "").unwrap();
+        let applied = reader
+            .apply_changes(writer.get_changes_since(&heads))
+            .unwrap();
+
+        let expected = vec![
+            TextSplice {
+                position: 3,
+                delete_count: 0,
+                insert: "def".to_string(),
+            },
+            TextSplice {
+                position: 0,
+                delete_count: 2,
+                insert: String::new(),
+            },
+        ];
+        assert_eq!(applied.text_changes.len(), 1);
+        assert_eq!(applied.text_changes[0].path, "source");
+        assert_eq!(applied.text_changes[0].splices, expected);
+        assert!(!applied.text_changes[0].local);
+
+        let seen_so_far = seen.lock().unwrap().clone();
+        assert_eq!(seen_so_far.len(), 1);
+        assert_eq!(seen_so_far[0].splices, expected);
+        assert!(!seen_so_far[0].local);
+        assert_eq!(
+            reader.get_path("source"),
+            Some(ScalarValue::Str("cdef".into()))
+        );
+
+        // A local edit is reported too, marked local.
+        reader.splice_text("source", 4, 0, "!").unwrap();
+        let seen_so_far = seen.lock().unwrap().clone();
+        assert_eq!(seen_so_far.len(), 2);
+        assert!(seen_so_far[1].local);
+        assert_eq!(
+            seen_so_far[1].splices,
+            vec![TextSplice {
+                position: 4,
+                delete_count: 0,
+                insert: "!".to_string()
+            }]
+        );
+
+        // Edits to another text do not reach this observer.
+        writer.set_text("other", "x").unwrap();
+        reader.apply_changes(writer.get_changes()).unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_text_observer_sees_a_replacement_as_delete_then_insert() {
+        use std::sync::{Arc, Mutex};
+
+        let writer = SwirlDB::new();
+        writer.set_text("source", "old text").unwrap();
+        let reader = SwirlDB::new();
+        reader.apply_changes(writer.get_changes()).unwrap();
+
+        let seen: Arc<Mutex<Vec<TextChange>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        reader.observe_text("source".to_string(), move |change| {
+            sink.lock().unwrap().push(change);
+        });
+
+        let heads = writer.get_heads();
+        writer.set_text("source", "new").unwrap();
+        reader
+            .apply_changes(writer.get_changes_since(&heads))
+            .unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(
+            seen[0].splices,
+            vec![
+                TextSplice {
+                    position: 0,
+                    delete_count: 8,
+                    insert: String::new()
+                },
+                TextSplice {
+                    position: 0,
+                    delete_count: 0,
+                    insert: "new".to_string()
+                },
+            ]
+        );
+        assert_eq!(
+            reader.get_path("source"),
+            Some(ScalarValue::Str("new".into()))
+        );
+    }
+
+    #[test]
+    fn test_concurrent_splices_both_survive() {
+        let alice = SwirlDB::new();
+        alice.set_text("source", "the cat").unwrap();
+        let bob = SwirlDB::new();
+        bob.apply_changes(alice.get_changes()).unwrap();
+        let common = alice.get_heads();
+
+        // Each types at a different place without seeing the other.
+        alice.splice_text("source", 4, 0, "black ").unwrap();
+        bob.splice_text("source", 7, 0, " sat").unwrap();
+
+        bob.apply_changes(alice.get_changes_since(&common)).unwrap();
+        alice.apply_changes(bob.get_changes_since(&common)).unwrap();
+
+        assert_eq!(
+            alice.get_path("source"),
+            Some(ScalarValue::Str("the black cat sat".into()))
+        );
+        assert_eq!(alice.get_path("source"), bob.get_path("source"));
+    }
+
+    #[test]
+    fn test_text_positions_follow_the_instance_encoding() {
+        // "é" is one code point and one UTF-16 unit; "😀" is one code point
+        // and two UTF-16 units. The same document counts differently per view.
+        let code_points = SwirlDB::new();
+        code_points.set_text("source", "é😀x").unwrap();
+
+        let utf16 = SwirlDB::new_with_text_encoding(TextEncoding::Utf16CodeUnit);
+        utf16.apply_changes(code_points.get_changes()).unwrap();
+
+        code_points.splice_text("source", 2, 1, "y").unwrap();
+        assert_eq!(
+            code_points.get_path("source"),
+            Some(ScalarValue::Str("é😀y".into()))
+        );
+
+        let heads = utf16.get_heads();
+        let applied = utf16
+            .apply_changes(code_points.get_changes_since(&heads))
+            .unwrap();
+        // Under UTF-16 the same edit lands at unit 3, after the two of "😀".
+        assert_eq!(applied.text_changes[0].splices[0].position, 3);
+        assert_eq!(applied.text_changes[0].splices[1].position, 3);
+
+        utf16.splice_text("source", 3, 1, "z").unwrap();
+        assert_eq!(
+            utf16.get_path("source"),
+            Some(ScalarValue::Str("é😀z".into()))
+        );
+    }
+
+    #[test]
+    fn test_load_state_reports_a_text_as_replaced() {
+        use std::sync::{Arc, Mutex};
+
+        let db = SwirlDB::new();
+        db.set_text("source", "before").unwrap();
+        let seen: Arc<Mutex<Vec<TextChange>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        db.observe_text("source".to_string(), move |change| {
+            sink.lock().unwrap().push(change);
+        });
+
+        let other = SwirlDB::new();
+        other.set_text("source", "after").unwrap();
+        let applied = db.load_state(&other.save_state()).unwrap();
+
+        let expected = TextSplice {
+            position: 0,
+            delete_count: 6,
+            insert: "after".to_string(),
+        };
+        assert_eq!(applied.text_changes[0].splices, vec![expected.clone()]);
+        assert_eq!(seen.lock().unwrap()[0].splices, vec![expected]);
+    }
+
+    #[test]
+    fn test_affected_paths_name_the_text_not_a_position() {
+        let sender = SwirlDB::new();
+        sender.set_text("pattern.source", "abc").unwrap();
+        let receiver = SwirlDB::new();
+        receiver.apply_changes(sender.get_changes()).unwrap();
+
+        let heads = sender.get_heads();
+        sender.splice_text("pattern.source", 1, 1, "").unwrap();
+        sender.splice_text("pattern.source", 0, 0, "z").unwrap();
+        let paths = receiver
+            .extract_affected_paths(&sender.get_changes_since(&heads))
+            .unwrap();
+        assert_eq!(paths, vec!["pattern.source".to_string()]);
     }
 }

@@ -13,6 +13,8 @@
 //! - One document per client: `connect` opens the default document,
 //!   `open` names one; the server may answer read-only or refuse
 //! - Path-based reads/writes via Automerge
+//! - Text: `set_text` creates one, `splice_text` edits it in place, and
+//!   `on_text_change` reports every edit as splices with positions
 //! - Ephemeral pub/sub messaging (bypasses CRDT/storage for high-frequency data)
 //! - Broadcast channels for change and ephemeral notifications
 //!
@@ -38,7 +40,7 @@ use anyhow::Result;
 use automerge::ScalarValue;
 use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
-use swirldb_core::core::SwirlDB;
+use swirldb_core::core::{SwirlDB, TextChange};
 use swirldb_core::protocol::{Access, Message, DEFAULT_DOCUMENT};
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio::time::{timeout, Duration};
@@ -86,6 +88,9 @@ pub struct SyncClient {
 
     /// Broadcast channel for CRDT change notifications (affected paths)
     change_tx: broadcast::Sender<Vec<String>>,
+
+    /// Broadcast channel for edits to texts, local and remote
+    text_change_tx: broadcast::Sender<TextChange>,
 
     /// Broadcast channel for errors the server sends back, such as a refused write
     error_tx: broadcast::Sender<String>,
@@ -170,6 +175,9 @@ impl SyncClient {
 
         // Change notification broadcast
         let (change_tx, _) = broadcast::channel(100);
+
+        // Text edits, one message per text per batch of changes
+        let (text_change_tx, _) = broadcast::channel(256);
 
         // Server errors (a refused write, an unknown document)
         let (error_tx, _) = broadcast::channel(16);
@@ -285,6 +293,7 @@ impl SyncClient {
         let db_clone = Arc::clone(&db);
         let ephemeral_tx_clone = ephemeral_tx.clone();
         let change_tx_clone = change_tx.clone();
+        let text_change_tx_clone = text_change_tx.clone();
         let error_tx_clone = error_tx.clone();
         let own_document = document.clone();
 
@@ -329,8 +338,13 @@ impl SyncClient {
                                     Ok(Message::Broadcast { from_client_id: _, changes, affected_paths, document: _ }) => {
                                         if !changes.is_empty() {
                                             let db_write = db_clone.write().await;
-                                            if let Err(e) = db_write.apply_changes(changes) {
-                                                error!("Failed to apply broadcast changes: {}", e);
+                                            match db_write.apply_changes(changes) {
+                                                Ok(applied) => {
+                                                    for text_change in applied.text_changes {
+                                                        let _ = text_change_tx_clone.send(text_change);
+                                                    }
+                                                }
+                                                Err(e) => error!("Failed to apply broadcast changes: {}", e),
                                             }
                                         }
                                         let _ = change_tx_clone.send(affected_paths);
@@ -384,6 +398,7 @@ impl SyncClient {
             ws_tx,
             ephemeral_tx,
             change_tx,
+            text_change_tx,
             error_tx,
             _task_handle: task_handle,
             subscriptions,
@@ -444,6 +459,88 @@ impl SyncClient {
             .map_err(|_| anyhow::anyhow!("WebSocket send channel closed"))?;
 
         Ok(())
+    }
+
+    /// Put a text at a path, replacing whatever was there, and push it.
+    ///
+    /// A text merges: two clients splicing into one text both keep their
+    /// characters, where two clients setting one string with `set_path`
+    /// would each replace the other's. Read it back as a string with
+    /// `get_path`. Replacing an existing text discards edits others are
+    /// making to it, so this creates; [`Self::splice_text`] edits.
+    pub async fn set_text(&self, path: &str, text: &str) -> Result<()> {
+        let (frame, replaced_length) = {
+            let db = self.db.write().await;
+            let before = db.get_heads();
+            let replaced_length = db.text_length(path).unwrap_or(0);
+            db.set_text(path, text)?;
+            (self.push_frame_since(&db, &before), replaced_length)
+        };
+        self.send_frame(frame).await?;
+        let _ = self.text_change_tx.send(TextChange {
+            path: path.to_string(),
+            splices: vec![swirldb_core::core::TextSplice {
+                position: 0,
+                delete_count: replaced_length,
+                insert: text.to_string(),
+            }],
+            local: true,
+        });
+        Ok(())
+    }
+
+    /// Edit the text at a path in place and push the edit: remove
+    /// `delete_count` units at `position`, then insert `insert` there.
+    /// Positions are in the local database's text encoding, code points by
+    /// default. Fails when the path does not hold a text.
+    pub async fn splice_text(
+        &self,
+        path: &str,
+        position: usize,
+        delete_count: usize,
+        insert: &str,
+    ) -> Result<()> {
+        let frame = {
+            let db = self.db.write().await;
+            let before = db.get_heads();
+            db.splice_text(path, position, delete_count, insert)?;
+            self.push_frame_since(&db, &before)
+        };
+        self.send_frame(frame).await?;
+        let _ = self.text_change_tx.send(TextChange {
+            path: path.to_string(),
+            splices: vec![swirldb_core::core::TextSplice {
+                position,
+                delete_count,
+                insert: insert.to_string(),
+            }],
+            local: true,
+        });
+        Ok(())
+    }
+
+    /// A `Push` carrying only what happened since `before`. A text edit is
+    /// one keystroke, and sending the whole history with each would make
+    /// typing cost the length of everything typed so far.
+    fn push_frame_since(&self, db: &SwirlDB, before: &[Vec<u8>]) -> Vec<u8> {
+        let changes = if before.is_empty() {
+            db.get_changes()
+        } else {
+            db.get_changes_since(before)
+        };
+        Message::Push {
+            heads: db.get_heads().into_iter().flatten().collect(),
+            changes,
+            document: self.document.clone(),
+        }
+        .encode()
+    }
+
+    async fn send_frame(&self, frame: Vec<u8>) -> Result<()> {
+        self.ws_tx
+            .send(frame)
+            .await
+            .map_err(|_| anyhow::anyhow!("WebSocket send channel closed"))
     }
 
     /// Send an ephemeral message to subscribers matching the given path.
@@ -508,6 +605,15 @@ impl SyncClient {
     /// whenever a `Broadcast` message is received from the server.
     pub fn on_change(&self) -> broadcast::Receiver<Vec<String>> {
         self.change_tx.subscribe()
+    }
+
+    /// Subscribe to edits to texts.
+    ///
+    /// Yields one [`TextChange`] per text per batch: the splices that edited
+    /// it, in order, with positions, and whether this client made them
+    /// (`local`) or they arrived in a `Broadcast`.
+    pub fn on_text_change(&self) -> broadcast::Receiver<TextChange> {
+        self.text_change_tx.subscribe()
     }
 
     /// Subscribe to errors the server sends back — a push refused on a

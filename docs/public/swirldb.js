@@ -244,6 +244,58 @@ var SwirlDB = class _SwirlDB {
     return this.wasmDB.getPath(path);
   }
   /**
+   * Put a text at a path, replacing whatever was there.
+   *
+   * A text merges: two people splicing into one text both keep their
+   * characters, where two people assigning one string each replace the
+   * other's. It reads back as a string through `getPath`, `getValue` and
+   * `db.data.<path>.$value`. Replacing an existing text discards edits others
+   * are making to it, so this creates; `spliceText` edits.
+   *
+   * @example
+   * db.setText('source', 'hue = t');
+   */
+  setText(path, text) {
+    this.wasmDB.setText(path, text);
+  }
+  /**
+   * Edit the text at a path in place: remove `deleteCount` UTF-16 code units
+   * at `position`, then insert `insert` there. Throws when the path holds no
+   * text. Call `syncChanges` to push it.
+   *
+   * @example
+   * db.spliceText('source', 4, 0, 'black ');   // insert
+   * db.spliceText('source', 0, 3, '');         // delete
+   * db.syncChanges();
+   */
+  spliceText(path, position, deleteCount, insert) {
+    this.wasmDB.spliceText(path, position, deleteCount, insert);
+  }
+  /**
+   * The length of the text at a path in UTF-16 code units, or `null` when the
+   * path holds no text.
+   */
+  textLength(path) {
+    const length = this.wasmDB.textLength(path);
+    return length === void 0 ? null : length;
+  }
+  /**
+   * Observe edits to the text at a path. Where `observe` hands a callback the
+   * new value, this hands it the edits, with positions, so an editor can
+   * apply them to what it is showing rather than replace it.
+   *
+   * @example
+   * db.observeText('source', ({ splices, local }) => {
+   *   if (local) return;
+   *   for (const { position, deleteCount, insert } of splices) {
+   *     view.dispatch({ changes: { from: position, to: position + deleteCount, insert } });
+   *   }
+   * });
+   */
+  observeText(path, callback) {
+    this.wasmDB.observeText(path, callback);
+  }
+  /**
    * Set any JavaScript value at a path
    */
   setValue(path, value) {

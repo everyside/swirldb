@@ -44,6 +44,25 @@ enum IpcCommand {
     },
     #[serde(rename = "getDocumentPath")]
     GetDocumentPath { document: String, path: String },
+    #[serde(rename = "setDocumentText")]
+    SetDocumentText {
+        document: String,
+        path: String,
+        text: String,
+    },
+    #[serde(rename = "spliceDocumentText")]
+    SpliceDocumentText {
+        document: String,
+        path: String,
+        position: usize,
+        #[serde(rename = "deleteCount")]
+        delete_count: usize,
+        insert: String,
+    },
+    #[serde(rename = "takeDocumentTextChanges")]
+    TakeDocumentTextChanges { document: String },
+    #[serde(rename = "waitForDocumentTextChange")]
+    WaitForDocumentTextChange { document: String },
     #[serde(rename = "documentAccess")]
     DocumentAccess { document: String },
     #[serde(rename = "sendDocumentPresence")]
@@ -84,6 +103,24 @@ enum IpcResponse {
 pub struct SeenPresence {
     pub path: String,
     pub data: Vec<u8>,
+}
+
+/// One splice as the browser's `observeText` reported it, positions in
+/// UTF-16 code units.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SeenTextSplice {
+    pub position: usize,
+    #[serde(rename = "deleteCount")]
+    pub delete_count: usize,
+    pub insert: String,
+}
+
+/// One text change the browser heard from the server.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SeenTextChange {
+    pub path: String,
+    pub splices: Vec<SeenTextSplice>,
+    pub local: bool,
 }
 
 pub struct BrowserTestClient {
@@ -288,6 +325,78 @@ impl BrowserTestClient {
         self.wait_for_response(|r| matches!(r, IpcResponse::SetComplete))
             .await?;
         Ok(())
+    }
+
+    /// Put a text at a path on one open document, push it, and start
+    /// recording the text changes the server sends for it.
+    pub async fn set_document_text(&self, document: &str, path: &str, text: &str) -> Result<()> {
+        self.send_command(IpcCommand::SetDocumentText {
+            document: document.to_string(),
+            path: path.to_string(),
+            text: text.to_string(),
+        })
+        .await?;
+        self.wait_for_response(|r| matches!(r, IpcResponse::SetComplete))
+            .await?;
+        Ok(())
+    }
+
+    /// Splice the text at a path on one open document and push the edit.
+    /// `position` and `delete_count` are UTF-16 code units, as the browser counts.
+    pub async fn splice_document_text(
+        &self,
+        document: &str,
+        path: &str,
+        position: usize,
+        delete_count: usize,
+        insert: &str,
+    ) -> Result<()> {
+        self.send_command(IpcCommand::SpliceDocumentText {
+            document: document.to_string(),
+            path: path.to_string(),
+            position,
+            delete_count,
+            insert: insert.to_string(),
+        })
+        .await?;
+        self.wait_for_response(|r| matches!(r, IpcResponse::SetComplete))
+            .await?;
+        Ok(())
+    }
+
+    /// The text changes heard from the server on a document since last taken.
+    pub async fn take_document_text_changes(&self, document: &str) -> Result<Vec<SeenTextChange>> {
+        self.send_command(IpcCommand::TakeDocumentTextChanges {
+            document: document.to_string(),
+        })
+        .await?;
+        match self
+            .wait_for_response(|r| matches!(r, IpcResponse::Value { .. }))
+            .await?
+        {
+            IpcResponse::Value { value } => Ok(serde_json::from_value(value)?),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// Wait until the browser has heard at least one text change on a document.
+    pub async fn wait_for_document_text_change(&self, document: &str) -> Result<()> {
+        self.send_command(IpcCommand::WaitForDocumentTextChange {
+            document: document.to_string(),
+        })
+        .await?;
+        match self
+            .wait_for_response(|r| {
+                matches!(
+                    r,
+                    IpcResponse::BroadcastReceived | IpcResponse::Error { .. }
+                )
+            })
+            .await?
+        {
+            IpcResponse::Error { error } => anyhow::bail!("{}", error),
+            _ => Ok(()),
+        }
     }
 
     /// Read a path from one open document's local copy.

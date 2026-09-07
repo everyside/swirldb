@@ -33,3 +33,8 @@ pub use automerge;
 
 // Re-export core SwirlDB for convenience
 pub use core::SwirlDB;
+
+// Text: what a text observer receives, what applying changes reports, and the
+// units positions are counted in
+pub use automerge::TextEncoding;
+pub use core::{Applied, TextChange, TextSplice};

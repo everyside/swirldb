@@ -15,6 +15,29 @@ import init from './wasm/swirldb_browser.js';
 /** What the server granted on an open document. */
 export type Access = 'read' | 'write';
 
+/**
+ * One edit to a text: `deleteCount` UTF-16 code units removed at `position`,
+ * then `insert` put in their place. Positions are string indices as
+ * JavaScript counts them, so an editor's change applies as it is.
+ */
+export interface TextSplice {
+  position: number;
+  deleteCount: number;
+  insert: string;
+}
+
+/**
+ * What happened to one text, handed to an `observeText` callback: the splices
+ * in the order they happened, each against the text as the ones before left
+ * it, and whether this handle made them (`local`) or they arrived from the
+ * server.
+ */
+export interface TextChange {
+  path: string;
+  splices: TextSplice[];
+  local: boolean;
+}
+
 /** The document a handle is on when it was not opened by name. */
 export const DEFAULT_DOCUMENT = 'default';
 
@@ -310,6 +333,62 @@ export class SwirlDB {
 
   getPath(path: string): any {
     return this.wasmDB.getPath(path);
+  }
+
+  /**
+   * Put a text at a path, replacing whatever was there.
+   *
+   * A text merges: two people splicing into one text both keep their
+   * characters, where two people assigning one string each replace the
+   * other's. It reads back as a string through `getPath`, `getValue` and
+   * `db.data.<path>.$value`. Replacing an existing text discards edits others
+   * are making to it, so this creates; `spliceText` edits.
+   *
+   * @example
+   * db.setText('source', 'hue = t');
+   */
+  setText(path: string, text: string): void {
+    this.wasmDB.setText(path, text);
+  }
+
+  /**
+   * Edit the text at a path in place: remove `deleteCount` UTF-16 code units
+   * at `position`, then insert `insert` there. Throws when the path holds no
+   * text. Call `syncChanges` to push it.
+   *
+   * @example
+   * db.spliceText('source', 4, 0, 'black ');   // insert
+   * db.spliceText('source', 0, 3, '');         // delete
+   * db.syncChanges();
+   */
+  spliceText(path: string, position: number, deleteCount: number, insert: string): void {
+    this.wasmDB.spliceText(path, position, deleteCount, insert);
+  }
+
+  /**
+   * The length of the text at a path in UTF-16 code units, or `null` when the
+   * path holds no text.
+   */
+  textLength(path: string): number | null {
+    const length = this.wasmDB.textLength(path);
+    return length === undefined ? null : length;
+  }
+
+  /**
+   * Observe edits to the text at a path. Where `observe` hands a callback the
+   * new value, this hands it the edits, with positions, so an editor can
+   * apply them to what it is showing rather than replace it.
+   *
+   * @example
+   * db.observeText('source', ({ splices, local }) => {
+   *   if (local) return;
+   *   for (const { position, deleteCount, insert } of splices) {
+   *     view.dispatch({ changes: { from: position, to: position + deleteCount, insert } });
+   *   }
+   * });
+   */
+  observeText(path: string, callback: (change: TextChange) => void): void {
+    this.wasmDB.observeText(path, callback);
   }
 
   /**

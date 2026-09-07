@@ -4,7 +4,7 @@ use super::registry::PathRegistry;
 use super::types::PathBuf;
 use anyhow::Result;
 use automerge::patches::{Patch, PatchAction};
-use automerge::{ObjId, Prop};
+use automerge::{ObjId, ObjType, Prop, ReadDoc};
 use std::collections::HashSet;
 
 /// Extracts changed paths from Automerge patches and operations.
@@ -25,12 +25,18 @@ impl PathExtractor {
 
     /// Extract changed paths from patches.
     ///
-    /// Returns a sorted, deduplicated list of path strings.
-    pub fn extract_paths_from_patches(&self, patches: &[Patch]) -> Result<Vec<String>> {
+    /// Returns a sorted, deduplicated list of path strings. The document the
+    /// patches were made against is needed to tell a text from a list: an
+    /// edit inside a text changes the text's path, not an index within it.
+    pub fn extract_paths_from_patches<D: ReadDoc>(
+        &self,
+        doc: &D,
+        patches: &[Patch],
+    ) -> Result<Vec<String>> {
         let mut paths = HashSet::new();
 
         for patch in patches {
-            let path_str = self.patch_to_path(patch);
+            let path_str = self.patch_to_path(doc, patch);
             paths.insert(path_str);
         }
 
@@ -40,7 +46,7 @@ impl PathExtractor {
     }
 
     /// Convert a patch's path to a path string.
-    fn patch_to_path(&self, patch: &Patch) -> String {
+    fn patch_to_path<D: ReadDoc>(&self, doc: &D, patch: &Patch) -> String {
         let mut path = PathBuf::new();
 
         // Build path from the patch's path segments
@@ -51,6 +57,10 @@ impl PathExtractor {
             }
         }
 
+        // A text is one value however many characters it holds, so an edit
+        // anywhere inside it is a change to the text's own path.
+        let in_text = doc.object_type(&patch.obj).ok() == Some(ObjType::Text);
+
         // Add the final property from the action
         match &patch.action {
             PatchAction::PutMap { key, .. } | PatchAction::DeleteMap { key } => {
@@ -58,11 +68,14 @@ impl PathExtractor {
             }
             PatchAction::PutSeq { index, .. }
             | PatchAction::DeleteSeq { index, .. }
-            | PatchAction::Insert { index, .. } => {
+            | PatchAction::Insert { index, .. }
+                if !in_text =>
+            {
                 path.push_index(*index);
             }
             _ => {
-                // Other actions (Increment, SpliceText, Mark, Conflict) don't add to the path
+                // Other actions (Increment, SpliceText, Mark, Conflict) and
+                // anything inside a text don't add to the path
             }
         }
 
@@ -191,7 +204,9 @@ mod tests {
 
         // Extract paths from patches
         let patches = doc.make_patches(&mut patch_log);
-        let paths = extractor.extract_paths_from_patches(&patches).unwrap();
+        let paths = extractor
+            .extract_paths_from_patches(&doc, &patches)
+            .unwrap();
 
         // Should detect change at root.value
         assert_eq!(paths, vec!["value"]);

@@ -133,6 +133,38 @@ rl.on('line', async (line) => {
                 sendIPC({ type: 'set_complete' });
                 break;
 
+            case 'setDocumentText':
+                await page.evaluate(({ document, path, text }) => {
+                    window.testAPI.setDocumentText(document, path, text);
+                }, { document: msg.document, path: msg.path, text: msg.text });
+                sendIPC({ type: 'set_complete' });
+                break;
+
+            case 'spliceDocumentText':
+                await page.evaluate(({ document, path, position, deleteCount, insert }) => {
+                    window.testAPI.spliceDocumentText(document, path, position, deleteCount, insert);
+                }, { document: msg.document, path: msg.path, position: msg.position, deleteCount: msg.deleteCount, insert: msg.insert });
+                sendIPC({ type: 'set_complete' });
+                break;
+
+            case 'takeDocumentTextChanges':
+                const textChanges = await page.evaluate(({ document }) => {
+                    return window.testAPI.takeDocumentTextChanges(document);
+                }, { document: msg.document });
+                sendIPC({ type: 'value', value: textChanges });
+                break;
+
+            case 'waitForDocumentTextChange':
+                try {
+                    await page.evaluate(async ({ document }) => {
+                        await window.testAPI.waitForDocumentTextChange(document);
+                    }, { document: msg.document });
+                    sendIPC({ type: 'broadcast_received' });
+                } catch (err) {
+                    sendIPC({ type: 'error', error: err.message });
+                }
+                break;
+
             case 'getDocumentPath':
                 const documentValue = await page.evaluate(({ document, path }) => {
                     return window.testAPI.getDocumentPath(document, path);

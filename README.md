@@ -17,6 +17,7 @@ Cross-platform CRDT database built on Automerge. Runs in browsers via WebAssembl
 - **Real-time sync**: WebSocket-based synchronization server
 - **Many documents**: a server holds any number of documents, each its own Automerge history, synced whole to whoever has it open; a browser holds several over one connection
 - **Access from an authority**: who may open a document is asked of the application that owns membership, not authored a second time in SwirlDB
+- **Text that merges**: a text at a path is a sequence of characters, not a string; two people splicing into one both keep their characters, and observers hear the edits as splices with positions
 - **Observable**: Field-level change tracking via observers
 - **Policy engine**: Access control for subscriptions within a document
 
@@ -126,6 +127,57 @@ refused; a refused subject never receives the history. See
 
 What stays single-document: server-to-server peer sync (`connect_to_peer`,
 the peer manager, the LAN transport) speaks about the default document only.
+
+## Text, and two people in it
+
+A string set with `setPath` is one value: the next `setPath` replaces it, and
+two people typing into the same string replace each other's work a keystroke
+at a time. A **text** is different. It is an Automerge sequence of characters
+under a path, and an edit to it is a *splice* — so many units removed at a
+position, this string inserted there — which merges with everyone else's
+splices instead of overwriting them. It still reads as a string.
+
+```javascript
+const pattern = await connection.openDocument('pattern.7');
+pattern.setText('source', 'hue = t');           // create; replaces what was there
+pattern.spliceText('source', 4, 0, '2 * ');     // insert at 4
+pattern.spliceText('source', 0, 3, 'sat');      // delete 3 at 0, insert "sat"
+pattern.syncChanges();
+pattern.getPath('source');                       // 'sat = 2 * t'
+pattern.data.source.$value;                      // the same string
+
+pattern.observeText('source', ({ splices, local }) => {
+  if (local) return;                             // this handle's own edits
+  for (const { position, deleteCount, insert } of splices) {
+    editor.dispatch({ changes: { from: position, to: position + deleteCount, insert } });
+  }
+});
+```
+
+`observeText` is the half that makes an editor possible. Where `observe`
+hands a callback the new value, this hands it the edits, in order, each
+against the text as the ones before left it, so an editor applies them to
+what it is showing rather than replacing it and losing the caret. `local` is
+true for the handle's own `spliceText` and `setText`, which the editor that
+made them does not need to hear twice.
+
+**Positions are counted in the units of whoever is looking.** In the browser
+that is UTF-16 code units — what a JavaScript string index is and what an
+editor offset is — so nothing is converted on the way in or out. The Rust
+client and server count code points. The same edit is reported to each in
+its own units; `"😀"` is two in one place and one in the other, and the
+documents still agree. In Rust, `SwirlDB::new_with_text_encoding` chooses.
+
+The Rust client has the same three: `set_text`, `splice_text`, and
+`on_text_change`, a broadcast receiver of `TextChange { path, splices, local }`.
+A `splice_text` pushes only the change it made, not the history, so typing
+costs a keystroke each time rather than everything typed so far.
+
+`setText` on a path that already holds a text replaces the whole text, which
+throws away edits others are making to it at that moment; it is for creating
+a text, and `spliceText` is for changing it. A text observer sees such a
+replacement honestly, as a deletion of all of the old followed by an
+insertion of all of the new.
 
 ## Development
 
