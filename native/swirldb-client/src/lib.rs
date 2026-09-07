@@ -58,6 +58,16 @@ use uuid::Uuid;
 /// Default timeout for the connection handshake (Connect -> SubscribeAck -> Sync).
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The server closed this client's document after it was open: the
+/// authority revoked the subject's access (`reason` is `revoked`). Heard on
+/// [`SyncClient::on_denied`]; the client holds one document, so its
+/// connection ends with it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Denied {
+    pub document: String,
+    pub reason: String,
+}
+
 /// Native Rust client for SwirlDB sync
 ///
 /// Manages a WebSocket connection to a SwirlDB server with a background
@@ -106,6 +116,9 @@ pub struct SyncClient {
 
     /// Broadcast channel for errors the server sends back, such as a refused write
     error_tx: broadcast::Sender<String>,
+
+    /// Broadcast channel for the server closing the document after it was open
+    denied_tx: broadcast::Sender<Denied>,
 
     /// Handle to the background WebSocket task
     _task_handle: tokio::task::JoinHandle<()>,
@@ -240,6 +253,9 @@ impl SyncClient {
         // Server errors (a refused write, an unknown document)
         let (error_tx, _) = broadcast::channel(16);
 
+        // The document closed from the server's side: a revocation
+        let (denied_tx, _) = broadcast::channel(4);
+
         // Send Connect message
         let heads = {
             let db_read = db.read().await;
@@ -357,6 +373,7 @@ impl SyncClient {
         let change_tx_clone = change_tx.clone();
         let text_change_tx_clone = text_change_tx.clone();
         let error_tx_clone = error_tx.clone();
+        let denied_tx_clone = denied_tx.clone();
         let own_document = document.clone();
 
         let task_handle = tokio::spawn(async move {
@@ -431,6 +448,14 @@ impl SyncClient {
                                         error!("Server error: {}", message);
                                         let _ = error_tx_clone.send(message);
                                     }
+                                    // The server closed our one document from its
+                                    // side. Nothing else rides this connection, so
+                                    // it ends here; whoever listens learns why.
+                                    Ok(Message::OpenDenied { document, reason }) => {
+                                        warn!("{} closed by the server: {}", document, reason);
+                                        let _ = denied_tx_clone.send(Denied { document, reason });
+                                        break;
+                                    }
                                     Ok(_) => {}
                                     Err(e) => {
                                         warn!("Failed to decode message: {}", e);
@@ -463,6 +488,7 @@ impl SyncClient {
             change_tx,
             text_change_tx,
             error_tx,
+            denied_tx,
             _task_handle: task_handle,
             subscriptions,
         })
@@ -747,6 +773,14 @@ impl SyncClient {
     /// read-only document, for one.
     pub fn on_error(&self) -> broadcast::Receiver<String> {
         self.error_tx.subscribe()
+    }
+
+    /// Subscribe to the server closing this document after it was open,
+    /// which a revocation does. One [`Denied`] arrives, naming the reason,
+    /// and the connection is over: further writes fail to send, and a new
+    /// client must be opened — which the authority will answer afresh.
+    pub fn on_denied(&self) -> broadcast::Receiver<Denied> {
+        self.denied_tx.subscribe()
     }
 
     /// Get a read lock on the underlying SwirlDB instance.

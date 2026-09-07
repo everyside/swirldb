@@ -117,9 +117,9 @@ rl.on('line', async (line) => {
 
             case 'openDocuments':
                 try {
-                    const opened = await page.evaluate(async ({ wsUrl, documents }) => {
-                        return await window.testAPI.openDocuments(wsUrl, documents);
-                    }, { wsUrl: msg.wsUrl, documents: msg.documents });
+                    const opened = await page.evaluate(async ({ wsUrl, documents, token }) => {
+                        return await window.testAPI.openDocuments(wsUrl, documents, token);
+                    }, { wsUrl: msg.wsUrl, documents: msg.documents, token: msg.token });
                     sendIPC({ type: 'documents_opened', documents: opened });
                 } catch (err) {
                     sendIPC({ type: 'error', error: err.message });
@@ -209,6 +209,29 @@ rl.on('line', async (line) => {
                     return window.testAPI.getDocumentPath(document, path);
                 }, { document: msg.document, path: msg.path });
                 sendIPC({ type: 'value', value: documentValue });
+                break;
+
+            case 'openDocumentsList':
+                const openList = await page.evaluate(() => window.testAPI.openDocumentsList());
+                sendIPC({ type: 'value', value: openList });
+                break;
+
+            case 'takeDocumentDenials':
+                const denials = await page.evaluate(({ document }) => {
+                    return window.testAPI.takeDocumentDenials(document);
+                }, { document: msg.document });
+                sendIPC({ type: 'value', value: denials });
+                break;
+
+            case 'waitForDocumentDenial':
+                try {
+                    await page.evaluate(async ({ document }) => {
+                        await window.testAPI.waitForDocumentDenial(document);
+                    }, { document: msg.document });
+                    sendIPC({ type: 'broadcast_received' });
+                } catch (err) {
+                    sendIPC({ type: 'error', error: err.message });
+                }
                 break;
 
             case 'documentAccess':

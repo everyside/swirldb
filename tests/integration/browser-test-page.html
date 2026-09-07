@@ -19,6 +19,8 @@
         const textChanges = new Map();
         // Per document and path, every observer call: { value, path, changedPaths, local }.
         const observations = new Map();
+        // Per document, the reasons the server gave for closing it.
+        const denials = new Map();
 
         window.testAPI = {
             async connect(wsUrl, subscriptions) {
@@ -108,15 +110,19 @@
 
             /// Open every named document on one connection; resolves when all
             /// have their history. A refused document rejects with its reason.
-            async openDocuments(wsUrl, documents) {
+            async openDocuments(wsUrl, documents, token) {
                 await init();
-                connection = new Connection(wsUrl, `browser-${Date.now()}`);
+                connection = new Connection(wsUrl, `browser-${Date.now()}`, token ?? undefined);
                 for (const document of documents) {
                     const handle = await connection.openDocument(document, ['**']);
                     handles.set(document, handle);
                     changes.set(document, 0);
                     presence.set(document, []);
                     textChanges.set(document, []);
+                    denials.set(document, []);
+                    handle.onDenied((reason) => {
+                        denials.get(document).push(reason);
+                    });
                     // An observer on "**" fires for every write on this document;
                     // the ones this browser made are passed by, so the count is
                     // what arrived from the server.
@@ -235,6 +241,32 @@
 
             documentAccess(document) {
                 return handles.get(document).access;
+            },
+
+            openDocumentsList() {
+                return connection.openDocuments();
+            },
+
+            takeDocumentDenials(document) {
+                const seen = denials.get(document) ?? [];
+                denials.set(document, []);
+                return seen;
+            },
+
+            waitForDocumentDenial(document, timeout = 2000) {
+                return new Promise((resolve, reject) => {
+                    const start = Date.now();
+                    const check = () => {
+                        if ((denials.get(document) ?? []).length > 0) {
+                            resolve();
+                        } else if (Date.now() - start > timeout) {
+                            reject(new Error(`Timeout waiting for ${document} to be closed`));
+                        } else {
+                            setTimeout(check, 10);
+                        }
+                    };
+                    check();
+                });
             },
 
             sendDocumentPresence(document, path, bytes) {

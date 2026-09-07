@@ -15,7 +15,7 @@
 //!
 //! Shared between the production server and integration test infrastructure.
 
-use crate::state::{BroadcastMessage, EphemeralMessage, OpenError, ServerState};
+use crate::state::{BroadcastMessage, ControlMessage, EphemeralMessage, OpenError, ServerState};
 use axum::extract::ws::{Message as WsMessage, WebSocket};
 use axum::http::{header::AUTHORIZATION, HeaderMap};
 use futures::stream::SplitSink;
@@ -193,6 +193,7 @@ pub async fn handle_websocket(socket: WebSocket, state: ServerState, token: Opti
     let mut client_info: Option<String> = None;
     let mut broadcast_rx: Option<tokio::sync::broadcast::Receiver<BroadcastMessage>> = None;
     let mut ephemeral_rx: Option<tokio::sync::broadcast::Receiver<EphemeralMessage>> = None;
+    let mut control_rx: Option<tokio::sync::broadcast::Receiver<ControlMessage>> = None;
 
     loop {
         tokio::select! {
@@ -239,6 +240,7 @@ pub async fn handle_websocket(socket: WebSocket, state: ServerState, token: Opti
                                 client_info = Some(client_id.clone());
                                 broadcast_rx = Some(state.subscribe_to_broadcasts());
                                 ephemeral_rx = Some(state.subscribe_to_ephemeral());
+                                control_rx = Some(state.subscribe_to_control());
 
                                 if !open_and_answer(
                                     &state, &mut sender, connection_id, &client_id,
@@ -464,6 +466,38 @@ pub async fn handle_websocket(socket: WebSocket, state: ServerState, token: Opti
                     }
                     Err(e) => {
                         error!("Broadcast receive error: {}", e);
+                        break;
+                    }
+                }
+            }
+
+            // A word from the server about this connection
+            control = async {
+                match &mut control_rx {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match control {
+                    Ok(ControlMessage::Revoked { connection, document }) => {
+                        if connection != connection_id {
+                            continue;
+                        }
+                        // The server has already dropped the document from
+                        // this connection; the client is told why. The socket
+                        // stays: it may open something else.
+                        if !send(&mut sender, Message::OpenDenied {
+                            document,
+                            reason: "revoked".to_string(),
+                        }).await {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("Client {} lagged by {} control messages", connection_id, n);
+                    }
+                    Err(e) => {
+                        error!("Control receive error: {}", e);
                         break;
                     }
                 }

@@ -36,6 +36,13 @@ impl RustClient {
         ))
     }
 
+    /// Connect with a bearer token and open the named document
+    pub async fn open_authenticated(ws_url: &str, token: &str, document: &str) -> Result<Self> {
+        Ok(Self::wrap(
+            SyncClient::open_authenticated(ws_url, token, document, vec!["**".to_string()]).await?,
+        ))
+    }
+
     fn wrap(inner: SyncClient) -> Self {
         let change_rx = inner.on_change();
         let ephemeral_rx = inner.on_ephemeral();

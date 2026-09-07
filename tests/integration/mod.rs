@@ -31,6 +31,7 @@ mod multi_document;
 mod network_resilience;
 mod observers;
 mod policy_enforcement;
+mod revocation;
 mod subscription_filtering;
 mod text;
 

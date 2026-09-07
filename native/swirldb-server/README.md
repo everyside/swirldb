@@ -73,7 +73,7 @@ Environment variables:
 | `PORT` | 3030 | WebSocket server port |
 | `RUST_LOG` | (none) | Log level: `error`, `warn`, `info`, `debug`, `trace` |
 | `AUTHORITY_URL` | (none) | Base URL of the application that answers `POST /whoami` (whose token is this) and `POST /may-open` (may this subject open this document). Without it every connection is whoever it says it is and every document is open to it, and the log says so |
-| `AUTHORITY_SECRET` | (none) | Shared secret sent to the authority as `Authorization: Bearer <secret>` on both questions, so the application can refuse to answer anyone else. Without it the only credential a request can carry is user-info in `AUTHORITY_URL` (`http://swirldb:<secret>@host/authority`, sent as `Basic`); that form is kept for one release and dropped from the URL whenever `AUTHORITY_SECRET` is set |
+| `AUTHORITY_SECRET` | (none) | Shared secret sent to the authority as `Authorization: Bearer <secret>` on both questions, so the application can refuse to answer anyone else, and required as the bearer on `POST /admin/revoke`, so nobody else can give the server orders. Without it the only credential a request can carry is user-info in `AUTHORITY_URL` (`http://swirldb:<secret>@host/authority`, sent as `Basic`); that form is kept for one release and dropped from the URL whenever `AUTHORITY_SECRET` is set — and `/admin/revoke` stays closed |
 
 ## Endpoints
 
@@ -133,6 +133,46 @@ Returns:
   "last_activity": 1735264200000
 }
 ```
+
+#### POST `/admin/revoke`
+
+Close what a subject has open, now. The authority is asked once, at open,
+and a connection holds that answer for as long as the document is open; the
+ten seconds an answer is cached only decides how soon a *reopen* is refused.
+This is the other direction of the seam: the application that owns
+membership says a subject's access ended, and the server acts on it.
+
+```bash
+curl -X POST http://localhost:3030/admin/revoke \
+  -H "Authorization: Bearer $AUTHORITY_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"subject": "alice", "document": "palette.3"}'
+```
+
+`subject` is the `id` of the actor the authority's `/whoami` named for the
+connection — never a `client_id`, which a connection chooses for itself.
+`document` is the id to close on the subject's connections, or `null` for
+every document the subject has open.
+
+What happens: the server drops the document from every connection the
+subject holds and sends each an `OpenDenied` naming the reason `revoked`
+(the browser handle's `onDenied` fires and its `access` reads `null`; the
+Rust client's `on_denied` yields and its connection ends); the connections
+themselves stay up, so a client may open something else on one; and the
+authority forgets what it cached about the subject — the one document's
+answer, or with `null` every answer and whose token it is — so a reopen is
+asked afresh. The order is important: the cache is cleared after the close,
+so a reopen that races the revocation cannot be admitted out of it.
+
+Returns what was closed, by client id; empty when the subject held nothing,
+which is not an error:
+```json
+{ "closed": [{ "client_id": "alice-laptop", "document": "palette.3" }] }
+```
+
+`401` for a missing or wrong bearer, `400` for an empty subject, and `403`
+when the server has no `AUTHORITY_SECRET`: an order anyone can give is not
+an order, so without a secret the endpoint is closed rather than open.
 
 ## Architecture
 

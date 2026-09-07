@@ -92,6 +92,13 @@ async fn main() -> Result<()> {
     // Without AUTHORITY_URL every connection is whoever it says it is and
     // every document is open to it, which is right for a laptop and wrong
     // for anything else.
+    // The shared secret, in its own place: the bearer on every question the
+    // server asks its authority, and the bearer every order from the
+    // application must carry back.
+    let authority_secret = env::var("AUTHORITY_SECRET")
+        .ok()
+        .filter(|secret| !secret.is_empty());
+
     let authority: Arc<dyn Authority> = match env::var("AUTHORITY_URL") {
         Ok(url) if !url.is_empty() => {
             // The URL may carry a secret as user-info; the log never does.
@@ -105,8 +112,8 @@ async fn main() -> Result<()> {
             // The credential the authority checks before answering. Without
             // it the only thing the request can carry is user-info from the
             // URL, sent as Basic, which is the older way and on its way out.
-            let authority = match env::var("AUTHORITY_SECRET") {
-                Ok(secret) if !secret.is_empty() => {
+            let authority = match authority_secret.clone() {
+                Some(secret) => {
                     if carries_user_info {
                         info!("AUTHORITY_URL carries user-info; AUTHORITY_SECRET is sent instead, as a bearer");
                     } else {
@@ -133,6 +140,16 @@ async fn main() -> Result<()> {
 
     // Create server state with storage
     let server_state = ServerState::with_authority(policy, storage, authority).await;
+    let server_state = match authority_secret {
+        Some(secret) => {
+            info!("POST /admin/revoke is open to requests bearing AUTHORITY_SECRET");
+            server_state.with_admin_secret(secret)
+        }
+        None => {
+            info!("POST /admin/revoke is closed: no AUTHORITY_SECRET");
+            server_state
+        }
+    };
 
     // Load optional config file for remotes
     let remotes = load_remotes_config();
@@ -169,6 +186,7 @@ async fn main() -> Result<()> {
         .route("/health", get(health_handler))
         .route("/stats", get(stats_handler))
         .route("/admin/events", get(admin_sse_handler))
+        .merge(swirldb_server::admin::router())
         .layer(CorsLayer::permissive())
         .with_state(server_state.clone());
 

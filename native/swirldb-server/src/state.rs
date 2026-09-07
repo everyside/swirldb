@@ -77,6 +77,12 @@ pub enum ActivityEvent {
         document: String,
         timestamp: i64,
     },
+    DocumentRevoked {
+        client_id: String,
+        subject: String,
+        document: String,
+        timestamp: i64,
+    },
     SubscriptionUpdated {
         client_id: String,
         document: String,
@@ -97,7 +103,6 @@ pub enum ActivityEvent {
 #[derive(Debug, Clone)]
 pub struct ClientInfo {
     pub client_id: String,
-    #[allow(dead_code)]
     pub connection_id: Uuid,
     pub actor: Actor,
     pub transport: String,
@@ -123,6 +128,22 @@ pub enum OpenError {
     Refused { subject: String, document: String },
     #[error("no client is registered on this connection")]
     NotConnected,
+}
+
+/// A word from the server to one connection's handler, which is the only
+/// thing that can write to that connection's socket.
+#[derive(Debug, Clone)]
+pub enum ControlMessage {
+    /// The connection's access to a document was revoked; the handler tells
+    /// the client and the server has already dropped the document from it.
+    Revoked { connection: Uuid, document: String },
+}
+
+/// One document closed by a revocation: on which connection, by client id.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Revoked {
+    pub client_id: String,
+    pub document: String,
 }
 
 /// Broadcast message to subscribers
@@ -207,6 +228,14 @@ pub struct ServerState {
     /// Ephemeral broadcast channel for high-frequency pub/sub (bypasses CRDT/storage)
     ephemeral_tx: broadcast::Sender<EphemeralMessage>,
 
+    /// Control channel: every handler listens, each acts on what names its
+    /// own connection. Revocations travel here.
+    control_tx: broadcast::Sender<ControlMessage>,
+
+    /// The secret an administrative request must present as a bearer. None
+    /// keeps the administrative endpoints closed.
+    admin_secret: Option<Arc<str>>,
+
     /// Active clients indexed by connection_id
     clients: Arc<DashMap<Uuid, ClientInfo>>,
 
@@ -254,6 +283,7 @@ impl ServerState {
     ) -> Self {
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CHANNEL_SIZE);
         let (ephemeral_tx, _) = broadcast::channel(EPHEMERAL_CHANNEL_SIZE);
+        let (control_tx, _) = broadcast::channel(EPHEMERAL_CHANNEL_SIZE);
 
         let default_document: Document = Arc::new(RwLock::new(
             SwirlDB::with_storage(storage.clone(), DEFAULT_DOCUMENT).await,
@@ -270,6 +300,8 @@ impl ServerState {
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
             broadcast_tx,
             ephemeral_tx,
+            control_tx,
+            admin_secret: None,
             clients: Arc::new(DashMap::new()),
             start_time: Arc::new(SystemTime::now()),
             activity_log: Arc::new(RwLock::new(VecDeque::new())),
@@ -285,6 +317,25 @@ impl ServerState {
             )),
             server_id: format!("srv-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
         }
+    }
+
+    /// Open the administrative endpoints to requests bearing `secret`. It is
+    /// the same secret the server presents to its authority, so the
+    /// application that answers the server's questions is the one that may
+    /// give it orders.
+    pub fn with_admin_secret(mut self, secret: impl Into<Arc<str>>) -> Self {
+        self.admin_secret = Some(secret.into());
+        self
+    }
+
+    /// The secret an administrative request must present, if any.
+    pub fn admin_secret(&self) -> Option<&str> {
+        self.admin_secret.as_deref()
+    }
+
+    /// Get a receiver for control messages
+    pub fn subscribe_to_control(&self) -> broadcast::Receiver<ControlMessage> {
+        self.control_tx.subscribe()
     }
 
     /// The default document.
@@ -620,25 +671,87 @@ impl ServerState {
 
     /// Close one document on a connection; the connection stays.
     pub async fn close_document(&self, connection_id: &Uuid, document: &str) {
-        let client_id = match self.clients.get_mut(connection_id) {
-            Some(mut client) => {
-                client.documents.remove(document);
-                client.client_id.clone()
-            }
-            None => return,
+        let Some(client_id) = self.drop_document(connection_id, document).await else {
+            return;
         };
-        {
-            let mut managers = self.subscriptions.lock().await;
-            if let Some(manager) = managers.get_mut(document) {
-                manager.remove_client(&client_id);
-            }
-        }
         self.log_activity(ActivityEvent::DocumentClosed {
             client_id,
             document: document.to_string(),
             timestamp: now_timestamp(),
         })
         .await;
+    }
+
+    /// Take a document off a connection: no more broadcasts, no more
+    /// pushes. Returns the connection's client id, or nothing when there is
+    /// no such connection.
+    async fn drop_document(&self, connection_id: &Uuid, document: &str) -> Option<String> {
+        let client_id = {
+            let mut client = self.clients.get_mut(connection_id)?;
+            client.documents.remove(document);
+            client.client_id.clone()
+        };
+        let mut managers = self.subscriptions.lock().await;
+        if let Some(manager) = managers.get_mut(document) {
+            manager.remove_client(&client_id);
+        }
+        Some(client_id)
+    }
+
+    /// Revoke a subject's access: close `document` on every connection the
+    /// subject holds — every document the subject has open, when none is
+    /// named — tell each such connection with an `OpenDenied` naming the
+    /// reason `revoked`, and have the authority forget what it remembered
+    /// about the subject, so a reopen is asked afresh. The connections
+    /// themselves stay up; a client may open something else on one.
+    /// Returns what was closed, by client id.
+    ///
+    /// The subject is the authority's name for a connection, the `id` of
+    /// the actor its `whoami` answered — never a client id, which a
+    /// connection chooses for itself.
+    pub async fn revoke(&self, subject: &str, document: Option<&str>) -> Vec<Revoked> {
+        let held: Vec<(Uuid, Vec<String>)> = self
+            .clients
+            .iter()
+            .filter(|client| client.actor.id == subject)
+            .map(|client| {
+                let documents = client
+                    .documents
+                    .keys()
+                    .filter(|held| document.is_none_or(|named| named == held.as_str()))
+                    .cloned()
+                    .collect();
+                (client.connection_id, documents)
+            })
+            .collect();
+
+        let mut revoked = Vec::new();
+        for (connection, documents) in held {
+            for document in documents {
+                let Some(client_id) = self.drop_document(&connection, &document).await else {
+                    continue;
+                };
+                let _ = self.control_tx.send(ControlMessage::Revoked {
+                    connection,
+                    document: document.clone(),
+                });
+                self.log_activity(ActivityEvent::DocumentRevoked {
+                    client_id: client_id.clone(),
+                    subject: subject.to_string(),
+                    document: document.clone(),
+                    timestamp: now_timestamp(),
+                })
+                .await;
+                info!("🚫 {} revoked on {} ({})", subject, document, client_id);
+                revoked.push(Revoked {
+                    client_id,
+                    document,
+                });
+            }
+        }
+
+        self.authority.forget(subject, document).await;
+        revoked
     }
 
     /// What this connection may do with the document, if it has it open.
@@ -1113,6 +1226,67 @@ mod tests {
             .await
             .get_path("name")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn revoking_closes_the_subjects_documents_and_nobody_elses() {
+        let state = ServerState::new(None, Arc::new(InMemoryDocStorage::new())).await;
+        let mut control = state.subscribe_to_control();
+        let alice = Uuid::new_v4();
+        let bob = Uuid::new_v4();
+        // Alice's client calls itself "not-alice": the subject is the actor.
+        state
+            .register_client(alice, "not-alice".into(), actor("alice"), "test".into())
+            .await;
+        state
+            .register_client(bob, "bob".into(), actor("bob"), "test".into())
+            .await;
+        for connection in [alice, bob] {
+            for document in ["alpha", "beta"] {
+                state
+                    .open_document(&connection, document, vec!["**".into()])
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let closed = state.revoke("alice", Some("alpha")).await;
+        assert_eq!(
+            closed,
+            vec![Revoked {
+                client_id: "not-alice".into(),
+                document: "alpha".into()
+            }]
+        );
+        assert!(state.document_access(&alice, "alpha").is_none());
+        assert_eq!(state.document_access(&alice, "beta"), Some(Access::Write));
+        assert_eq!(state.document_access(&bob, "alpha"), Some(Access::Write));
+        assert_eq!(
+            state.subscribers_for_paths("alpha", &["name".into()]).await,
+            vec!["bob".to_string()]
+        );
+        match control.try_recv().unwrap() {
+            ControlMessage::Revoked {
+                connection,
+                document,
+            } => {
+                assert_eq!(connection, alice);
+                assert_eq!(document, "alpha");
+            }
+        }
+
+        // No document named: everything the subject still holds.
+        let closed = state.revoke("alice", None).await;
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].document, "beta");
+        assert!(state.document_access(&alice, "beta").is_none());
+        assert_eq!(state.document_access(&bob, "beta"), Some(Access::Write));
+        assert!(state.get_client(&alice).is_some(), "the connection stays");
+
+        // A subject nobody is: nothing to close, nothing wrong.
+        assert!(state.revoke("carol", None).await.is_empty());
+        assert!(control.try_recv().is_ok());
+        assert!(control.try_recv().is_err());
     }
 
     #[tokio::test]

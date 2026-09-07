@@ -60,6 +60,9 @@ thread_local! {
     static NEXT_HANDLER_ID: RefCell<u32> = const { RefCell::new(0) };
     /// Text observers: (handle id, path, callback)
     static TEXT_OBSERVERS: RefCell<Vec<(usize, String, Function)>> = const { RefCell::new(Vec::new()) };
+    /// Denial handlers: (handle id, callback), told when the server closes
+    /// an open document
+    static DENIED_HANDLERS: RefCell<Vec<(usize, Function)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// The text encoding every handle in the browser is built with.
@@ -269,6 +272,21 @@ fn fire_text_observers(handle_id: usize, changes: &[TextChange]) {
     }
 }
 
+/// Tell a handle's denial handlers the server closed its document.
+fn fire_denied_handlers(handle_id: usize, reason: &str) {
+    let callbacks: Vec<Function> = DENIED_HANDLERS.with(|handlers| {
+        handlers
+            .borrow()
+            .iter()
+            .filter(|(id, _)| *id == handle_id)
+            .map(|(_, callback)| callback.clone())
+            .collect()
+    });
+    for callback in callbacks {
+        let _ = callback.call1(&JsValue::NULL, &JsValue::from_str(reason));
+    }
+}
+
 /// Fire every observer of a handle: the whole document arrived or was
 /// replaced, and nothing narrower is honest. The change names `**`.
 fn fire_all_observers(handle_id: usize, core: &CoreSwirlDB, local: bool) {
@@ -430,15 +448,26 @@ fn dispatch(connection_id: usize, msg: Message) {
 
         Message::OpenDenied { document, reason } => {
             web_sys::console::warn_1(&format!("🚫 {}: {}", document, reason).into());
-            let waiting = CONNECTIONS.with(|connections| {
+            // Either the open never succeeded, and its promise is rejected,
+            // or the document was open and the server has closed it — a
+            // revocation — and the handle's denial handlers hear why. The
+            // binding goes either way: access reads null, syncChanges sends
+            // nothing, and the socket stays for the other documents.
+            let removed = CONNECTIONS.with(|connections| {
                 connections
                     .borrow_mut()
                     .get_mut(&connection_id)
                     .and_then(|connection| connection.documents.remove(&document))
-                    .and_then(|binding| binding.waiting)
             });
-            if let Some((_resolve, reject, _handle)) = waiting {
-                let _ = reject.call1(&JsValue::NULL, &JsValue::from_str(&reason));
+            match removed {
+                Some(DocumentBinding {
+                    waiting: Some((_resolve, reject, _handle)),
+                    ..
+                }) => {
+                    let _ = reject.call1(&JsValue::NULL, &JsValue::from_str(&reason));
+                }
+                Some(binding) => fire_denied_handlers(binding.handle_id, &reason),
+                None => {}
             }
         }
 
@@ -972,6 +1001,23 @@ impl SwirlDB {
     pub fn observe_text(&self, path: String, callback: Function) {
         TEXT_OBSERVERS.with(|observers| {
             observers.borrow_mut().push((self.id, path, callback));
+        });
+    }
+
+    /// Hear the server close this document after it was open, which a
+    /// revocation does: the callback is handed the reason, `"revoked"`.
+    /// From then on `access` is `null`, `syncChanges` sends nothing, and the
+    /// connection's other documents are unaffected. A fresh `openDocument`
+    /// asks the authority again.
+    ///
+    /// Example:
+    /// ```javascript
+    /// db.onDenied((reason) => showReadOnlyBanner(reason));
+    /// ```
+    #[wasm_bindgen(js_name = onDenied)]
+    pub fn on_denied(&self, callback: Function) {
+        DENIED_HANDLERS.with(|handlers| {
+            handlers.borrow_mut().push((self.id, callback));
         });
     }
 

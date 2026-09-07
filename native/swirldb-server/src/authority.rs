@@ -48,6 +48,15 @@ pub trait Authority: Send + Sync {
     /// editing, `None` refuses. The subject is whoever [`Self::subject`]
     /// said the connection is; the document is its id, opaque to SwirlDB.
     async fn may_open(&self, subject: &Actor, document: &str) -> Option<Access>;
+
+    /// Forget whatever this authority remembers about `subject`: its answer
+    /// for `document`, or, with no document named, every answer about the
+    /// subject and whose token it is. The next question is then asked
+    /// afresh. This is what a revocation calls, so that a subject whose
+    /// membership just ended is not admitted again out of a cache. An
+    /// authority that remembers nothing has nothing to do, which is the
+    /// default.
+    async fn forget(&self, _subject: &str, _document: Option<&str>) {}
 }
 
 /// The subject a connection gets when nobody can verify one: anonymous,
@@ -415,6 +424,20 @@ impl Authority for HttpAuthority {
         self.remember(key, answer);
         answer
     }
+
+    async fn forget(&self, subject: &str, document: Option<&str>) {
+        match document {
+            Some(document) => {
+                self.cache
+                    .remove(&(subject.to_string(), document.to_string()));
+            }
+            None => {
+                self.cache.retain(|(id, _), _| id != subject);
+                self.subjects
+                    .retain(|_, (actor, _)| actor.as_ref().is_none_or(|actor| actor.id != subject));
+            }
+        }
+    }
 }
 
 /// `url` with any user-info removed: `http://swirldb:secret@host/authority`
@@ -595,6 +618,39 @@ mod tests {
         // Nothing listens here; the refusal must be a refusal, not a panic.
         let authority = HttpAuthority::new("http://127.0.0.1:9/nowhere");
         assert_eq!(authority.may_open(&user("alice"), "doc").await, None);
+    }
+
+    #[tokio::test]
+    async fn forgetting_a_subject_empties_what_was_cached_about_it() {
+        // Nothing listens at the endpoint, so whatever is answered after a
+        // forget is answered by asking, and asking refuses.
+        let authority =
+            HttpAuthority::with_time_to_live("http://127.0.0.1:9/nowhere", Duration::from_secs(60));
+        authority.remember(("alice".into(), "doc.1".into()), Some(Access::Write));
+        authority.remember(("alice".into(), "doc.2".into()), Some(Access::Write));
+        authority.remember(("bob".into(), "doc.1".into()), Some(Access::Read));
+        authority.remember_subject("alice-token", Some(user("alice")));
+        authority.remember_subject("bob-token", Some(user("bob")));
+
+        // One document: that answer alone is gone.
+        authority.forget("alice", Some("doc.1")).await;
+        assert_eq!(authority.may_open(&user("alice"), "doc.1").await, None);
+        assert_eq!(
+            authority.may_open(&user("alice"), "doc.2").await,
+            Some(Access::Write)
+        );
+        assert!(authority.subject(Some("alice-token"), "x").await.is_some());
+
+        // Every document: every answer about the subject, its token too,
+        // and nothing about anybody else.
+        authority.forget("alice", None).await;
+        assert_eq!(authority.may_open(&user("alice"), "doc.2").await, None);
+        assert!(authority.subject(Some("alice-token"), "x").await.is_none());
+        assert_eq!(
+            authority.may_open(&user("bob"), "doc.1").await,
+            Some(Access::Read)
+        );
+        assert!(authority.subject(Some("bob-token"), "x").await.is_some());
     }
 
     #[tokio::test]

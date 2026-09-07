@@ -35,7 +35,14 @@ enum IpcCommand {
         #[serde(rename = "wsUrl")]
         ws_url: String,
         documents: Vec<String>,
+        token: Option<String>,
     },
+    #[serde(rename = "openDocumentsList")]
+    OpenDocumentsList,
+    #[serde(rename = "takeDocumentDenials")]
+    TakeDocumentDenials { document: String },
+    #[serde(rename = "waitForDocumentDenial")]
+    WaitForDocumentDenial { document: String },
     #[serde(rename = "setDocumentPath")]
     SetDocumentPath {
         document: String,
@@ -173,12 +180,23 @@ impl BrowserTestClient {
     /// Start a browser and open several documents over one `Connection`.
     /// Fails with the server's reason when a document is refused.
     pub async fn start_with_documents(ws_url: &str, documents: Vec<String>) -> Result<Self> {
+        Self::start_with_documents_as(ws_url, documents, None).await
+    }
+
+    /// Start a browser and open several documents over one `Connection`
+    /// that presents `token` to the server's authority.
+    pub async fn start_with_documents_as(
+        ws_url: &str,
+        documents: Vec<String>,
+        token: Option<&str>,
+    ) -> Result<Self> {
         let client = Self::launch().await?;
 
         client
             .send_command(IpcCommand::OpenDocuments {
                 ws_url: ws_url.to_string(),
                 documents: documents.clone(),
+                token: token.map(str::to_string),
             })
             .await?;
 
@@ -499,6 +517,53 @@ impl BrowserTestClient {
         self.send_command(IpcCommand::WaitForDocumentObservation {
             document: document.to_string(),
             path: path.to_string(),
+        })
+        .await?;
+        match self
+            .wait_for_response(|r| {
+                matches!(
+                    r,
+                    IpcResponse::BroadcastReceived | IpcResponse::Error { .. }
+                )
+            })
+            .await?
+        {
+            IpcResponse::Error { error } => anyhow::bail!("{}", error),
+            _ => Ok(()),
+        }
+    }
+
+    /// The documents open on the browser's connection, sorted.
+    pub async fn open_documents(&self) -> Result<Vec<String>> {
+        self.send_command(IpcCommand::OpenDocumentsList).await?;
+        match self
+            .wait_for_response(|r| matches!(r, IpcResponse::Value { .. }))
+            .await?
+        {
+            IpcResponse::Value { value } => Ok(serde_json::from_value(value)?),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// The reasons the server gave for closing a document since last taken.
+    pub async fn take_document_denials(&self, document: &str) -> Result<Vec<String>> {
+        self.send_command(IpcCommand::TakeDocumentDenials {
+            document: document.to_string(),
+        })
+        .await?;
+        match self
+            .wait_for_response(|r| matches!(r, IpcResponse::Value { .. }))
+            .await?
+        {
+            IpcResponse::Value { value } => Ok(serde_json::from_value(value)?),
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// Wait until the server has closed a document on the browser.
+    pub async fn wait_for_document_denial(&self, document: &str) -> Result<()> {
+        self.send_command(IpcCommand::WaitForDocumentDenial {
+            document: document.to_string(),
         })
         .await?;
         match self

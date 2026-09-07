@@ -41,17 +41,27 @@ impl TestServer {
     pub async fn start_with_policy(
         policy: Option<swirldb_core::policy::PolicyEngine>,
     ) -> Result<Self> {
-        Self::start_with(policy, Arc::new(OpenToAll)).await
+        Self::start_with(policy, Arc::new(OpenToAll), None).await
     }
 
     /// Start a test server whose documents open only as `authority` allows
     pub async fn start_with_authority(authority: Arc<dyn Authority>) -> Result<Self> {
-        Self::start_with(None, authority).await
+        Self::start_with(None, authority, None).await
+    }
+
+    /// Start a test server with an authority and the secret its
+    /// administrative endpoints require
+    pub async fn start_with_authority_and_secret(
+        authority: Arc<dyn Authority>,
+        secret: &str,
+    ) -> Result<Self> {
+        Self::start_with(None, authority, Some(secret)).await
     }
 
     async fn start_with(
         policy: Option<swirldb_core::policy::PolicyEngine>,
         authority: Arc<dyn Authority>,
+        admin_secret: Option<&str>,
     ) -> Result<Self> {
         // Bind to port 0 to get a random available port
         let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -60,9 +70,14 @@ impl TestServer {
 
         let storage = Arc::new(InMemoryDocStorage::new());
         let state = ServerState::with_authority(policy, storage, authority).await;
+        let state = match admin_secret {
+            Some(secret) => state.with_admin_secret(secret),
+            None => state,
+        };
 
         let app = Router::new()
             .route("/ws", get(websocket_handler))
+            .merge(swirldb_server::admin::router())
             .layer(CorsLayer::permissive())
             .with_state(state.clone());
 
@@ -92,6 +107,11 @@ impl TestServer {
     /// Get the WebSocket URL for this server
     pub fn ws_url(&self) -> String {
         format!("ws://127.0.0.1:{}/ws", self.port)
+    }
+
+    /// The HTTP base of this server, for its administrative endpoints
+    pub fn http_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.port)
     }
 
     /// Get the number of active connections

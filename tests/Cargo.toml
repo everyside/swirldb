@@ -38,3 +38,4 @@ uuid = { version = "1.6", features = ["v4"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 base64 = "0.22"  # the fake authority decodes the Basic form of its secret
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }  # calls /admin/revoke; the server already carries it

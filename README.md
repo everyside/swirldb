@@ -140,6 +140,20 @@ never receives the history; an unauthenticated connection is told
 `OpenDenied` on the document it asked for and closed. See
 `native/swirldb-server/src/authority.rs`.
 
+**Revocation while a document is open.** The authority is asked once, at
+open, and a connection holds that answer as long as the document is open —
+so taking somebody off a team never closed a document they already had, and
+the cache only decided how soon a reopen would be refused. `POST
+/admin/revoke` on the server, bearing `AUTHORITY_SECRET`, with `{"subject":
+"<id>", "document": "<id>" | null}`, closes what the subject holds now: the
+server drops the document (or every document) from the subject's
+connections, tells each with an `OpenDenied` naming the reason `revoked`,
+and has the authority forget what it cached about the subject, so a reopen
+is asked afresh. In the browser the handle's `onDenied(reason)` fires and
+its `access` reads `null`; the Rust client's `on_denied()` yields a `Denied`
+and its connection ends. Everyone else on the document is untouched. See
+`native/swirldb-server/README.md`, "POST /admin/revoke".
+
 What stays single-document: server-to-server peer sync (`connect_to_peer`,
 the peer manager, the LAN transport) speaks about the default document only.
 

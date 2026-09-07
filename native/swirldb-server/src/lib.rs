@@ -5,6 +5,7 @@
 //!
 //! This library exposes server components for use in integration tests.
 
+pub mod admin;
 pub mod authority;
 pub mod discovery;
 pub mod handler;

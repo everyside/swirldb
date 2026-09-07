@@ -198,6 +198,20 @@ var SwirlDB = class _SwirlDB {
     this.wasmDB.close();
   }
   /**
+   * Hear the server close this document after it was open, which a
+   * revocation does — the application that owns membership took this
+   * subject off the document and told the server. The callback is handed
+   * the reason, `'revoked'`. From then on `access` is `null`, `syncChanges`
+   * sends nothing, and the connection's other documents are unaffected; a
+   * fresh `openDocument` asks the authority again.
+   *
+   * @example
+   * palette.onDenied((reason) => banner(`This palette was closed: ${reason}`));
+   */
+  onDenied(callback) {
+    this.wasmDB.onDenied(callback);
+  }
+  /**
    * Send an ephemeral message on this document: not stored, not merged,
    * routed to whoever has the document open and subscribes to the path.
    */
