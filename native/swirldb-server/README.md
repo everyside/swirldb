@@ -32,6 +32,38 @@ cargo build --release
 RUST_LOG=info ./target/release/swirldb-server
 ```
 
+### Run in Docker
+
+The repository root carries a `Dockerfile` for this server — the root, not
+this directory, because the server is a workspace member and the build uses
+the workspace's `Cargo.lock` (`--locked`):
+
+```bash
+# from the repository root
+docker build -t swirldb-server:local .
+
+docker run --rm -p 3030:3030 \
+  -v swirldb-data:/data \
+  -e AUTHORITY_URL=http://studio-server:8080/authority \
+  -e AUTHORITY_SECRET=... \
+  swirldb-server:local
+curl http://localhost:3030/health   # OK
+```
+
+Two stages: a builder on `rust:1.98-bookworm` and a `debian:bookworm-slim`
+runtime, both pinned by digest, holding the binary, `tini` as PID 1, and
+`curl` for the container's own `HEALTHCHECK` against `/health`. The server
+runs as `swirldb` (uid 10001) and keeps its documents on the `/data` volume,
+which is where `STORAGE_PATH` points; run it without a volume there and a
+restart loses every document's history. The image sets `PORT=3030`,
+`STORAGE_TYPE=redb`, `STORAGE_PATH=/data/swirldb.redb` and
+`RUST_LOG=swirldb_server=info`; `AUTHORITY_URL` and `AUTHORITY_SECRET` are
+deliberately not defaulted and come from the deployment. The server binds
+`0.0.0.0` on `PORT`, and the health check reads `PORT` too, so changing the
+port is one variable.
+The image is about 120 MB, most of it Debian; the server binary is a few
+megabytes of it.
+
 ## Configuration
 
 Environment variables:

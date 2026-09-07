@@ -1,0 +1,22 @@
+# An allow-list: the image build (Dockerfile at this root) sees only what
+# `cargo build --locked -p swirldb-server` needs, which is the workspace
+# manifest and lockfile and every member's manifest and sources.
+*
+!Cargo.toml
+!Cargo.lock
+!native/swirldb-core
+!native/swirldb-client
+!native/swirldb-server
+!tests/Cargo.toml
+!tests/integration
+
+# And none of what those directories accumulate.
+**/target
+**/node_modules
+**/.DS_Store
+native/*/Cargo.lock
+native/swirldb-server/data
+**/*.redb
+**/*.pem
+**/*.key
+**/*.crt
