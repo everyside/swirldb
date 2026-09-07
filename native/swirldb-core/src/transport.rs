@@ -1173,7 +1173,7 @@ mod tests {
 
     #[test]
     fn test_mock_transport_with_protocol_messages() {
-        use crate::protocol::Message;
+        use crate::protocol::{Message, DEFAULT_DOCUMENT};
 
         block_on(async {
             let transport = MockTransport::new();
@@ -1186,6 +1186,7 @@ mod tests {
             let push = Message::Push {
                 heads: vec![1, 2, 3],
                 changes: vec![vec![4, 5, 6]],
+                document: DEFAULT_DOCUMENT.to_string(),
             };
             let encoded = push.encode();
             transport
@@ -1198,6 +1199,7 @@ mod tests {
                 from_client_id: "peer-1".to_string(),
                 changes: vec![vec![7, 8, 9]],
                 affected_paths: vec!["settings.brightness".to_string()],
+                document: DEFAULT_DOCUMENT.to_string(),
             };
             transport.inject_event(TransportEvent::ReliableMessage {
                 from: PeerId::new("peer-1"),
@@ -1221,6 +1223,7 @@ mod tests {
             // Send ephemeral beat sync
             let beat = Message::EphemeralBatch {
                 updates: vec![("beat.bpm".to_string(), vec![0, 120])],
+                document: DEFAULT_DOCUMENT.to_string(),
             };
             transport.broadcast_ephemeral(&beat.encode()).unwrap();
 
