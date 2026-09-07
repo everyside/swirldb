@@ -115,6 +115,63 @@ rl.on('line', async (line) => {
                 }
                 break;
 
+            case 'openDocuments':
+                try {
+                    const opened = await page.evaluate(async ({ wsUrl, documents }) => {
+                        return await window.testAPI.openDocuments(wsUrl, documents);
+                    }, { wsUrl: msg.wsUrl, documents: msg.documents });
+                    sendIPC({ type: 'documents_opened', documents: opened });
+                } catch (err) {
+                    sendIPC({ type: 'error', error: err.message });
+                }
+                break;
+
+            case 'setDocumentPath':
+                await page.evaluate(({ document, path, value }) => {
+                    window.testAPI.setDocumentPath(document, path, value);
+                }, { document: msg.document, path: msg.path, value: msg.value });
+                sendIPC({ type: 'set_complete' });
+                break;
+
+            case 'getDocumentPath':
+                const documentValue = await page.evaluate(({ document, path }) => {
+                    return window.testAPI.getDocumentPath(document, path);
+                }, { document: msg.document, path: msg.path });
+                sendIPC({ type: 'value', value: documentValue });
+                break;
+
+            case 'documentAccess':
+                const access = await page.evaluate(({ document }) => {
+                    return window.testAPI.documentAccess(document);
+                }, { document: msg.document });
+                sendIPC({ type: 'value', value: access });
+                break;
+
+            case 'sendDocumentPresence':
+                await page.evaluate(({ document, path, bytes }) => {
+                    window.testAPI.sendDocumentPresence(document, path, bytes);
+                }, { document: msg.document, path: msg.path, bytes: msg.bytes });
+                sendIPC({ type: 'set_complete' });
+                break;
+
+            case 'takeDocumentPresence':
+                const seen = await page.evaluate(({ document }) => {
+                    return window.testAPI.takeDocumentPresence(document);
+                }, { document: msg.document });
+                sendIPC({ type: 'value', value: seen });
+                break;
+
+            case 'waitForDocumentChange':
+                try {
+                    await page.evaluate(async ({ document }) => {
+                        await window.testAPI.waitForDocumentChange(document);
+                    }, { document: msg.document });
+                    sendIPC({ type: 'broadcast_received' });
+                } catch (err) {
+                    sendIPC({ type: 'error', error: err.message });
+                }
+                break;
+
             case 'close':
                 await page.evaluate(() => window.testAPI.close());
                 await browser.close();

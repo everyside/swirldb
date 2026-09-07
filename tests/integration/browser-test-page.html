@@ -3,10 +3,18 @@
 <head>
     <title>SwirlDB Browser Test</title>
     <script type="module">
-        import init, { SwirlDB } from '../../native/swirldb-browser/pkg/swirldb_browser.js';
+        import init, { SwirlDB, Connection } from '../../native/swirldb-browser/pkg/swirldb_browser.js';
 
+        // Single-document path: the manual protocol, as the original tests drove it.
         let db = null;
         let ws = null;
+
+        // Multi-document path: one Connection, several handles keyed by document id.
+        let connection = null;
+        const handles = new Map();
+        // Per document, broadcasts seen since last asked for, and a waiter for the next.
+        const changes = new Map();
+        const presence = new Map();
 
         window.testAPI = {
             async connect(wsUrl, subscriptions) {
@@ -92,9 +100,76 @@
                 });
             },
 
+            // ---- several documents over one connection ----
+
+            /// Open every named document on one connection; resolves when all
+            /// have their history. A refused document rejects with its reason.
+            async openDocuments(wsUrl, documents) {
+                await init();
+                connection = new Connection(wsUrl, `browser-${Date.now()}`);
+                for (const document of documents) {
+                    const handle = await connection.openDocument(document, ['**']);
+                    handles.set(document, handle);
+                    changes.set(document, 0);
+                    presence.set(document, []);
+                    // An observer on "**" fires for every broadcast on this document.
+                    handle.observe('**', () => {
+                        changes.set(document, changes.get(document) + 1);
+                    });
+                    handle.onEphemeral('presence.*', (path, data) => {
+                        presence.get(document).push({ path, data: Array.from(data) });
+                    });
+                }
+                return Array.from(handles.keys());
+            },
+
+            setDocumentPath(document, path, value) {
+                const handle = handles.get(document);
+                handle.setPath(path, value);
+                handle.syncChanges();
+            },
+
+            getDocumentPath(document, path) {
+                return handles.get(document).getPath(path);
+            },
+
+            documentAccess(document) {
+                return handles.get(document).access;
+            },
+
+            sendDocumentPresence(document, path, bytes) {
+                handles.get(document).sendEphemeral(path, new Uint8Array(bytes));
+            },
+
+            takeDocumentPresence(document) {
+                const seen = presence.get(document);
+                presence.set(document, []);
+                return seen;
+            },
+
+            waitForDocumentChange(document, timeout = 2000) {
+                return new Promise((resolve, reject) => {
+                    const start = Date.now();
+                    const check = () => {
+                        if (changes.get(document) > 0) {
+                            changes.set(document, changes.get(document) - 1);
+                            resolve();
+                        } else if (Date.now() - start > timeout) {
+                            reject(new Error(`Timeout waiting for a change on ${document}`));
+                        } else {
+                            setTimeout(check, 10);
+                        }
+                    };
+                    check();
+                });
+            },
+
             close() {
                 if (ws) {
                     ws.close();
+                }
+                if (connection) {
+                    connection.close();
                 }
             }
         };

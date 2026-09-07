@@ -161,3 +161,133 @@ async fn test_two_browsers_sync() {
     browser2.close().await.unwrap();
     server.shutdown().await.unwrap();
 }
+
+/// One browser, one connection, two documents. Each handle sees its own
+/// document's changes and presence and nothing of the other's.
+#[tokio::test]
+async fn test_browser_holds_two_documents_over_one_connection() {
+    init_test_logging();
+
+    let server = TestServer::start().await.unwrap();
+
+    let browser = BrowserTestClient::start_with_documents(
+        &server.ws_url(),
+        vec!["alpha".to_string(), "beta".to_string()],
+    )
+    .await
+    .unwrap();
+
+    let mut alpha = RustClient::open(&server.ws_url(), "alpha", vec!["**".to_string()])
+        .await
+        .unwrap();
+    let mut beta = RustClient::open(&server.ws_url(), "beta", vec!["**".to_string()])
+        .await
+        .unwrap();
+
+    // The browser is one socket; the two Rust clients are two.
+    assert_eq!(server.connection_count(), 3);
+    assert_eq!(
+        browser.document_access("alpha").await.unwrap(),
+        Some(serde_json::json!("write"))
+    );
+
+    // Server → browser, on alpha only.
+    alpha
+        .set_path("title", ScalarValue::Str("From alpha".into()))
+        .await
+        .unwrap();
+    browser.wait_for_document_change("alpha").await.unwrap();
+    assert_eq!(
+        browser.get_document_path("alpha", "title").await.unwrap(),
+        Some(serde_json::json!("From alpha"))
+    );
+    assert_eq!(
+        browser.get_document_path("beta", "title").await.unwrap(),
+        Some(serde_json::Value::Null)
+    );
+    assert!(browser.wait_for_document_change("beta").await.is_err());
+
+    // Browser → server, on beta only.
+    browser
+        .set_document_path("beta", "title", serde_json::json!("From the browser"))
+        .await
+        .unwrap();
+    beta.wait_for_broadcast_timeout(Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(
+        beta.get_path("title").await,
+        Some(ScalarValue::Str("From the browser".into()))
+    );
+    assert!(alpha
+        .wait_for_broadcast_timeout(Duration::from_millis(300))
+        .await
+        .is_err());
+    assert_eq!(
+        alpha.get_path("title").await,
+        Some(ScalarValue::Str("From alpha".into()))
+    );
+
+    // Presence rides the ephemeral channel and stays within its document.
+    alpha
+        .send_ephemeral("presence.alpha-client", &[1, 2, 3])
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let seen_on_alpha = browser.take_document_presence("alpha").await.unwrap();
+    assert_eq!(seen_on_alpha.len(), 1);
+    assert_eq!(seen_on_alpha[0].path, "presence.alpha-client");
+    assert_eq!(seen_on_alpha[0].data, vec![1, 2, 3]);
+    assert!(browser
+        .take_document_presence("beta")
+        .await
+        .unwrap()
+        .is_empty());
+
+    browser
+        .send_document_presence("beta", "presence.browser", vec![9])
+        .await
+        .unwrap();
+    let updates = beta
+        .wait_for_ephemeral_timeout(Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(updates[0].0, "presence.browser");
+    assert!(alpha
+        .wait_for_ephemeral_timeout(Duration::from_millis(300))
+        .await
+        .is_err());
+
+    browser.close().await.unwrap();
+    alpha.close().await.unwrap();
+    beta.close().await.unwrap();
+    server.shutdown().await.unwrap();
+}
+
+/// The authority's refusal reaches the browser as a rejected `openDocument`.
+#[tokio::test]
+async fn test_browser_open_is_refused_by_the_authority() {
+    init_test_logging();
+
+    let engine = swirldb_core::policy::PolicyEngine::from_json(
+        r#"{"policies":{"rules":[
+            {"priority":10,"actor":{"type":"Any"},"action":"Write","path_pattern":"shared.*","effect":"Allow"}
+        ]}}"#,
+    )
+    .unwrap();
+    let server = TestServer::start_with_authority(std::sync::Arc::new(
+        swirldb_server::authority::PolicyAuthority::new(engine),
+    ))
+    .await
+    .unwrap();
+
+    let refused = BrowserTestClient::start_with_documents(
+        &server.ws_url(),
+        vec!["shared.1".to_string(), "private.1".to_string()],
+    )
+    .await;
+    let message = refused.err().expect("private.1 is refused").to_string();
+    assert!(message.contains("may not open private.1"), "{}", message);
+
+    server.shutdown().await.unwrap();
+}
