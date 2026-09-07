@@ -707,7 +707,8 @@ async fn connect_outbound(inner: Arc<Inner>, peer: &PeerAddr) -> Result<()> {
     info!("✅ Peer connected (outbound): {}", remote_peer_id);
 
     // Send a UDP "ping" to the peer so they learn our UDP address.
-    // The packet is just our peer ID header with an empty payload.
+    // The packet is just our peer ID header with an empty payload; the
+    // receiving side records the address and does not surface it as a message.
     if let Some(addr) = udp_addr {
         let ping = inner.build_udp_packet(&[]);
         match inner.udp_socket.send_to(&ping, addr).await {
@@ -830,6 +831,15 @@ async fn udp_recv_loop(inner: Arc<Inner>) {
                     // Store the mapping anyway — when the peer connects via TCP,
                     // we can look it up
                     inner.udp_addr_to_peer.insert(src_addr, peer_id.clone());
+                }
+
+                // An empty payload is the ping a connecting peer sends so that
+                // we learn its UDP address, which the code above has now done.
+                // It carries nothing for the application, and surfacing it as
+                // an ephemeral message would hand every consumer a zero-length
+                // frame to decode and discard, so it stops here.
+                if payload.is_empty() {
+                    continue;
                 }
 
                 let _ = inner
