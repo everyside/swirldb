@@ -55,6 +55,9 @@ console_error_panic_hook = "0.1"
 # Error handling
 anyhow = "1.0"
 
+# automerge instruments itself with tracing; nothing in the browser subscribes, so compile the events out
+tracing = { version = "0.1", default-features = false, features = ["release_max_level_off"] }
+
 # uuid is pulled in by automerge, but needs WASM-specific features
 uuid = { version = "1.18", features = ["v4", "js", "serde"] }
 
