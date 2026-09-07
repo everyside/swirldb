@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 use swirldb_core::core::SwirlDB;
-use swirldb_core::protocol::Message;
+use swirldb_core::protocol::{Message, DEFAULT_DOCUMENT};
 use swirldb_core::transport::PeerAddr;
 use swirldb_server::peer_manager::{PeerEvent, PeerManager, PeerManagerConfig};
 use swirldb_server::transport::LanTransport;
@@ -297,6 +297,7 @@ async fn test_ephemeral_message_delivery() {
     // B sends ephemeral beat sync to A
     let beat_msg = Message::EphemeralBatch {
         updates: vec![("beat.bpm".to_string(), vec![0, 120])],
+        document: DEFAULT_DOCUMENT.to_string(),
     };
     mgr_b
         .send_ephemeral(

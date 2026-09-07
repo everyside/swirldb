@@ -5,6 +5,7 @@
 //!
 //! This library exposes server components for use in integration tests.
 
+pub mod authority;
 pub mod discovery;
 pub mod handler;
 pub mod peer_manager;
@@ -13,9 +14,10 @@ pub mod storage;
 pub mod transport;
 
 // Re-export commonly used types
+pub use authority::{Authority, HttpAuthority, OpenToAll, PolicyAuthority};
 pub use state::{
-    ActivityEvent, BroadcastMessage, ClientInfo, ConnectionInfo, EphemeralMessage, PeerInfo,
-    ServerState, ServerStats, SubscriptionInfo,
+    ActivityEvent, BroadcastMessage, ClientInfo, ConnectionInfo, DocumentInfo, EphemeralMessage,
+    OpenError, Opened, PeerInfo, ServerState, ServerStats, SubscriptionInfo,
 };
 
 #[cfg(feature = "mdns")]

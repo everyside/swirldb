@@ -111,7 +111,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use swirldb_core::core::SwirlDB;
-use swirldb_core::protocol::Message;
+use swirldb_core::protocol::{Message, DEFAULT_DOCUMENT};
 use swirldb_core::transport::{PeerAddr, PeerDiscovery, PeerId, PeerTransport, TransportEvent};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
@@ -477,7 +477,12 @@ impl PeerManager {
             db.get_heads().into_iter().flatten().collect()
         };
 
-        let msg = Message::Push { heads, changes };
+        // Peers sync the default document only.
+        let msg = Message::Push {
+            heads,
+            changes,
+            document: DEFAULT_DOCUMENT.to_string(),
+        };
         let encoded = msg.encode();
 
         // Send to all synced peers whose subscriptions match the affected paths
@@ -797,6 +802,7 @@ async fn handle_reliable_message(inner: &Arc<Inner>, from: &PeerId, data: &[u8])
             client_id: _,
             subscriptions,
             heads,
+            document: _,
         } => {
             info!(
                 "📥 Received Connect from {} (subscriptions: {:?})",
@@ -827,6 +833,7 @@ async fn handle_reliable_message(inner: &Arc<Inner>, from: &PeerId, data: &[u8])
             let sync_msg = Message::Sync {
                 heads: our_heads,
                 changes,
+                document: DEFAULT_DOCUMENT.to_string(),
             };
 
             if let Err(e) = inner
@@ -856,7 +863,9 @@ async fn handle_reliable_message(inner: &Arc<Inner>, from: &PeerId, data: &[u8])
         }
 
         // -- Sync handshake: they responded to our Connect --
-        Message::Sync { heads: _, changes } => {
+        Message::Sync {
+            heads: _, changes, ..
+        } => {
             if !changes.is_empty() {
                 let total_bytes: usize = changes.iter().map(|c| c.len()).sum();
                 info!(
@@ -892,7 +901,10 @@ async fn handle_reliable_message(inner: &Arc<Inner>, from: &PeerId, data: &[u8])
         }
 
         // -- Ongoing sync: peer is pushing changes --
-        Message::Push { heads: _, changes } | Message::Broadcast { changes, .. } => {
+        Message::Push {
+            heads: _, changes, ..
+        }
+        | Message::Broadcast { changes, .. } => {
             if changes.is_empty() {
                 return;
             }
@@ -940,7 +952,11 @@ async fn handle_reliable_message(inner: &Arc<Inner>, from: &PeerId, data: &[u8])
                 db.get_heads().into_iter().flatten().collect()
             };
 
-            let relay_msg = Message::Push { heads, changes };
+            let relay_msg = Message::Push {
+                heads,
+                changes,
+                document: DEFAULT_DOCUMENT.to_string(),
+            };
             let encoded = relay_msg.encode();
 
             for entry in inner.peers.iter() {
@@ -973,7 +989,7 @@ async fn handle_reliable_message(inner: &Arc<Inner>, from: &PeerId, data: &[u8])
         }
 
         // Ephemeral messages arriving over TCP (fallback when UDP addr unknown)
-        Message::Ephemeral { path, data } => {
+        Message::Ephemeral { path, data, .. } => {
             let _ = inner
                 .event_tx
                 .send(PeerEvent::EphemeralReceived {
@@ -983,7 +999,7 @@ async fn handle_reliable_message(inner: &Arc<Inner>, from: &PeerId, data: &[u8])
                 .await;
         }
 
-        Message::EphemeralBatch { updates } => {
+        Message::EphemeralBatch { updates, .. } => {
             let _ = inner
                 .event_tx
                 .send(PeerEvent::EphemeralReceived {
@@ -1023,7 +1039,7 @@ async fn handle_ephemeral_message(inner: &Arc<Inner>, from: &PeerId, data: &[u8]
     };
 
     match msg {
-        Message::EphemeralBatch { updates } => {
+        Message::EphemeralBatch { updates, .. } => {
             let _ = inner
                 .event_tx
                 .send(PeerEvent::EphemeralReceived {
@@ -1036,6 +1052,7 @@ async fn handle_ephemeral_message(inner: &Arc<Inner>, from: &PeerId, data: &[u8]
         Message::Ephemeral {
             path,
             data: payload,
+            ..
         } => {
             let _ = inner
                 .event_tx
@@ -1070,6 +1087,7 @@ async fn send_connect_message(inner: &Arc<Inner>, peer: &PeerId) -> Result<()> {
         client_id: inner.local_peer_id.clone(),
         subscriptions: inner.config.subscriptions.clone(),
         heads,
+        document: DEFAULT_DOCUMENT.to_string(),
     };
 
     inner
@@ -1081,7 +1099,9 @@ async fn send_connect_message(inner: &Arc<Inner>, peer: &PeerId) -> Result<()> {
 /// Parse flat head bytes into individual 32-byte hashes.
 fn parse_heads(flat_heads: &[u8]) -> Vec<Vec<u8>> {
     flat_heads
-        .chunks_exact(HEAD_SIZE)
+        .as_chunks::<HEAD_SIZE>()
+        .0
+        .iter()
         .map(|chunk| chunk.to_vec())
         .collect()
 }

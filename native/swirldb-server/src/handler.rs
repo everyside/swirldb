@@ -3,11 +3,18 @@
 
 //! WebSocket handler for the SwirlDB sync protocol.
 //!
+//! One connection, one client, any number of open documents. `Connect`
+//! registers the client and opens the document it names; `Open` opens more;
+//! `Close` drops one. Every `Push`, `Broadcast` and ephemeral frame names its
+//! document, and the server routes each to that document's subscribers only.
+//!
 //! Shared between the production server and integration test infrastructure.
 
-use crate::state::{BroadcastMessage, EphemeralMessage, ServerState};
+use crate::state::{BroadcastMessage, EphemeralMessage, OpenError, ServerState};
 use axum::extract::ws::{Message as WsMessage, WebSocket};
+use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
+use swirldb_core::policy::{Actor, ActorType};
 use swirldb_core::protocol::Message;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -15,10 +22,138 @@ use uuid::Uuid;
 /// Size of an Automerge change hash (SHA-256).
 const AUTOMERGE_HEAD_SIZE: usize = 32;
 
+type Sender = SplitSink<WebSocket, WsMessage>;
+
+/// Split a flat run of heads into 32-byte hashes. A run that is not a whole
+/// number of hashes is malformed and treated as no heads, which means a full
+/// sync rather than a wrong delta.
+fn parse_heads(flat: &[u8]) -> Vec<Vec<u8>> {
+    if !flat.len().is_multiple_of(AUTOMERGE_HEAD_SIZE) {
+        if !flat.is_empty() {
+            warn!(
+                "Malformed heads: length {} is not a multiple of {}",
+                flat.len(),
+                AUTOMERGE_HEAD_SIZE
+            );
+        }
+        return Vec::new();
+    }
+    flat.chunks(AUTOMERGE_HEAD_SIZE)
+        .map(|chunk| chunk.to_vec())
+        .collect()
+}
+
+async fn send(sender: &mut Sender, message: Message) -> bool {
+    if let Err(e) = sender.send(WsMessage::Binary(message.encode())).await {
+        error!(
+            "Failed to send {:?}: {}",
+            std::mem::discriminant(&message),
+            e
+        );
+        return false;
+    }
+    true
+}
+
+/// Open a document for this connection and answer the client: `SubscribeAck`
+/// then `Sync` with the history it lacks, or `OpenDenied`. Returns false only
+/// when the socket itself failed.
+async fn open_and_answer(
+    state: &ServerState,
+    sender: &mut Sender,
+    connection_id: Uuid,
+    client_id: &str,
+    document: &str,
+    subscriptions: Vec<String>,
+    heads: &[u8],
+) -> bool {
+    let opened = match state
+        .open_document(&connection_id, document, subscriptions)
+        .await
+    {
+        Ok(opened) => opened,
+        Err(OpenError::Refused { subject, .. }) => {
+            info!("🚫 {} refused {} on {}", subject, document, client_id);
+            return send(
+                sender,
+                Message::OpenDenied {
+                    document: document.to_string(),
+                    reason: format!("{} may not open {}", subject, document),
+                },
+            )
+            .await;
+        }
+        Err(OpenError::NotConnected) => {
+            return send(
+                sender,
+                Message::Error {
+                    message: "Connect before opening a document".to_string(),
+                },
+            )
+            .await;
+        }
+    };
+
+    if !opened.denied.is_empty() {
+        warn!(
+            "{} subscriptions on {} denied by policy",
+            opened.denied.len(),
+            document
+        );
+    }
+
+    if !send(
+        sender,
+        Message::SubscribeAck {
+            added: opened.added,
+            denied: opened.denied,
+            document: document.to_string(),
+            access: opened.access,
+        },
+    )
+    .await
+    {
+        return false;
+    }
+
+    let (server_heads, changes) = {
+        let db = state.document(document).await;
+        let db = db.read().await;
+        let client_heads = parse_heads(heads);
+        let changes = if client_heads.is_empty() {
+            db.get_changes()
+        } else {
+            db.get_changes_since(&client_heads)
+        };
+        (db.get_heads(), changes)
+    };
+
+    let total_bytes: usize = changes.iter().map(|c| c.len()).sum();
+    let sync_mode = if heads.is_empty() { "full" } else { "delta" };
+    info!(
+        "📤 SEND [{}]: {} changes ({} bytes, {}) to {}",
+        document,
+        changes.len(),
+        total_bytes,
+        sync_mode,
+        client_id
+    );
+
+    send(
+        sender,
+        Message::Sync {
+            heads: server_heads.into_iter().flatten().collect(),
+            changes,
+            document: document.to_string(),
+        },
+    )
+    .await
+}
+
 /// Handle an individual WebSocket connection with the SwirlDB sync protocol.
 ///
-/// Manages the full lifecycle: Connect handshake, Push/Broadcast relay,
-/// ephemeral pub/sub, and cleanup on disconnect.
+/// Manages the full lifecycle: Connect handshake, further opens, Push/Broadcast
+/// relay, ephemeral pub/sub, and cleanup on disconnect.
 pub async fn handle_websocket(socket: WebSocket, state: ServerState) {
     let connection_id = Uuid::new_v4();
     let (mut sender, mut receiver) = socket.split();
@@ -45,14 +180,13 @@ pub async fn handle_websocket(socket: WebSocket, state: ServerState) {
                             }
                         }
 
-                        // Parse binary protocol message
                         match Message::decode(&data) {
-                            Ok(Message::Connect { client_id, subscriptions, heads }) => {
-                                info!("📱 Client {} connected ({} subscriptions)",
-                                      client_id, subscriptions.len());
+                            Ok(Message::Connect { client_id, subscriptions, heads, document }) => {
+                                info!("📱 Client {} connected, opening {} ({} subscriptions)",
+                                      client_id, document, subscriptions.len());
 
-                                // TODO: Extract actor from JWT token instead of using anonymous
-                                use swirldb_core::policy::{Actor, ActorType};
+                                // TODO: Extract actor from JWT token instead of using anonymous.
+                                // Until then the subject an authority sees is the client id.
                                 let actor = Actor {
                                     actor_type: ActorType::Anonymous,
                                     id: client_id.clone(),
@@ -63,100 +197,101 @@ pub async fn handle_websocket(socket: WebSocket, state: ServerState) {
                                     claims: std::collections::HashMap::new(),
                                 };
 
-                                // Register client with subscriptions
-                                let (added, denied) = match state.register_client(
+                                state.register_client(
                                     connection_id,
                                     client_id.clone(),
                                     actor,
-                                    subscriptions.clone(),
                                     "WebSocket".to_string()
-                                ).await {
-                                    Ok(result) => result,
-                                    Err(e) => {
-                                        error!("Failed to register client: {}", e);
-                                        break;
-                                    }
-                                };
-
-                                if !denied.is_empty() {
-                                    warn!("{} subscriptions denied by policy", denied.len());
-                                }
+                                ).await;
 
                                 client_info = Some(client_id.clone());
-
-                                // Subscribe to broadcasts and ephemeral
                                 broadcast_rx = Some(state.subscribe_to_broadcasts());
                                 ephemeral_rx = Some(state.subscribe_to_ephemeral());
 
-                                // Send SubscribeAck
-                                let sub_ack = Message::SubscribeAck { added, denied };
-                                if let Err(e) = sender.send(WsMessage::Binary(sub_ack.encode())).await {
-                                    error!("Failed to send subscribe ack: {}", e);
-                                    break;
-                                }
-
-                                // Get current server heads and changes
-                                let (server_heads, changes) = {
-                                    let db = state.db().read().await;
-                                    let server_heads = db.get_heads();
-
-                                    let changes = if heads.is_empty() {
-                                        // Client has no heads, send everything
-                                        db.get_changes()
-                                    } else if heads.len() % AUTOMERGE_HEAD_SIZE != 0 {
-                                        // Malformed heads — fall back to full sync
-                                        warn!(
-                                            "Malformed heads: length {} is not a multiple of {}",
-                                            heads.len(),
-                                            AUTOMERGE_HEAD_SIZE
-                                        );
-                                        db.get_changes()
-                                    } else {
-                                        // Parse client heads (each head is 32 bytes)
-                                        let mut client_heads = Vec::new();
-                                        let mut offset = 0;
-                                        while offset + AUTOMERGE_HEAD_SIZE <= heads.len() {
-                                            client_heads.push(heads[offset..offset + AUTOMERGE_HEAD_SIZE].to_vec());
-                                            offset += AUTOMERGE_HEAD_SIZE;
-                                        }
-
-                                        // Send only changes the client doesn't have
-                                        db.get_changes_since(&client_heads)
-                                    };
-
-                                    (server_heads, changes)
-                                };
-
-                                // Calculate total bytes for stats
-                                let total_bytes: usize = changes.iter().map(|c| c.len()).sum();
-                                let sync_mode = if heads.is_empty() { "full" } else { "delta" };
-                                info!("📤 SEND: {} changes ({} bytes, {}) to {}",
-                                    changes.len(), total_bytes, sync_mode, client_id);
-
-                                // Encode server heads as flat bytes (each is 32 bytes)
-                                let heads_bytes: Vec<u8> = server_heads.into_iter().flatten().collect();
-
-                                let response = Message::Sync {
-                                    heads: heads_bytes,
-                                    changes
-                                };
-
-                                if let Err(e) = sender.send(WsMessage::Binary(response.encode())).await {
-                                    error!("Failed to send sync: {}", e);
+                                if !open_and_answer(
+                                    &state, &mut sender, connection_id, &client_id,
+                                    &document, subscriptions, &heads,
+                                ).await {
                                     break;
                                 }
                             }
 
-                            Ok(Message::Push { heads: _client_heads, changes }) => {
-                                if let Some(client_id) = &client_info {
-                                    // Calculate total bytes for stats
-                                    let total_bytes: usize = changes.iter().map(|c| c.len()).sum();
-                                    info!("📥 RECV: {} changes ({} bytes) from {}",
-                                        changes.len(), total_bytes, client_id);
+                            Ok(Message::Open { document, subscriptions, heads }) => {
+                                let Some(client_id) = client_info.clone() else {
+                                    if !send(&mut sender, Message::Error {
+                                        message: "Connect before opening a document".to_string(),
+                                    }).await {
+                                        break;
+                                    }
+                                    continue;
+                                };
+                                info!("📂 {} opens {} ({} subscriptions)",
+                                      client_id, document, subscriptions.len());
+                                if !open_and_answer(
+                                    &state, &mut sender, connection_id, &client_id,
+                                    &document, subscriptions, &heads,
+                                ).await {
+                                    break;
+                                }
+                            }
 
-                                    // Extract affected paths from changes
+                            Ok(Message::Close { document }) => {
+                                if client_info.is_some() {
+                                    state.close_document(&connection_id, &document).await;
+                                }
+                            }
+
+                            Ok(Message::Subscribe { add, remove, document }) => {
+                                if let Some(client_id) = &client_info {
+                                    let Some(access) = state.document_access(&connection_id, &document) else {
+                                        if !send(&mut sender, Message::Error {
+                                            message: format!("{} is not open on this connection", document),
+                                        }).await {
+                                            break;
+                                        }
+                                        continue;
+                                    };
+                                    match state.update_subscriptions(client_id, &document, add, remove).await {
+                                        Ok((added, denied)) => {
+                                            if !send(&mut sender, Message::SubscribeAck {
+                                                added, denied, document, access,
+                                            }).await {
+                                                break;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            if !send(&mut sender, Message::Error { message: e.to_string() }).await {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            Ok(Message::Push { heads: _client_heads, changes, document }) => {
+                                if let Some(client_id) = &client_info {
+                                    let total_bytes: usize = changes.iter().map(|c| c.len()).sum();
+                                    info!("📥 RECV [{}]: {} changes ({} bytes) from {}",
+                                        document, changes.len(), total_bytes, client_id);
+
+                                    // A push on a document this connection may not
+                                    // write is refused before anything is decoded
+                                    // against it.
+                                    if !state.document_access(&connection_id, &document)
+                                        .is_some_and(|access| access.may_write())
+                                    {
+                                        warn!("{} may not write {}", client_id, document);
+                                        if !send(&mut sender, Message::Error {
+                                            message: format!("{} may not write {}", client_id, document),
+                                        }).await {
+                                            break;
+                                        }
+                                        continue;
+                                    }
+
                                     let affected_paths = {
-                                        let db = state.db().read().await;
+                                        let db = state.document(&document).await;
+                                        let db = db.read().await;
                                         db.extract_affected_paths(&changes)
                                             .unwrap_or_else(|e| {
                                                 warn!("Failed to extract paths: {}. Using wildcard.", e);
@@ -164,42 +299,41 @@ pub async fn handle_websocket(socket: WebSocket, state: ServerState) {
                                             })
                                     };
 
-                                    // Apply CRDT changes and broadcast to subscribers
                                     match state
                                         .apply_changes(
                                             client_id.clone(),
                                             connection_id,
+                                            &document,
                                             changes,
                                             affected_paths,
                                         )
                                         .await
                                     {
                                         Ok(_) => {
-                                            // Get server's new heads after applying changes
-                                            let server_heads = {
-                                                let db = state.db().read().await;
-                                                let heads = db.get_heads();
-                                                heads.into_iter().flatten().collect()
+                                            let server_heads: Vec<u8> = {
+                                                let db = state.document(&document).await;
+                                                let db = db.read().await;
+                                                db.get_heads().into_iter().flatten().collect()
                                             };
-
-                                            // Send acknowledgment with server heads
-                                            let ack = Message::PushAck { heads: server_heads };
-                                            if let Err(e) = sender.send(WsMessage::Binary(ack.encode())).await {
-                                                error!("Failed to send push ack: {}", e);
+                                            if !send(&mut sender, Message::PushAck {
+                                                heads: server_heads,
+                                                document,
+                                            }).await {
                                                 break;
                                             }
                                         }
                                         Err(e) => {
                                             error!("Failed to apply changes: {}", e);
+                                            if !send(&mut sender, Message::Error { message: e.to_string() }).await {
+                                                break;
+                                            }
                                         }
                                     }
                                 }
                             }
 
                             Ok(Message::Ping) => {
-                                let pong = Message::Pong;
-                                if let Err(e) = sender.send(WsMessage::Binary(pong.encode())).await {
-                                    error!("Failed to send pong: {}", e);
+                                if !send(&mut sender, Message::Pong).await {
                                     break;
                                 }
                             }
@@ -208,26 +342,28 @@ pub async fn handle_websocket(socket: WebSocket, state: ServerState) {
                                 // Heartbeat response, ignore
                             }
 
-                            Ok(Message::Ephemeral { path, data }) => {
+                            Ok(Message::Ephemeral { path, data, document }) => {
                                 if let Some(client_id) = &client_info {
                                     if let Err(e) = state.route_ephemeral(
                                         client_id.clone(),
                                         connection_id,
+                                        &document,
                                         vec![(path, data)],
                                     ).await {
-                                        error!("Failed to route ephemeral: {}", e);
+                                        warn!("Ephemeral not routed: {}", e);
                                     }
                                 }
                             }
 
-                            Ok(Message::EphemeralBatch { updates }) => {
+                            Ok(Message::EphemeralBatch { updates, document }) => {
                                 if let Some(client_id) = &client_info {
                                     if let Err(e) = state.route_ephemeral(
                                         client_id.clone(),
                                         connection_id,
+                                        &document,
                                         updates,
                                     ).await {
-                                        error!("Failed to route ephemeral batch: {}", e);
+                                        warn!("Ephemeral batch not routed: {}", e);
                                     }
                                 }
                             }
@@ -273,7 +409,7 @@ pub async fn handle_websocket(socket: WebSocket, state: ServerState) {
                             continue;
                         }
 
-                        // Only send to clients that should receive this broadcast
+                        // Only to clients subscribed on that document
                         if let Some(ref client_id) = client_info {
                             if !msg.target_clients.contains(client_id) {
                                 continue;
@@ -283,10 +419,10 @@ pub async fn handle_websocket(socket: WebSocket, state: ServerState) {
                                 from_client_id: msg.from_client_id,
                                 changes: msg.changes,
                                 affected_paths: msg.affected_paths,
+                                document: msg.document,
                             };
 
-                            if let Err(e) = sender.send(WsMessage::Binary(broadcast_msg.encode())).await {
-                                error!("Failed to send broadcast: {}", e);
+                            if !send(&mut sender, broadcast_msg).await {
                                 break;
                             }
                         }
@@ -315,7 +451,7 @@ pub async fn handle_websocket(socket: WebSocket, state: ServerState) {
                             continue;
                         }
 
-                        // Only send to targeted clients
+                        // Only to targeted clients
                         if let Some(ref client_id) = client_info {
                             if !msg.target_clients.contains(client_id) {
                                 continue;
@@ -324,10 +460,10 @@ pub async fn handle_websocket(socket: WebSocket, state: ServerState) {
                             // Send as EphemeralBatch (even for single updates, batch is superset)
                             let ephemeral_msg = Message::EphemeralBatch {
                                 updates: msg.updates,
+                                document: msg.document,
                             };
 
-                            if let Err(e) = sender.send(WsMessage::Binary(ephemeral_msg.encode())).await {
-                                error!("Failed to send ephemeral: {}", e);
+                            if !send(&mut sender, ephemeral_msg).await {
                                 break;
                             }
                         }

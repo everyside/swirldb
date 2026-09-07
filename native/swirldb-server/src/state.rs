@@ -1,23 +1,37 @@
 // Copyright 2025 Everyside Innovations, LLC
 // SPDX-License-Identifier: Apache-2.0
 
-/// Server state management with subscription-based sync
-///
-/// Design principles:
-/// - Single global SwirlDB instance (shared CRDT)
-/// - Subscription-based change filtering (path patterns)
-/// - Policy-aware subscription validation
-/// - Lock-free reads where possible using Arc + DashMap
-/// - Async-friendly with tokio channels for broadcasts
-/// - Handles thousands of concurrent WebSocket connections
-use anyhow::Result;
+//! Server state.
+//!
+//! The server holds many documents. Each is its own `SwirlDB` — its own
+//! Automerge history — loaded from storage under its id the first time
+//! somebody opens it and persisted under that id after every change. Nothing
+//! is shared between documents: a change graph is not partitioned by path, so
+//! the only history a client can be given selectively is a whole document's,
+//! and that is the unit of access as well as of sync.
+//!
+//! A connection carries a client and any number of open documents. Opening
+//! asks the [`Authority`](crate::authority::Authority) once and remembers the
+//! answer on the connection; a `Push` on a document the connection holds
+//! read-only is refused here, not left to the client's good manners.
+//!
+//! Subscriptions — the path patterns that filter broadcasts — are kept per
+//! document, so the same `SubscriptionManager` from core serves each one.
+//!
+//! The rest is what it was: broadcast and ephemeral channels, an activity log
+//! for the admin page, peer bookkeeping for server-to-server relay. Peers work
+//! on the default document only; see `db()`.
+
+use crate::authority::{Authority, OpenToAll};
+use anyhow::{anyhow, Result};
 use dashmap::DashMap;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use swirldb_core::core::SwirlDB;
 use swirldb_core::policy::{Actor, PolicyEngine};
+use swirldb_core::protocol::{Access, DEFAULT_DOCUMENT};
 use swirldb_core::storage::DocumentStorage;
 use swirldb_core::sync::SubscriptionManager;
 use tokio::sync::{broadcast, Mutex, RwLock};
@@ -40,22 +54,39 @@ pub enum ActivityEvent {
     ClientConnected {
         client_id: String,
         transport: String,
-        subscriptions: Vec<String>,
         timestamp: i64,
     },
     ClientDisconnected {
         client_id: String,
         timestamp: i64,
     },
-    #[allow(dead_code)]
+    DocumentOpened {
+        client_id: String,
+        document: String,
+        access: Access,
+        subscriptions: Vec<String>,
+        timestamp: i64,
+    },
+    DocumentRefused {
+        client_id: String,
+        document: String,
+        timestamp: i64,
+    },
+    DocumentClosed {
+        client_id: String,
+        document: String,
+        timestamp: i64,
+    },
     SubscriptionUpdated {
         client_id: String,
+        document: String,
         added: Vec<String>,
         removed: Vec<String>,
         timestamp: i64,
     },
     ChangesApplied {
         from_client_id: String,
+        document: String,
         change_count: usize,
         affected_paths: Vec<String>,
         timestamp: i64,
@@ -68,19 +99,36 @@ pub struct ClientInfo {
     pub client_id: String,
     #[allow(dead_code)]
     pub connection_id: Uuid,
-    #[allow(dead_code)]
     pub actor: Actor,
-    #[allow(dead_code)]
     pub transport: String,
-    #[allow(dead_code)]
     pub connected_at: i64,
-    #[allow(dead_code)]
     pub last_seen: i64,
+    /// The documents this connection has open, and how.
+    pub documents: HashMap<String, Access>,
+}
+
+/// What an open produced: the access granted and which subscription
+/// patterns the policy accepted and refused.
+#[derive(Debug, Clone)]
+pub struct Opened {
+    pub access: Access,
+    pub added: Vec<String>,
+    pub denied: Vec<String>,
+}
+
+/// Why an open did not happen.
+#[derive(Debug, thiserror::Error)]
+pub enum OpenError {
+    #[error("the authority refused {subject} access to {document}")]
+    Refused { subject: String, document: String },
+    #[error("no client is registered on this connection")]
+    NotConnected,
 }
 
 /// Broadcast message to subscribers
 #[derive(Debug, Clone)]
 pub struct BroadcastMessage {
+    pub document: String,
     pub from_client_id: String,
     pub changes: Vec<Vec<u8>>,
     pub affected_paths: Vec<String>,
@@ -95,10 +143,11 @@ pub struct BroadcastMessage {
 /// providing a high-frequency pub/sub path for real-time data like DMX
 /// lighting values, cursor positions, or beat sync data.
 ///
-/// Routing is determined by the same subscription patterns used for CRDT
-/// broadcasts, but ephemeral messages are never persisted or merged.
+/// Routing is determined by the same per-document subscription patterns used
+/// for CRDT broadcasts, but ephemeral messages are never persisted or merged.
 #[derive(Debug, Clone)]
 pub struct EphemeralMessage {
+    pub document: String,
     /// Client that sent the ephemeral message
     pub from_client_id: String,
     /// List of (path, data) updates
@@ -126,14 +175,31 @@ pub struct PeerInfo {
     pub connected: bool,
 }
 
-/// Global server state - thread-safe and highly concurrent
+type Document = Arc<RwLock<SwirlDB>>;
+
+/// Server state - thread-safe and highly concurrent
 #[derive(Clone)]
 pub struct ServerState {
-    /// Single global CRDT database instance (shared by all clients)
-    db: Arc<RwLock<SwirlDB>>,
+    /// Every document loaded so far, by id. The lock is held across the
+    /// load so two connections opening the same document at once get one
+    /// instance rather than two that would then diverge.
+    documents: Arc<Mutex<HashMap<String, Document>>>,
 
-    /// Subscription manager (from core) for path-based filtering
-    subscriptions: Arc<Mutex<SubscriptionManager>>,
+    /// The default document, loaded at start. Peers and anything else that
+    /// predates multi-document work on this one.
+    default_document: Document,
+
+    /// Where documents are loaded from and persisted to, keyed by id.
+    storage: Arc<dyn DocumentStorage>,
+
+    /// Policy used to validate subscription patterns within a document.
+    policy: Option<PolicyEngine>,
+
+    /// Who decides whether a subject may open a document.
+    authority: Arc<dyn Authority>,
+
+    /// Subscription managers, one per document.
+    subscriptions: Arc<Mutex<HashMap<String, SubscriptionManager>>>,
 
     /// Global broadcast channel for real-time CRDT updates
     broadcast_tx: broadcast::Sender<BroadcastMessage>,
@@ -170,20 +236,38 @@ pub struct ServerState {
 }
 
 impl ServerState {
-    /// Create new server state with optional policy and storage adapter
-    ///
-    /// The storage adapter determines where CRDT state is persisted.
-    /// Pass a RedbAdapter for persistent storage, or InMemoryDocStorage for volatile.
+    /// Create server state with an optional policy and a storage adapter,
+    /// open to all: every subject may write every document. This is what
+    /// the single-document demos and tests have always had.
     pub async fn new(policy: Option<PolicyEngine>, storage: Arc<dyn DocumentStorage>) -> Self {
+        Self::with_authority(policy, storage, Arc::new(OpenToAll)).await
+    }
+
+    /// Create server state whose documents are opened only as `authority`
+    /// allows. The policy, if any, still filters subscription patterns within
+    /// a document; it does not decide access unless it is the authority too
+    /// (see [`crate::authority::PolicyAuthority`]).
+    pub async fn with_authority(
+        policy: Option<PolicyEngine>,
+        storage: Arc<dyn DocumentStorage>,
+        authority: Arc<dyn Authority>,
+    ) -> Self {
         let (broadcast_tx, _) = broadcast::channel(BROADCAST_CHANNEL_SIZE);
         let (ephemeral_tx, _) = broadcast::channel(EPHEMERAL_CHANNEL_SIZE);
 
-        // Create SwirlDB with the provided storage adapter, loading any existing state
-        let db = SwirlDB::with_storage(storage, "global").await;
+        let default_document: Document = Arc::new(RwLock::new(
+            SwirlDB::with_storage(storage.clone(), DEFAULT_DOCUMENT).await,
+        ));
+        let mut documents = HashMap::new();
+        documents.insert(DEFAULT_DOCUMENT.to_string(), default_document.clone());
 
         Self {
-            db: Arc::new(RwLock::new(db)),
-            subscriptions: Arc::new(Mutex::new(SubscriptionManager::new(policy))),
+            documents: Arc::new(Mutex::new(documents)),
+            default_document,
+            storage,
+            policy,
+            authority,
+            subscriptions: Arc::new(Mutex::new(HashMap::new())),
             broadcast_tx,
             ephemeral_tx,
             clients: Arc::new(DashMap::new()),
@@ -203,9 +287,46 @@ impl ServerState {
         }
     }
 
-    /// Get the global SwirlDB instance
-    pub fn db(&self) -> &Arc<RwLock<SwirlDB>> {
-        &self.db
+    /// The default document.
+    ///
+    /// Server-to-server sync (`connect_to_peer`, the peer manager) still
+    /// speaks about one document, and this is it. Everything that knows a
+    /// document id should call [`Self::document`] instead.
+    pub fn db(&self) -> &Document {
+        &self.default_document
+    }
+
+    /// The document with this id, loaded from storage on first use.
+    pub async fn document(&self, id: &str) -> Document {
+        let mut documents = self.documents.lock().await;
+        if let Some(document) = documents.get(id) {
+            return document.clone();
+        }
+        let document: Document = Arc::new(RwLock::new(
+            SwirlDB::with_storage(self.storage.clone(), id).await,
+        ));
+        documents.insert(id.to_string(), document.clone());
+        info!("📄 Document {} loaded", id);
+        document
+    }
+
+    /// Ids of every document this server knows: loaded now or persisted before.
+    pub async fn document_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.documents.lock().await.keys().cloned().collect();
+        if let Ok(stored) = self.storage.list_keys().await {
+            for key in stored {
+                if !ids.contains(&key) {
+                    ids.push(key);
+                }
+            }
+        }
+        ids.sort();
+        ids
+    }
+
+    /// How many documents are loaded in memory.
+    pub async fn loaded_document_count(&self) -> usize {
+        self.documents.lock().await.len()
     }
 
     /// Get a broadcast receiver for real-time CRDT updates
@@ -218,13 +339,31 @@ impl ServerState {
         self.ephemeral_tx.subscribe()
     }
 
-    /// Route ephemeral messages to subscribers (no Automerge, no storage, no persist)
+    /// Route ephemeral messages on a document to its subscribers (no
+    /// Automerge, no storage, no persist).
+    ///
+    /// A client connection must have the document open; read access is
+    /// enough, because presence and cursors are not writes. A peer
+    /// (`Uuid::nil()`) has nothing open and is trusted on the default document.
     pub async fn route_ephemeral(
         &self,
         from_client_id: String,
         from_connection_id: Uuid,
+        document: &str,
         updates: Vec<(String, Vec<u8>)>,
     ) -> Result<()> {
+        if !from_connection_id.is_nil()
+            && self
+                .document_access(&from_connection_id, document)
+                .is_none()
+        {
+            return Err(anyhow!(
+                "{} has not opened {} and may not send on it",
+                from_client_id,
+                document
+            ));
+        }
+
         // Filter out invalid paths before routing
         let updates: Vec<(String, Vec<u8>)> = updates
             .into_iter()
@@ -246,17 +385,12 @@ impl ServerState {
             return Ok(());
         }
 
-        // Extract paths from updates
         let paths: Vec<String> = updates.iter().map(|(path, _)| path.clone()).collect();
-
-        // Get subscribers for affected paths
-        let subscribers = {
-            let sub_mgr = self.subscriptions.lock().await;
-            sub_mgr.get_subscribers_for_paths(&paths)
-        };
+        let subscribers = self.subscribers_for_paths(document, &paths).await;
 
         if !subscribers.is_empty() {
             let msg = EphemeralMessage {
+                document: document.to_string(),
                 from_client_id,
                 updates,
                 exclude_connection: Some(from_connection_id),
@@ -382,24 +516,16 @@ impl ServerState {
         }
     }
 
-    /// Register a client connection with subscriptions
+    /// Register a client connection. Documents are opened separately with
+    /// [`Self::open_document`].
     pub async fn register_client(
         &self,
         connection_id: Uuid,
         client_id: String,
         actor: Actor,
-        subscriptions: Vec<String>,
         transport: String,
-    ) -> Result<(Vec<String>, Vec<String>)> {
+    ) {
         let now = now_timestamp();
-
-        // Add subscriptions via SubscriptionManager (validates with policy)
-        let (added, denied) = {
-            let mut sub_mgr = self.subscriptions.lock().await;
-            sub_mgr.add_client(client_id.clone(), actor.clone(), subscriptions.clone())
-        };
-
-        // Register client info
         self.clients.insert(
             connection_id,
             ClientInfo {
@@ -409,31 +535,125 @@ impl ServerState {
                 transport: transport.clone(),
                 connected_at: now,
                 last_seen: now,
+                documents: HashMap::new(),
             },
         );
 
-        // Connection info logged in main.rs
-
-        // Log activity
         self.log_activity(ActivityEvent::ClientConnected {
             client_id,
             transport,
-            subscriptions: added.clone(),
             timestamp: now,
         })
         .await;
-
-        Ok((added, denied))
     }
 
-    /// Unregister a client connection
+    /// Open a document on a connection.
+    ///
+    /// Asks the authority, and only if it allows: loads the document, records
+    /// the access on the connection, and adds the subscription patterns
+    /// (policy-checked) for it. The connection then receives the document's
+    /// broadcasts and ephemeral traffic.
+    pub async fn open_document(
+        &self,
+        connection_id: &Uuid,
+        document: &str,
+        subscriptions: Vec<String>,
+    ) -> Result<Opened, OpenError> {
+        let (client_id, actor) = {
+            let client = self
+                .clients
+                .get(connection_id)
+                .ok_or(OpenError::NotConnected)?;
+            (client.client_id.clone(), client.actor.clone())
+        };
+
+        let Some(access) = self.authority.may_open(&actor, document).await else {
+            self.log_activity(ActivityEvent::DocumentRefused {
+                client_id: client_id.clone(),
+                document: document.to_string(),
+                timestamp: now_timestamp(),
+            })
+            .await;
+            return Err(OpenError::Refused {
+                subject: actor.id,
+                document: document.to_string(),
+            });
+        };
+
+        // Make sure it is loaded before the client's Sync is computed.
+        self.document(document).await;
+
+        let (added, denied) = {
+            let mut managers = self.subscriptions.lock().await;
+            let manager = managers
+                .entry(document.to_string())
+                .or_insert_with(|| SubscriptionManager::new(self.policy.clone()));
+            manager.add_client(client_id.clone(), actor, subscriptions)
+        };
+
+        if let Some(mut client) = self.clients.get_mut(connection_id) {
+            client.documents.insert(document.to_string(), access);
+            client.last_seen = now_timestamp();
+        }
+
+        self.log_activity(ActivityEvent::DocumentOpened {
+            client_id,
+            document: document.to_string(),
+            access,
+            subscriptions: added.clone(),
+            timestamp: now_timestamp(),
+        })
+        .await;
+
+        Ok(Opened {
+            access,
+            added,
+            denied,
+        })
+    }
+
+    /// Close one document on a connection; the connection stays.
+    pub async fn close_document(&self, connection_id: &Uuid, document: &str) {
+        let client_id = match self.clients.get_mut(connection_id) {
+            Some(mut client) => {
+                client.documents.remove(document);
+                client.client_id.clone()
+            }
+            None => return,
+        };
+        {
+            let mut managers = self.subscriptions.lock().await;
+            if let Some(manager) = managers.get_mut(document) {
+                manager.remove_client(&client_id);
+            }
+        }
+        self.log_activity(ActivityEvent::DocumentClosed {
+            client_id,
+            document: document.to_string(),
+            timestamp: now_timestamp(),
+        })
+        .await;
+    }
+
+    /// What this connection may do with the document, if it has it open.
+    pub fn document_access(&self, connection_id: &Uuid, document: &str) -> Option<Access> {
+        self.clients
+            .get(connection_id)
+            .and_then(|client| client.documents.get(document).copied())
+    }
+
+    /// Unregister a client connection, closing everything it had open.
     pub async fn unregister_client(&self, connection_id: &Uuid) -> Result<()> {
         if let Some((_, client_info)) = self.clients.remove(connection_id) {
-            // Remove from subscription manager
-            let mut sub_mgr = self.subscriptions.lock().await;
-            sub_mgr.remove_client(&client_info.client_id);
+            {
+                let mut managers = self.subscriptions.lock().await;
+                for document in client_info.documents.keys() {
+                    if let Some(manager) = managers.get_mut(document) {
+                        manager.remove_client(&client_info.client_id);
+                    }
+                }
+            }
 
-            // Log activity
             self.log_activity(ActivityEvent::ClientDisconnected {
                 client_id: client_info.client_id.clone(),
                 timestamp: now_timestamp(),
@@ -446,21 +666,25 @@ impl ServerState {
         Ok(())
     }
 
-    /// Update client subscriptions dynamically
-    #[allow(dead_code)]
+    /// Update a client's subscriptions within a document it has open.
     pub async fn update_subscriptions(
         &self,
         client_id: &str,
+        document: &str,
         add: Vec<String>,
         remove: Vec<String>,
     ) -> Result<(Vec<String>, Vec<String>)> {
-        let mut sub_mgr = self.subscriptions.lock().await;
-        let (added, denied) =
-            sub_mgr.update_subscriptions(client_id, add.clone(), remove.clone())?;
+        let (added, denied) = {
+            let mut managers = self.subscriptions.lock().await;
+            let manager = managers
+                .get_mut(document)
+                .ok_or_else(|| anyhow!("Document {} has no subscribers", document))?;
+            manager.update_subscriptions(client_id, add, remove.clone())?
+        };
 
-        // Log activity
         self.log_activity(ActivityEvent::SubscriptionUpdated {
             client_id: client_id.to_string(),
+            document: document.to_string(),
             added: added.clone(),
             removed: remove,
             timestamp: now_timestamp(),
@@ -470,36 +694,72 @@ impl ServerState {
         Ok((added, denied))
     }
 
-    /// Apply changes from a client and broadcast to subscribers
+    async fn subscribers_for_paths(&self, document: &str, paths: &[String]) -> Vec<String> {
+        let managers = self.subscriptions.lock().await;
+        managers
+            .get(document)
+            .map(|manager| manager.get_subscribers_for_paths(paths))
+            .unwrap_or_default()
+    }
+
+    /// Apply changes a client pushed to a document and broadcast them to the
+    /// document's subscribers. Refused unless the connection holds the
+    /// document with write access.
     pub async fn apply_changes(
         &self,
         from_client_id: String,
         from_connection_id: Uuid,
+        document: &str,
         changes: Vec<Vec<u8>>,
         affected_paths: Vec<String>,
     ) -> Result<()> {
+        match self.document_access(&from_connection_id, document) {
+            Some(access) if access.may_write() => {}
+            Some(_) => {
+                return Err(anyhow!(
+                    "{} holds {} read-only and may not write to it",
+                    from_client_id,
+                    document
+                ))
+            }
+            None => {
+                return Err(anyhow!(
+                    "{} has not opened {} and may not write to it",
+                    from_client_id,
+                    document
+                ))
+            }
+        }
         self.apply_changes_inner(
             from_client_id,
             Some(from_connection_id),
+            document,
             changes,
             affected_paths,
         )
         .await
     }
 
-    /// Apply changes from a peer server.
+    /// Apply changes from a peer server to the default document.
     ///
     /// Similar to `apply_changes` but marks the broadcast with the peer's client_id
     /// so other peer connections can filter it out (preventing broadcast storms).
-    /// Uses `Uuid::nil()` as the connection_id since peers don't have a local connection.
+    /// Peers have no local connection and no per-document access; they are
+    /// trusted on the default document.
     pub async fn apply_peer_changes(
         &self,
         from_peer_id: String,
         changes: Vec<Vec<u8>>,
         affected_paths: Vec<String>,
     ) -> Result<()> {
-        self.apply_changes_inner(from_peer_id, None, changes, affected_paths)
-            .await
+        self.apply_changes_inner(
+            from_peer_id,
+            None,
+            DEFAULT_DOCUMENT,
+            changes,
+            affected_paths,
+        )
+        .await
     }
 
     /// Internal: Apply changes, persist, and broadcast to subscribers
@@ -507,12 +767,14 @@ impl ServerState {
         &self,
         from_client_id: String,
         exclude_connection: Option<Uuid>,
+        document: &str,
         changes: Vec<Vec<u8>>,
         affected_paths: Vec<String>,
     ) -> Result<()> {
-        // Apply changes to global DB and persist to storage
+        // Apply changes to the document and persist it under its id
         {
-            let db = self.db.write().await;
+            let db = self.document(document).await;
+            let db = db.write().await;
             db.apply_changes(changes.clone())?;
             db.persist().await?;
         }
@@ -526,23 +788,21 @@ impl ServerState {
             *last = now_timestamp();
         }
 
-        // Get subscribers for affected paths
-        let subscribers = {
-            let sub_mgr = self.subscriptions.lock().await;
-            sub_mgr.get_subscribers_for_paths(&affected_paths)
-        };
+        let subscribers = self.subscribers_for_paths(document, &affected_paths).await;
 
         // Broadcast to subscribers (except sender)
         if !subscribers.is_empty() {
             let total_bytes: usize = changes.iter().map(|c| c.len()).sum();
             info!(
-                "📤 BROADCAST: {} changes ({} bytes) to {} subscribers",
+                "📤 BROADCAST [{}]: {} changes ({} bytes) to {} subscribers",
+                document,
                 changes.len(),
                 total_bytes,
                 subscribers.len()
             );
 
             let msg = BroadcastMessage {
+                document: document.to_string(),
                 from_client_id: from_client_id.clone(),
                 changes: changes.clone(),
                 affected_paths: affected_paths.clone(),
@@ -555,9 +815,9 @@ impl ServerState {
             }
         }
 
-        // Log activity
         self.log_activity(ActivityEvent::ChangesApplied {
             from_client_id,
+            document: document.to_string(),
             change_count: changes.len(),
             affected_paths,
             timestamp: now_timestamp(),
@@ -591,12 +851,16 @@ impl ServerState {
     /// Get server stats
     pub async fn get_stats(&self) -> ServerStats {
         let subscription_count = {
-            let sub_mgr = self.subscriptions.lock().await;
-            sub_mgr.client_count()
+            let managers = self.subscriptions.lock().await;
+            managers
+                .values()
+                .map(|manager| manager.client_count())
+                .sum()
         };
         ServerStats {
             active_connections: self.get_connection_count(),
             subscription_count,
+            document_count: self.loaded_document_count().await,
             total_changes: self.get_change_count().await,
             uptime_seconds: self.get_uptime_seconds(),
             last_activity: *self.last_activity.read().await,
@@ -605,18 +869,33 @@ impl ServerState {
 
     /// Get all connection info for admin
     pub async fn get_connections(&self) -> Vec<ConnectionInfo> {
-        let sub_mgr = self.subscriptions.lock().await;
+        let managers = self.subscriptions.lock().await;
         self.clients
             .iter()
             .map(|entry| {
                 let client = entry.value();
-                let patterns = sub_mgr
-                    .get_client_subscriptions(&client.client_id)
-                    .map(|s| s.patterns().to_vec())
-                    .unwrap_or_default();
+                let mut documents: Vec<DocumentInfo> = client
+                    .documents
+                    .iter()
+                    .map(|(document, access)| DocumentInfo {
+                        document: document.clone(),
+                        access: *access,
+                        subscriptions: managers
+                            .get(document)
+                            .and_then(|manager| manager.get_client_subscriptions(&client.client_id))
+                            .map(|set| set.patterns().to_vec())
+                            .unwrap_or_default(),
+                    })
+                    .collect();
+                documents.sort_by(|a, b| a.document.cmp(&b.document));
+                let subscriptions = documents
+                    .iter()
+                    .flat_map(|info| info.subscriptions.iter().cloned())
+                    .collect();
                 ConnectionInfo {
                     client_id: client.client_id.clone(),
-                    subscriptions: patterns,
+                    documents,
+                    subscriptions,
                     transport: client.transport.clone(),
                     connected_at: client.connected_at,
                     last_seen: client.last_seen,
@@ -627,15 +906,22 @@ impl ServerState {
 
     /// Get all subscription info for admin
     pub async fn get_subscriptions(&self) -> Vec<SubscriptionInfo> {
-        let sub_mgr = self.subscriptions.lock().await;
-        sub_mgr
-            .all_clients()
-            .into_iter()
-            .map(|(client_id, patterns)| SubscriptionInfo {
-                client_id,
-                patterns,
+        let managers = self.subscriptions.lock().await;
+        let mut infos: Vec<SubscriptionInfo> = managers
+            .iter()
+            .flat_map(|(document, manager)| {
+                manager
+                    .all_clients()
+                    .into_iter()
+                    .map(|(client_id, patterns)| SubscriptionInfo {
+                        client_id,
+                        document: document.clone(),
+                        patterns,
+                    })
             })
-            .collect()
+            .collect();
+        infos.sort_by(|a, b| (&a.document, &a.client_id).cmp(&(&b.document, &b.client_id)));
+        infos
     }
 
     /// Get recent activity log
@@ -649,15 +935,26 @@ impl ServerState {
 pub struct ServerStats {
     pub active_connections: usize,
     pub subscription_count: usize,
+    pub document_count: usize,
     pub total_changes: usize,
     pub uptime_seconds: u64,
     pub last_activity: i64,
+}
+
+/// One open document on a connection (for /admin/connections)
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DocumentInfo {
+    pub document: String,
+    pub access: Access,
+    pub subscriptions: Vec<String>,
 }
 
 /// Connection info (for /admin/connections)
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ConnectionInfo {
     pub client_id: String,
+    pub documents: Vec<DocumentInfo>,
+    /// Every pattern across every open document; kept for the admin page.
     pub subscriptions: Vec<String>,
     pub transport: String,
     pub connected_at: i64,
@@ -668,6 +965,7 @@ pub struct ConnectionInfo {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SubscriptionInfo {
     pub client_id: String,
+    pub document: String,
     pub patterns: Vec<String>,
 }
 
@@ -677,4 +975,169 @@ fn now_timestamp() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::authority::PolicyAuthority;
+    use swirldb_core::automerge::ScalarValue;
+    use swirldb_core::policy::ActorType;
+    use swirldb_core::storage::InMemoryDocStorage;
+
+    fn actor(id: &str) -> Actor {
+        Actor {
+            actor_type: ActorType::User,
+            id: id.to_string(),
+            org_id: None,
+            team_id: None,
+            app_id: None,
+            role: None,
+            claims: Default::default(),
+        }
+    }
+
+    async fn changes_setting(db: &Document, path: &str, value: &str) -> Vec<Vec<u8>> {
+        let db = db.read().await;
+        let before = db.get_heads();
+        db.set_path(path, ScalarValue::Str(value.into())).unwrap();
+        db.get_changes_since(&before)
+    }
+
+    #[tokio::test]
+    async fn documents_are_persisted_under_their_own_ids() {
+        let storage = Arc::new(InMemoryDocStorage::new());
+        let state = ServerState::new(None, storage.clone()).await;
+        let connection = Uuid::new_v4();
+        state
+            .register_client(connection, "alice".into(), actor("alice"), "test".into())
+            .await;
+
+        for id in ["alpha", "beta"] {
+            state
+                .open_document(&connection, id, vec!["**".into()])
+                .await
+                .unwrap();
+            let scratch: Document = Arc::new(RwLock::new(SwirlDB::new()));
+            let changes = changes_setting(&scratch, "name", id).await;
+            state
+                .apply_changes("alice".into(), connection, id, changes, vec!["name".into()])
+                .await
+                .unwrap();
+        }
+
+        let mut keys = storage.list_keys().await.unwrap();
+        keys.sort();
+        assert_eq!(keys, vec!["alpha", "beta"]);
+
+        let alpha = state.document("alpha").await;
+        assert_eq!(
+            alpha.read().await.get_path("name"),
+            Some(ScalarValue::Str("alpha".into()))
+        );
+        let beta = state.document("beta").await;
+        assert_eq!(
+            beta.read().await.get_path("name"),
+            Some(ScalarValue::Str("beta".into()))
+        );
+
+        // A fresh server over the same storage finds both by id, beside the
+        // default document it always holds.
+        let again = ServerState::new(None, storage).await;
+        assert_eq!(
+            again.document_ids().await,
+            vec!["alpha", "beta", DEFAULT_DOCUMENT]
+        );
+        assert_eq!(
+            again.document("beta").await.read().await.get_path("name"),
+            Some(ScalarValue::Str("beta".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_push_on_an_unopened_or_read_only_document_is_refused() {
+        let engine = PolicyEngine::from_json(
+            r#"{"policies":{"rules":[
+                {"priority":10,"actor":{"type":"Any"},"action":"Read","path_pattern":"shared","effect":"Allow"}
+            ]}}"#,
+        )
+        .unwrap();
+        let state = ServerState::with_authority(
+            None,
+            Arc::new(InMemoryDocStorage::new()),
+            Arc::new(PolicyAuthority::new(engine)),
+        )
+        .await;
+        let connection = Uuid::new_v4();
+        state
+            .register_client(connection, "alice".into(), actor("alice"), "test".into())
+            .await;
+
+        let opened = state
+            .open_document(&connection, "shared", vec!["**".into()])
+            .await
+            .unwrap();
+        assert_eq!(opened.access, Access::Read);
+
+        let refused = state
+            .open_document(&connection, "private", vec!["**".into()])
+            .await;
+        assert!(matches!(refused, Err(OpenError::Refused { .. })));
+
+        let scratch: Document = Arc::new(RwLock::new(SwirlDB::new()));
+        let changes = changes_setting(&scratch, "name", "x").await;
+        let read_only = state
+            .apply_changes(
+                "alice".into(),
+                connection,
+                "shared",
+                changes.clone(),
+                vec![],
+            )
+            .await;
+        assert!(read_only.unwrap_err().to_string().contains("read-only"));
+        let unopened = state
+            .apply_changes("alice".into(), connection, "private", changes, vec![])
+            .await;
+        assert!(unopened.unwrap_err().to_string().contains("has not opened"));
+        assert!(state
+            .document("shared")
+            .await
+            .read()
+            .await
+            .get_path("name")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn closing_a_document_stops_its_broadcasts_only() {
+        let state = ServerState::new(None, Arc::new(InMemoryDocStorage::new())).await;
+        let connection = Uuid::new_v4();
+        state
+            .register_client(connection, "alice".into(), actor("alice"), "test".into())
+            .await;
+        state
+            .open_document(&connection, "alpha", vec!["**".into()])
+            .await
+            .unwrap();
+        state
+            .open_document(&connection, "beta", vec!["**".into()])
+            .await
+            .unwrap();
+        state.close_document(&connection, "alpha").await;
+
+        assert!(state.document_access(&connection, "alpha").is_none());
+        assert_eq!(
+            state.document_access(&connection, "beta"),
+            Some(Access::Write)
+        );
+        assert!(state
+            .subscribers_for_paths("alpha", &["name".into()])
+            .await
+            .is_empty());
+        assert_eq!(
+            state.subscribers_for_paths("beta", &["name".into()]).await,
+            vec!["alice".to_string()]
+        );
+    }
 }

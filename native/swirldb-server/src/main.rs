@@ -25,8 +25,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::{env, fs, io::BufReader, time::Duration};
 use swirldb_core::policy::{Remote, Transport};
-use swirldb_core::protocol::Message;
+use swirldb_core::protocol::{Message, DEFAULT_DOCUMENT};
 use swirldb_core::storage::{DocumentStorage, InMemoryDocStorage};
+use swirldb_server::authority::{Authority, HttpAuthority, OpenToAll};
 use swirldb_server::storage::RedbAdapter;
 use swirldb_server::ServerState;
 use tokio::time::interval;
@@ -86,8 +87,22 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Who decides which documents a subject may open. Without AUTHORITY_URL
+    // every document is open to everyone who can reach the server, which is
+    // right for a laptop and wrong for anything else.
+    let authority: Arc<dyn Authority> = match env::var("AUTHORITY_URL") {
+        Ok(url) if !url.is_empty() => {
+            info!("Documents open as {}/may-open allows", url);
+            Arc::new(HttpAuthority::new(url))
+        }
+        _ => {
+            warn!("No AUTHORITY_URL: every document is open to every client");
+            Arc::new(OpenToAll)
+        }
+    };
+
     // Create server state with storage
-    let server_state = ServerState::new(policy, storage).await;
+    let server_state = ServerState::with_authority(policy, storage, authority).await;
 
     // Load optional config file for remotes
     let remotes = load_remotes_config();
@@ -362,10 +377,12 @@ pub async fn connect_to_peer(
                 let (mut ws_sender, mut ws_receiver) = futures::StreamExt::split(ws_stream);
 
                 // Send Connect message with our server ID
+                // Peers sync the default document only.
                 let connect_msg = Message::Connect {
                     client_id: format!("peer-{}", state.server_id()),
                     subscriptions: subscriptions.clone(),
                     heads: Vec::new(),
+                    document: DEFAULT_DOCUMENT.to_string(),
                 };
 
                 if let Err(e) = futures::SinkExt::send(
@@ -395,7 +412,7 @@ pub async fn connect_to_peer(
                             match msg {
                                 Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(data))) => {
                                     match Message::decode(&data) {
-                                        Ok(Message::Broadcast { from_client_id, changes, affected_paths }) => {
+                                        Ok(Message::Broadcast { from_client_id, changes, affected_paths, document: _ }) => {
                                             // Skip if from_client_id already has peer prefix
                                             // (prevents double-application in multi-hop topologies)
                                             if from_client_id.starts_with("peer-") {
@@ -409,7 +426,7 @@ pub async fn connect_to_peer(
                                                 error!("Failed to apply peer changes: {}", e);
                                             }
                                         }
-                                        Ok(Message::Sync { heads: _, changes }) => {
+                                        Ok(Message::Sync { heads: _, changes, document: _ }) => {
                                             if !changes.is_empty() {
                                                 let db = state.db().write().await;
                                                 if let Err(e) = db.apply_changes(changes) {
@@ -417,23 +434,25 @@ pub async fn connect_to_peer(
                                                 }
                                             }
                                         }
-                                        Ok(Message::EphemeralBatch { updates }) => {
+                                        Ok(Message::EphemeralBatch { updates, document: _ }) => {
                                             // Route peer ephemeral to local subscribers
                                             if let Err(e) = state.route_ephemeral(
                                                 format!("peer-{}", peer_id),
                                                 Uuid::nil(),
+                                                DEFAULT_DOCUMENT,
                                                 updates,
                                             ).await {
                                                 error!("Failed to route peer ephemeral: {}", e);
                                             }
                                         }
-                                        Ok(Message::EphemeralRelay { origin, seq, path_through, updates }) => {
+                                        Ok(Message::EphemeralRelay { origin, seq, path_through, updates, document: _ }) => {
                                             // Atomic check-and-claim (prevents TOCTOU race)
                                             if state.try_claim_relay(&origin, seq, &path_through) {
                                                 // Route to local subscribers
                                                 if let Err(e) = state.route_ephemeral(
                                                     format!("peer-{}", peer_id),
                                                     Uuid::nil(),
+                                                    DEFAULT_DOCUMENT,
                                                     updates,
                                                 ).await {
                                                     error!("Failed to route relayed ephemeral: {}", e);
@@ -468,8 +487,9 @@ pub async fn connect_to_peer(
                         // Forward local broadcasts to peer
                         Ok(msg) = broadcast_rx.recv() => {
                             // Don't forward messages that originated from any peer
-                            // (prevents broadcast storms between peers)
-                            if msg.from_client_id.starts_with("peer-") {
+                            // (prevents broadcast storms between peers), and only
+                            // the default document travels between peers.
+                            if msg.from_client_id.starts_with("peer-") || msg.document != DEFAULT_DOCUMENT {
                                 continue;
                             }
 
@@ -482,6 +502,7 @@ pub async fn connect_to_peer(
                             let push_msg = Message::Push {
                                 heads,
                                 changes: msg.changes,
+                                document: DEFAULT_DOCUMENT.to_string(),
                             };
                             if let Err(e) = futures::SinkExt::send(
                                 &mut ws_sender,
@@ -494,8 +515,9 @@ pub async fn connect_to_peer(
 
                         // Forward local ephemeral to peer as EphemeralRelay
                         Ok(msg) = ephemeral_rx.recv() => {
-                            // Don't forward messages that originated from any peer
-                            if msg.from_client_id.starts_with("peer-") {
+                            // Don't forward messages that originated from any peer,
+                            // and only the default document travels between peers.
+                            if msg.from_client_id.starts_with("peer-") || msg.document != DEFAULT_DOCUMENT {
                                 continue;
                             }
 
@@ -504,6 +526,7 @@ pub async fn connect_to_peer(
                                 seq: state.next_ephemeral_seq(),
                                 path_through: vec![state.server_id().to_string()],
                                 updates: msg.updates,
+                                document: DEFAULT_DOCUMENT.to_string(),
                             };
                             if let Err(e) = futures::SinkExt::send(
                                 &mut ws_sender,

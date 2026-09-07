@@ -763,7 +763,10 @@ async fn tcp_read_loop(
             Err(_) => {
                 // Read timeout — connection is likely dead
                 if !inner.shut_down.load(Ordering::Relaxed) {
-                    warn!("TCP read timeout from {} ({}s) — disconnecting", peer_id, TCP_READ_TIMEOUT_SECS);
+                    warn!(
+                        "TCP read timeout from {} ({}s) — disconnecting",
+                        peer_id, TCP_READ_TIMEOUT_SECS
+                    );
                 }
                 break;
             }
@@ -905,7 +908,7 @@ async fn read_handshake(reader: &mut tokio::net::tcp::OwnedReadHalf) -> Result<S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use swirldb_core::protocol::Message;
+    use swirldb_core::protocol::{Message, DEFAULT_DOCUMENT};
     use tokio::time::{timeout, Duration};
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -964,6 +967,7 @@ mod tests {
         let msg = Message::Push {
             heads: vec![1, 2, 3],
             changes: vec![vec![4, 5, 6]],
+            document: DEFAULT_DOCUMENT.to_string(),
         };
         let encoded = msg.encode();
         b.send_reliable(&PeerId::new("peer-a"), &encoded)
@@ -989,6 +993,7 @@ mod tests {
             from_client_id: "peer-a".to_string(),
             changes: vec![vec![7, 8, 9]],
             affected_paths: vec!["settings.bpm".to_string()],
+            document: DEFAULT_DOCUMENT.to_string(),
         };
         a.send_reliable(&PeerId::new("peer-b"), &msg2.encode())
             .await
@@ -1040,6 +1045,7 @@ mod tests {
         // Send ephemeral from b → a
         let beat_msg = Message::EphemeralBatch {
             updates: vec![("beat.bpm".to_string(), vec![0, 120])],
+            document: DEFAULT_DOCUMENT.to_string(),
         };
         b.send_ephemeral(&PeerId::new("peer-a"), &beat_msg.encode())
             .unwrap();
