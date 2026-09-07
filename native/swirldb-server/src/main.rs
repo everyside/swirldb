@@ -98,7 +98,18 @@ async fn main() -> Result<()> {
                 "Connections are who {}/whoami says; documents open as {}/may-open allows",
                 url, url
             );
-            Arc::new(HttpAuthority::new(url))
+            let authority = HttpAuthority::new(url);
+            // The credential the authority checks before answering. Without
+            // it the only thing the request can carry is user-info from the
+            // URL, sent as Basic, which is the older way and on its way out.
+            let authority = match env::var("AUTHORITY_SECRET") {
+                Ok(secret) if !secret.is_empty() => {
+                    info!("The authority is asked with AUTHORITY_SECRET as a bearer");
+                    authority.with_secret(secret)
+                }
+                _ => authority,
+            };
+            Arc::new(authority)
         }
         _ => {
             warn!("No AUTHORITY_URL: every connection is whoever it claims, every document open to it");

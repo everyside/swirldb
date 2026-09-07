@@ -10,7 +10,9 @@
 
 use super::{init_test_logging, rust_client::RustClient, test_server::TestServer};
 use automerge::ScalarValue;
+use axum::http::{header::AUTHORIZATION, HeaderMap, StatusCode};
 use axum::{extract::State, routing::post, Json, Router};
+use base64::Engine;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -214,6 +216,43 @@ struct FakeApplication {
     whoami_asked: AtomicUsize,
     /// The subject ids `may-open` was asked about, in order
     subjects_asked: std::sync::Mutex<Vec<String>>,
+    /// The shared secret a request must prove before it is answered, as
+    /// `Bearer <secret>` or as `Basic` for `swirldb:<secret>`; `None` answers
+    /// anyone
+    required_secret: Option<String>,
+    /// Every `Authorization` header value received, in order, `""` for none
+    authorization_seen: std::sync::Mutex<Vec<String>>,
+}
+
+impl FakeApplication {
+    /// Records the credential and refuses the request if it is not the one
+    /// required. Refused requests are not counted as asked: an application
+    /// that has not admitted a caller has not consulted anything for it.
+    fn admit(&self, headers: &HeaderMap) -> Result<(), StatusCode> {
+        let authorization = headers
+            .get(AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        self.authorization_seen
+            .lock()
+            .unwrap()
+            .push(authorization.clone());
+        let Some(secret) = &self.required_secret else {
+            return Ok(());
+        };
+        let basic = base64::engine::general_purpose::STANDARD.encode(format!("swirldb:{secret}"));
+        if authorization == format!("Bearer {secret}") || authorization == format!("Basic {basic}")
+        {
+            Ok(())
+        } else {
+            Err(StatusCode::UNAUTHORIZED)
+        }
+    }
+
+    fn authorization_seen(&self) -> Vec<String> {
+        self.authorization_seen.lock().unwrap().clone()
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -223,13 +262,15 @@ struct WhoAmI {
 
 async fn whoami(
     State(application): State<Arc<FakeApplication>>,
+    headers: HeaderMap,
     Json(request): Json<WhoAmI>,
-) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    application.admit(&headers)?;
     application.whoami_asked.fetch_add(1, Ordering::SeqCst);
     let id = match request.token.as_str() {
         "alice-token" => "alice",
         "bob-token" => "bob",
-        _ => return Err(axum::http::StatusCode::UNAUTHORIZED),
+        _ => return Err(StatusCode::UNAUTHORIZED),
     };
     Ok(Json(serde_json::json!({
         "subject": { "actor_type": "User", "id": id }
@@ -244,8 +285,10 @@ struct MayOpen {
 
 async fn may_open(
     State(application): State<Arc<FakeApplication>>,
+    headers: HeaderMap,
     Json(request): Json<MayOpen>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    application.admit(&headers)?;
     application.asked.fetch_add(1, Ordering::SeqCst);
     let subject = request.subject["id"].as_str().unwrap_or_default();
     application
@@ -258,14 +301,21 @@ async fn may_open(
         (_, "draft.1") => "read",
         _ => "none",
     };
-    Json(serde_json::json!({ "access": access }))
+    Ok(Json(serde_json::json!({ "access": access })))
 }
 
 async fn serve_fake_application() -> (String, Arc<FakeApplication>) {
+    serve_fake_application_requiring(None).await
+}
+
+/// The fake application, answering only requests that prove `secret`.
+async fn serve_fake_application_requiring(secret: Option<&str>) -> (String, Arc<FakeApplication>) {
     let application = Arc::new(FakeApplication {
         asked: AtomicUsize::new(0),
         whoami_asked: AtomicUsize::new(0),
         subjects_asked: std::sync::Mutex::new(Vec::new()),
+        required_secret: secret.map(str::to_string),
+        authorization_seen: std::sync::Mutex::new(Vec::new()),
     });
     let router = Router::new()
         .route("/authority/whoami", post(whoami))
@@ -340,6 +390,104 @@ async fn the_http_authority_asks_the_application_and_caches_briefly() {
     assert_eq!(application.whoami_asked.load(Ordering::SeqCst), 2);
 
     server.shutdown().await.unwrap();
+}
+
+/// Alice, opening `draft.1` through an authority built by `configure` against
+/// an application that requires `secret`. Returns what the application saw.
+async fn open_through(
+    secret: &str,
+    configure: impl FnOnce(String) -> HttpAuthority,
+) -> (
+    Result<swirldb_client::SyncClient, anyhow::Error>,
+    Arc<FakeApplication>,
+) {
+    let (endpoint, application) = serve_fake_application_requiring(Some(secret)).await;
+    let server = TestServer::start_with_authority(Arc::new(configure(endpoint)))
+        .await
+        .unwrap();
+    let alice = swirldb_client::SyncClient::open_authenticated(
+        &server.ws_url(),
+        "alice-token",
+        "draft.1",
+        everything(),
+    )
+    .await;
+    server.shutdown().await.unwrap();
+    (alice, application)
+}
+
+/// `http://swirldb:<secret>@host/authority`: the older way to carry the secret.
+fn with_user_info(endpoint: &str, secret: &str) -> String {
+    endpoint.replacen("http://", &format!("http://swirldb:{secret}@"), 1)
+}
+
+#[tokio::test]
+async fn the_authority_secret_rides_as_a_bearer_on_both_questions() {
+    init_test_logging();
+    let (alice, application) = open_through("s3cret", |endpoint| {
+        HttpAuthority::new(endpoint).with_secret("s3cret")
+    })
+    .await;
+    assert_eq!(alice.unwrap().access(), Access::Write);
+
+    let seen = application.authorization_seen();
+    assert_eq!(seen.len(), 2, "whoami and may-open, one request each");
+    assert!(
+        seen.iter().all(|value| value == "Bearer s3cret"),
+        "{seen:?}"
+    );
+    assert_eq!(application.whoami_asked.load(Ordering::SeqCst), 1);
+    assert_eq!(application.asked.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn without_the_secret_the_application_refuses_and_so_does_the_authority() {
+    init_test_logging();
+    let (alice, application) = open_through("s3cret", HttpAuthority::new).await;
+    assert!(alice.is_err());
+
+    // The application saw a bare request and answered 401 before consulting
+    // anything; the authority fails closed on it.
+    assert_eq!(application.authorization_seen(), vec!["".to_string()]);
+    assert_eq!(application.whoami_asked.load(Ordering::SeqCst), 0);
+    assert_eq!(application.asked.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn user_info_in_the_url_still_rides_as_basic() {
+    init_test_logging();
+    let (alice, application) = open_through("s3cret", |endpoint| {
+        HttpAuthority::new(with_user_info(&endpoint, "s3cret"))
+    })
+    .await;
+    assert_eq!(alice.unwrap().access(), Access::Write);
+
+    let seen = application.authorization_seen();
+    assert_eq!(seen.len(), 2);
+    assert!(
+        seen.iter().all(|value| value.starts_with("Basic ")),
+        "{seen:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_bearer_wins_over_user_info_when_both_are_present() {
+    init_test_logging();
+    // The user-info carries a secret the application no longer accepts; the
+    // bearer carries the one it does. Only the bearer must arrive: were both
+    // sent, the application would read the Basic first and refuse.
+    let (alice, application) = open_through("s3cret", |endpoint| {
+        HttpAuthority::new(with_user_info(&endpoint, "stale")).with_secret("s3cret")
+    })
+    .await;
+    assert_eq!(alice.unwrap().access(), Access::Write);
+
+    let seen = application.authorization_seen();
+    assert_eq!(seen.len(), 2);
+    assert!(
+        seen.iter().all(|value| value == "Bearer s3cret"),
+        "{seen:?}"
+    );
 }
 
 #[tokio::test]

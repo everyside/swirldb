@@ -202,6 +202,15 @@ impl From<AccessAnswer> for Option<Access> {
 /// `POST <endpoint>/may-open` with `{"subject": <actor>, "document": "<id>"}`
 /// is answered by `{"access": "read" | "write" | "none"}`.
 ///
+/// The application should not answer these questions to anyone who can reach
+/// it, so both requests carry a credential of SwirlDB's own: the shared secret
+/// given to [`HttpAuthority::with_secret`], sent as `Authorization: Bearer
+/// <secret>`. Before there was a secret, the only credential a deployment
+/// could attach was user-info in the endpoint URL, which the HTTP client
+/// turns into `Authorization: Basic`; that still works, for one release, and
+/// where both are present the user-info is dropped from the URL and the
+/// bearer is what the application receives.
+///
 /// Both answers are cached for a short time — ten seconds by default: whoami
 /// per token, may-open per (subject, document) — so an editor that reconnects
 /// or opens the same document twice does not cost the application a query
@@ -211,6 +220,8 @@ impl From<AccessAnswer> for Option<Access> {
 /// documents, because failing open here is a disclosure.
 pub struct HttpAuthority {
     endpoint: String,
+    /// The shared secret sent as a bearer on every request, if there is one.
+    secret: Option<String>,
     client: reqwest::Client,
     subjects: DashMap<String, (Option<Actor>, Instant)>,
     cache: DashMap<(String, String), (Option<Access>, Instant)>,
@@ -231,6 +242,7 @@ impl HttpAuthority {
         let endpoint = endpoint.into().trim_end_matches('/').to_string();
         Self {
             endpoint,
+            secret: None,
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
                 .build()
@@ -238,6 +250,27 @@ impl HttpAuthority {
             subjects: DashMap::new(),
             cache: DashMap::new(),
             time_to_live,
+        }
+    }
+
+    /// Send `secret` as `Authorization: Bearer <secret>` on every request.
+    /// This is the credential the application checks before it answers; a
+    /// URL with user-info in it is the older way to carry one, and this one
+    /// takes precedence: any user-info in the endpoint is dropped, so the
+    /// bearer is the only credential on the wire. (The HTTP client would
+    /// otherwise send both, and an application reads the first.)
+    pub fn with_secret(mut self, secret: impl Into<String>) -> Self {
+        self.secret = Some(secret.into());
+        self.endpoint = without_user_info(&self.endpoint);
+        self
+    }
+
+    /// A request to the authority, with the bearer attached if there is one.
+    fn post(&self, url: &str) -> reqwest::RequestBuilder {
+        let request = self.client.post(url);
+        match &self.secret {
+            Some(secret) => request.bearer_auth(secret),
+            None => request,
         }
     }
 
@@ -263,13 +296,7 @@ impl HttpAuthority {
 
     async fn ask_who(&self, token: &str) -> Option<Actor> {
         let url = format!("{}/whoami", self.endpoint);
-        let response = match self
-            .client
-            .post(&url)
-            .json(&WhoAmIRequest { token })
-            .send()
-            .await
-        {
+        let response = match self.post(&url).json(&WhoAmIRequest { token }).send().await {
             Ok(response) => response,
             Err(error) => {
                 warn!(
@@ -321,7 +348,6 @@ impl HttpAuthority {
     async fn ask(&self, subject: &Actor, document: &str) -> Option<Access> {
         let url = format!("{}/may-open", self.endpoint);
         let response = match self
-            .client
             .post(&url)
             .json(&MayOpenRequest { subject, document })
             .send()
@@ -381,10 +407,84 @@ impl Authority for HttpAuthority {
     }
 }
 
+/// `url` with any user-info removed: `http://swirldb:secret@host/authority`
+/// becomes `http://host/authority`. A URL without a scheme or without
+/// user-info comes back as it was, and an `@` in the path or query is not
+/// user-info. This is what the server logs where it would otherwise print
+/// a URL with a secret in it, and what [`HttpAuthority::with_secret`] asks
+/// at once the secret rides as a bearer instead.
+pub fn without_user_info(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_string();
+    };
+    let authority_start = scheme_end + 3;
+    let authority_end = url[authority_start..]
+        .find(['/', '?', '#'])
+        .map_or(url.len(), |offset| authority_start + offset);
+    match url[authority_start..authority_end].rfind('@') {
+        Some(at) => format!(
+            "{}{}",
+            &url[..authority_start],
+            &url[authority_start + at + 1..]
+        ),
+        None => url.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use swirldb_core::policy::ActorType;
+
+    #[test]
+    fn user_info_is_stripped_and_nothing_else_is() {
+        assert_eq!(
+            without_user_info("http://swirldb:s3cret@studio-server:8080/authority"),
+            "http://studio-server:8080/authority"
+        );
+        assert_eq!(
+            without_user_info("https://swirldb@studio-server/authority"),
+            "https://studio-server/authority"
+        );
+        assert_eq!(
+            without_user_info("http://user:p%40ss@host"),
+            "http://host",
+            "a percent-encoded @ inside the user-info is not the separator"
+        );
+        assert_eq!(
+            without_user_info("http://studio-server:8080/authority"),
+            "http://studio-server:8080/authority"
+        );
+        assert_eq!(
+            without_user_info("http://host/a@b?c=d@e"),
+            "http://host/a@b?c=d@e",
+            "an @ in the path or query is not user-info"
+        );
+        assert_eq!(
+            without_user_info("http://user:pass@host?x=1"),
+            "http://host?x=1",
+            "the authority ends at the query when there is no path"
+        );
+        assert_eq!(
+            without_user_info("studio-server:8080/authority"),
+            "studio-server:8080/authority"
+        );
+        assert_eq!(without_user_info(""), "");
+    }
+
+    #[test]
+    fn a_secret_drops_the_user_info_from_the_endpoint() {
+        let authority =
+            HttpAuthority::new("http://swirldb:stale@127.0.0.1:9/authority/").with_secret("s3cret");
+        assert_eq!(authority.endpoint, "http://127.0.0.1:9/authority");
+        assert_eq!(authority.secret.as_deref(), Some("s3cret"));
+        // Without a secret the user-info stays: it is the credential.
+        let older = HttpAuthority::new("http://swirldb:s3cret@127.0.0.1:9/authority");
+        assert_eq!(
+            older.endpoint,
+            "http://swirldb:s3cret@127.0.0.1:9/authority"
+        );
+    }
 
     fn user(id: &str) -> Actor {
         Actor {
