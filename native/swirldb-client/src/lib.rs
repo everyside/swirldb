@@ -10,6 +10,8 @@
 //!
 //! - Automatic WebSocket connection management with background receive loop
 //! - Full CRDT sync handshake (Connect -> SubscribeAck -> Sync)
+//! - One document per client: `connect` opens the default document,
+//!   `open` names one; the server may answer read-only or refuse
 //! - Path-based reads/writes via Automerge
 //! - Ephemeral pub/sub messaging (bypasses CRDT/storage for high-frequency data)
 //! - Broadcast channels for change and ephemeral notifications
@@ -37,7 +39,7 @@ use automerge::ScalarValue;
 use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
 use swirldb_core::core::SwirlDB;
-use swirldb_core::protocol::Message;
+use swirldb_core::protocol::{Access, Message, DEFAULT_DOCUMENT};
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio::time::{timeout, Duration};
 use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
@@ -66,6 +68,13 @@ pub struct SyncClient {
     /// Unique client identifier
     client_id: String,
 
+    /// The document this client is on. A `SyncClient` holds exactly one;
+    /// open another for another document.
+    document: String,
+
+    /// What the server's authority granted at open.
+    access: Access,
+
     /// Local CRDT database (thread-safe)
     db: Arc<RwLock<SwirlDB>>,
 
@@ -77,6 +86,9 @@ pub struct SyncClient {
 
     /// Broadcast channel for CRDT change notifications (affected paths)
     change_tx: broadcast::Sender<Vec<String>>,
+
+    /// Broadcast channel for errors the server sends back, such as a refused write
+    error_tx: broadcast::Sender<String>,
 
     /// Handle to the background WebSocket task
     _task_handle: tokio::task::JoinHandle<()>,
@@ -108,6 +120,17 @@ impl SyncClient {
         Self::connect_with_id(url, &client_id, subscriptions).await
     }
 
+    /// Connect and open the named document with an auto-generated client ID.
+    ///
+    /// # Errors
+    ///
+    /// Besides `connect`'s errors, fails when the server's authority refuses
+    /// the document; the error carries the server's reason.
+    pub async fn open(url: &str, document: &str, subscriptions: Vec<String>) -> Result<Self> {
+        let client_id = format!("rust-client-{}", Uuid::new_v4());
+        Self::open_with_id(url, &client_id, document, subscriptions).await
+    }
+
     /// Connect to a SwirlDB server with a specific client ID.
     ///
     /// Useful for testing or when you need a deterministic client identity.
@@ -122,7 +145,18 @@ impl SyncClient {
         client_id: &str,
         subscriptions: Vec<String>,
     ) -> Result<Self> {
+        Self::open_with_id(url, client_id, DEFAULT_DOCUMENT, subscriptions).await
+    }
+
+    /// Connect with a specific client ID and open the named document.
+    pub async fn open_with_id(
+        url: &str,
+        client_id: &str,
+        document: &str,
+        subscriptions: Vec<String>,
+    ) -> Result<Self> {
         let client_id = client_id.to_string();
+        let document = document.to_string();
         let db = Arc::new(RwLock::new(SwirlDB::new()));
 
         let (ws_stream, _) = connect_async(url).await?;
@@ -137,6 +171,9 @@ impl SyncClient {
         // Change notification broadcast
         let (change_tx, _) = broadcast::channel(100);
 
+        // Server errors (a refused write, an unknown document)
+        let (error_tx, _) = broadcast::channel(16);
+
         // Send Connect message
         let heads = {
             let db_read = db.read().await;
@@ -148,24 +185,35 @@ impl SyncClient {
             client_id: client_id.clone(),
             subscriptions: subscriptions.clone(),
             heads,
+            document: document.clone(),
         };
         ws_sender
             .send(WsMessage::Binary(connect_msg.encode()))
             .await?;
 
-        // Wait for SubscribeAck (with timeout)
-        timeout(HANDSHAKE_TIMEOUT, async {
+        // Wait for SubscribeAck, or OpenDenied (with timeout)
+        let access = timeout(HANDSHAKE_TIMEOUT, async {
             loop {
                 if let Some(msg) = ws_receiver.next().await {
                     if let WsMessage::Binary(data) = msg? {
                         match Message::decode(&data)? {
-                            Message::SubscribeAck { added, denied } => {
+                            Message::SubscribeAck {
+                                added,
+                                denied,
+                                access,
+                                ..
+                            } => {
                                 info!(
-                                    "SubscribeAck: {} added, {} denied",
+                                    "SubscribeAck on {}: {:?}, {} added, {} denied",
+                                    document,
+                                    access,
                                     added.len(),
                                     denied.len()
                                 );
-                                return Ok::<(), anyhow::Error>(());
+                                return Ok::<Access, anyhow::Error>(access);
+                            }
+                            Message::OpenDenied { document, reason } => {
+                                anyhow::bail!("Refused to open {}: {}", document, reason);
                             }
                             Message::Error { message } => {
                                 anyhow::bail!("Server error during handshake: {}", message);
@@ -197,7 +245,9 @@ impl SyncClient {
                 if let Some(msg) = ws_receiver.next().await {
                     if let WsMessage::Binary(data) = msg? {
                         match Message::decode(&data)? {
-                            Message::Sync { heads: _, changes } => {
+                            Message::Sync {
+                                heads: _, changes, ..
+                            } => {
                                 if !changes.is_empty() {
                                     let db_write = db.write().await;
                                     db_write.apply_changes(changes)?;
@@ -229,12 +279,14 @@ impl SyncClient {
         .await
         .map_err(|_| anyhow::anyhow!("Timed out waiting for initial Sync"))??;
 
-        info!("SyncClient {} connected", client_id);
+        info!("SyncClient {} connected on {}", client_id, document);
 
         // Spawn background task for receive loop and send forwarding
         let db_clone = Arc::clone(&db);
         let ephemeral_tx_clone = ephemeral_tx.clone();
         let change_tx_clone = change_tx.clone();
+        let error_tx_clone = error_tx.clone();
+        let own_document = document.clone();
 
         let task_handle = tokio::spawn(async move {
             loop {
@@ -265,7 +317,16 @@ impl SyncClient {
                         match msg {
                             Some(Ok(WsMessage::Binary(data))) => {
                                 match Message::decode(&data) {
-                                    Ok(Message::Broadcast { from_client_id: _, changes, affected_paths }) => {
+                                    // One connection carries one document here, so
+                                    // anything about another is not ours.
+                                    Ok(Message::Broadcast { document, .. })
+                                    | Ok(Message::Ephemeral { document, .. })
+                                    | Ok(Message::EphemeralBatch { document, .. })
+                                        if document != own_document =>
+                                    {
+                                        warn!("Ignoring traffic for {}; this client is on {}", document, own_document);
+                                    }
+                                    Ok(Message::Broadcast { from_client_id: _, changes, affected_paths, document: _ }) => {
                                         if !changes.is_empty() {
                                             let db_write = db_clone.write().await;
                                             if let Err(e) = db_write.apply_changes(changes) {
@@ -274,13 +335,13 @@ impl SyncClient {
                                         }
                                         let _ = change_tx_clone.send(affected_paths);
                                     }
-                                    Ok(Message::PushAck { heads: _ }) => {
+                                    Ok(Message::PushAck { .. }) => {
                                         // Push acknowledged
                                     }
-                                    Ok(Message::Ephemeral { path, data }) => {
+                                    Ok(Message::Ephemeral { path, data, document: _ }) => {
                                         let _ = ephemeral_tx_clone.send(vec![(path, data)]);
                                     }
-                                    Ok(Message::EphemeralBatch { updates }) => {
+                                    Ok(Message::EphemeralBatch { updates, document: _ }) => {
                                         let _ = ephemeral_tx_clone.send(updates);
                                     }
                                     Ok(Message::Ping) => {
@@ -292,6 +353,7 @@ impl SyncClient {
                                     }
                                     Ok(Message::Error { message }) => {
                                         error!("Server error: {}", message);
+                                        let _ = error_tx_clone.send(message);
                                     }
                                     Ok(_) => {}
                                     Err(e) => {
@@ -316,10 +378,13 @@ impl SyncClient {
 
         Ok(Self {
             client_id,
+            document,
+            access,
             db,
             ws_tx,
             ephemeral_tx,
             change_tx,
+            error_tx,
             _task_handle: task_handle,
             subscriptions,
         })
@@ -328,6 +393,16 @@ impl SyncClient {
     /// Get the client ID.
     pub fn client_id(&self) -> &str {
         &self.client_id
+    }
+
+    /// The document this client is on.
+    pub fn document(&self) -> &str {
+        &self.document
+    }
+
+    /// What the server granted: `Write`, or `Read` when pushes will be refused.
+    pub fn access(&self) -> Access {
+        self.access
     }
 
     /// Get a value from the local CRDT database at the given dot-notation path.
@@ -358,6 +433,7 @@ impl SyncClient {
             Message::Push {
                 heads: heads_bytes,
                 changes,
+                document: self.document.clone(),
             }
             .encode()
         };
@@ -384,6 +460,7 @@ impl SyncClient {
         let msg = Message::Ephemeral {
             path: path.to_string(),
             data: data.to_vec(),
+            document: self.document.clone(),
         };
         self.ws_tx
             .send(msg.encode())
@@ -407,6 +484,7 @@ impl SyncClient {
                 .iter()
                 .map(|(path, data)| (path.to_string(), data.to_vec()))
                 .collect(),
+            document: self.document.clone(),
         };
         self.ws_tx
             .send(msg.encode())
@@ -430,6 +508,12 @@ impl SyncClient {
     /// whenever a `Broadcast` message is received from the server.
     pub fn on_change(&self) -> broadcast::Receiver<Vec<String>> {
         self.change_tx.subscribe()
+    }
+
+    /// Subscribe to errors the server sends back — a push refused on a
+    /// read-only document, for one.
+    pub fn on_error(&self) -> broadcast::Receiver<String> {
+        self.error_tx.subscribe()
     }
 
     /// Get a read lock on the underlying SwirlDB instance.
