@@ -6,8 +6,17 @@
  * You can do: db.data.user.name = 'Alice'
  */
 
-import type { SwirlDB as WasmSwirlDB } from './wasm/swirldb_browser';
+import type {
+  Connection as WasmConnection,
+  SwirlDB as WasmSwirlDB,
+} from './wasm/swirldb_browser';
 import init from './wasm/swirldb_browser.js';
+
+/** What the server granted on an open document. */
+export type Access = 'read' | 'write';
+
+/** The document a handle is on when it was not opened by name. */
+export const DEFAULT_DOCUMENT = 'default';
 
 // WASM initialization state
 let wasmInitialized = false;
@@ -222,6 +231,77 @@ export class SwirlDB {
   }
 
   /**
+   * The document this handle is on: `'default'` unless it came from
+   * `SwirlDBConnection.openDocument`.
+   */
+  get document(): string {
+    return this.wasmDB.document;
+  }
+
+  /**
+   * What the server granted on this document — `'read'`, `'write'` — or
+   * `null` before the server has answered or when not connected. A handle
+   * with `'read'` receives every change and may send presence, but its own
+   * changes are refused by the server.
+   */
+  get access(): Access | null {
+    return (this.wasmDB.access as Access | null) ?? null;
+  }
+
+  /**
+   * Stop receiving this document. On a connection with other documents open
+   * the socket stays up for them.
+   */
+  close(): void {
+    this.wasmDB.close();
+  }
+
+  /**
+   * Send an ephemeral message on this document: not stored, not merged,
+   * routed to whoever has the document open and subscribes to the path.
+   */
+  sendEphemeral(path: string, data: Uint8Array): void {
+    this.wasmDB.sendEphemeral(path, data);
+  }
+
+  /**
+   * Receive ephemeral messages on this document whose path matches the
+   * pattern. Returns a handler id for `offEphemeral`.
+   */
+  onEphemeral(pattern: string, callback: (path: string, data: Uint8Array) => void): number {
+    return this.wasmDB.onEphemeral(pattern, callback);
+  }
+
+  offEphemeral(handlerId: number): void {
+    this.wasmDB.offEphemeral(handlerId);
+  }
+
+  /**
+   * Presence: who is in this document and where. Rides the ephemeral channel
+   * under `presence.<clientId>`, so it is per document, never stored, and
+   * gone when the sender goes. `state` is any JSON — a cursor, a selection,
+   * a name and a color.
+   */
+  sendPresence(clientId: string, state: unknown): void {
+    this.sendEphemeral(`presence.${clientId}`, new TextEncoder().encode(JSON.stringify(state)));
+  }
+
+  /**
+   * Hear presence from the others in this document. The callback gets the
+   * sender's client id and the state they sent.
+   */
+  onPresence(callback: (clientId: string, state: any) => void): number {
+    return this.onEphemeral('presence.*', (path, data) => {
+      const clientId = path.slice('presence.'.length);
+      try {
+        callback(clientId, JSON.parse(new TextDecoder().decode(data)));
+      } catch (error) {
+        console.warn('Presence from', clientId, 'was not JSON:', error);
+      }
+    });
+  }
+
+  /**
    * Traditional path-based access (for compatibility)
    */
   setPath(path: string, value: any): void {
@@ -406,6 +486,62 @@ export class SwirlDB {
   subscribe(path: string, callback: (value: any) => void): () => void {
     this.observe(path, callback);
     return () => {};
+  }
+}
+
+/**
+ * One WebSocket to a server, carrying any number of documents.
+ *
+ * Each `openDocument` asks the server for a document by id and resolves to a
+ * `SwirlDB` on it — the same observe and change API as a standalone
+ * instance — once its history has arrived. Documents on one connection are
+ * synced independently: a change in one is never seen by a handle on
+ * another, and presence sent on one stays on it.
+ *
+ * @example
+ * const connection = await SwirlDBConnection.open('ws://localhost:3030/ws', 'alice');
+ * const pattern = await connection.openDocument('pattern.7');
+ * const palette = await connection.openDocument('palette.3');
+ * pattern.data.source = '...';
+ * pattern.syncChanges();
+ */
+export class SwirlDBConnection {
+  private constructor(private connection: WasmConnection) {}
+
+  /** Open a socket to `url` as `clientId`. Nothing is sent until the first document. */
+  static async open(url: string, clientId: string): Promise<SwirlDBConnection> {
+    await ensureWasmInit();
+    const { Connection: WasmConnection } = await import('./wasm/swirldb_browser.js');
+    return new SwirlDBConnection(new WasmConnection(url, clientId));
+  }
+
+  /**
+   * Open a document. Resolves once the server has sent its history; rejects
+   * with the server's reason when the authority refuses. `subscriptions`
+   * defaults to the whole document.
+   */
+  async openDocument(document: string, subscriptions?: string[]): Promise<SwirlDB> {
+    const handle = (await this.connection.openDocument(document, subscriptions)) as WasmSwirlDB;
+    return new SwirlDB(handle);
+  }
+
+  /** Stop receiving one document; the socket stays open for the others. */
+  closeDocument(document: string): void {
+    this.connection.closeDocument(document);
+  }
+
+  /** The documents currently open on this connection. */
+  get openDocuments(): string[] {
+    return this.connection.openDocuments();
+  }
+
+  get clientId(): string {
+    return this.connection.clientId();
+  }
+
+  /** Close the socket and every document on it. */
+  close(): void {
+    this.connection.close();
   }
 }
 

@@ -1,15 +1,32 @@
 // Copyright 2025 Everyside Innovations, LLC
 // SPDX-License-Identifier: Apache-2.0
 
+//! Browser bindings for SwirlDB.
+//!
+//! Two things are exposed to JavaScript. `SwirlDB` is one document: a local
+//! Automerge history with the path API, observers and ephemeral handlers.
+//! `Connection` is one WebSocket to a server, carrying any number of
+//! documents: `openDocument(id)` asks the server for a document and resolves
+//! to a `SwirlDB` handle on it, several at once over the same socket, each
+//! synced whole and independently. `SwirlDB.connect(...)` — the original
+//! single-document API — is a `Connection` with the default document opened
+//! on it, so nothing written against it changes.
+//!
+//! Frames arriving on a connection are routed by the document id they carry
+//! to the handle bound to that document; observers and ephemeral handlers are
+//! registered per handle, so presence and cursors on one document never reach
+//! another.
+
 use automerge::ScalarValue;
 use js_sys::{Function, Promise, Uint8Array};
 use serde_wasm_bindgen::from_value;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use swirldb_core::core::SwirlDB as CoreSwirlDB;
 use swirldb_core::policy::PolicyEngine;
-use swirldb_core::protocol::Message;
+use swirldb_core::protocol::{Access, Message, DEFAULT_DOCUMENT};
 use wasm_bindgen::closure::Closure;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::future_to_promise;
@@ -18,26 +35,59 @@ use web_sys::{BinaryType, CloseEvent, ErrorEvent, MessageEvent, WebSocket};
 mod storage;
 use storage::{IndexedDBAdapter, LocalDocumentStorage};
 
+/// Size of an Automerge change hash.
+const HEAD_SIZE: usize = 32;
+
 thread_local! {
+    /// Observers: (handle id, path, callback, last scalar value)
     #[allow(clippy::type_complexity)]
     static OBSERVERS: RefCell<Vec<(usize, String, Function, Option<ScalarValue>)>> = const { RefCell::new(Vec::new()) };
     static NEXT_ID: RefCell<usize> = const { RefCell::new(0) };
+    /// Connections by connection id
     #[allow(clippy::missing_const_for_thread_local)]
-    static CONNECTIONS: RefCell<std::collections::HashMap<usize, ConnectionState>> = RefCell::new(std::collections::HashMap::new());
-    /// Ephemeral message handlers: (db_id, handler_id, path_pattern, callback)
+    static CONNECTIONS: RefCell<HashMap<usize, ConnectionState>> = RefCell::new(HashMap::new());
+    static NEXT_CONNECTION_ID: RefCell<usize> = const { RefCell::new(0) };
+    /// Ephemeral message handlers: (handle id, handler id, path pattern, callback)
     #[allow(clippy::type_complexity)]
     static EPHEMERAL_HANDLERS: RefCell<Vec<(usize, u32, String, Function)>> = const { RefCell::new(Vec::new()) };
     static NEXT_HANDLER_ID: RefCell<u32> = const { RefCell::new(0) };
 }
 
-/// Connection state for protocol handling
-struct ConnectionState {
-    #[allow(dead_code)]
-    client_id: String,
-    #[allow(dead_code)]
-    subscriptions: Vec<String>,
+fn next_handle_id() -> usize {
+    NEXT_ID.with(|next_id| {
+        let id = *next_id.borrow();
+        *next_id.borrow_mut() = id + 1;
+        id
+    })
+}
+
+/// A document open on a connection: the handle that holds it locally and
+/// what the server has told us about it.
+struct DocumentBinding {
+    /// The `SwirlDB` handle's id, for routing observers and ephemeral handlers
+    handle_id: usize,
+    /// The handle's document, shared so frames can be applied to it
+    core: Rc<CoreSwirlDB>,
+    /// Heads the server last acknowledged, for delta pushes
     last_synced_heads: Vec<Vec<u8>>,
+    /// What the server granted, once its SubscribeAck has arrived
+    access: Option<Access>,
+    /// An `openDocument` still waiting for its first Sync: resolve, reject,
+    /// and the handle to resolve with
+    waiting: Option<(Function, Function, JsValue)>,
+}
+
+/// One WebSocket, many documents.
+struct ConnectionState {
+    client_id: String,
     websocket: Option<WebSocket>,
+    /// The socket has opened; frames go straight out rather than queueing
+    socket_open: bool,
+    /// The first document goes in `Connect`; every later one in `Open`
+    sent_connect: bool,
+    /// Frames written before the socket opened
+    pending: Vec<Vec<u8>>,
+    documents: HashMap<String, DocumentBinding>,
     #[allow(dead_code)]
     onopen_closure: Option<Closure<dyn FnMut(web_sys::Event)>>,
     #[allow(dead_code)]
@@ -49,128 +99,591 @@ struct ConnectionState {
 }
 
 impl ConnectionState {
-    fn new(client_id: String, subscriptions: Vec<String>) -> Self {
+    fn new(client_id: String) -> Self {
         Self {
             client_id,
-            subscriptions,
-            last_synced_heads: Vec::new(),
             websocket: None,
+            socket_open: false,
+            sent_connect: false,
+            pending: Vec::new(),
+            documents: HashMap::new(),
             onopen_closure: None,
             onmessage_closure: None,
             onclose_closure: None,
             onerror_closure: None,
         }
     }
+
+    /// Send now if the socket is open, otherwise hold the frame until it is.
+    fn send(&mut self, frame: Vec<u8>) {
+        match (&self.websocket, self.socket_open) {
+            (Some(ws), true) => {
+                if let Err(e) = ws.send_with_u8_array(&frame) {
+                    web_sys::console::error_1(&format!("Failed to send: {:?}", e).into());
+                }
+            }
+            _ => self.pending.push(frame),
+        }
+    }
+
+    /// The frame that opens a document on this connection.
+    fn open_frame(
+        &mut self,
+        document: &str,
+        subscriptions: Vec<String>,
+        heads: Vec<u8>,
+    ) -> Vec<u8> {
+        if !self.sent_connect {
+            self.sent_connect = true;
+            Message::Connect {
+                client_id: self.client_id.clone(),
+                subscriptions,
+                heads,
+                document: document.to_string(),
+            }
+            .encode()
+        } else {
+            Message::Open {
+                document: document.to_string(),
+                subscriptions,
+                heads,
+            }
+            .encode()
+        }
+    }
+}
+
+fn parse_heads(flat: &[u8]) -> Vec<Vec<u8>> {
+    flat.as_chunks::<HEAD_SIZE>()
+        .0
+        .iter()
+        .map(|chunk| chunk.to_vec())
+        .collect()
+}
+
+fn flatten_heads(heads: Vec<Vec<u8>>) -> Vec<u8> {
+    heads.into_iter().flatten().collect()
+}
+
+/// Convert a core JSON value to a JavaScript value by way of JSON text, so
+/// JavaScript receives plain objects and arrays.
+fn json_to_js(value: Option<serde_json::Value>) -> JsValue {
+    match value {
+        Some(value) => js_sys::JSON::parse(&value.to_string()).unwrap_or(JsValue::NULL),
+        None => JsValue::NULL,
+    }
 }
 
 /// Fire observers for paths affected by remote changes
 /// Only fires observers whose paths match the affected paths
-fn fire_observers_for_paths(db_id: usize, core: &swirldb_core::SwirlDB, affected_paths: &[String]) {
-    OBSERVERS.with(|observers| {
-        let mut observers_ref = observers.borrow_mut();
-
-        for (id, path, callback, _last_value) in observers_ref.iter_mut() {
-            if *id != db_id {
-                continue;
-            }
-
-            // Check if this observer's path is affected by the changes
-            let is_affected = affected_paths.iter().any(|affected| {
-                // Match if observer path is a prefix of affected path, or vice versa
-                // e.g., observer="messages" matches affected="messages.msg_123"
-                // Also handles glob patterns like "**"
-                affected.starts_with(path.as_str())
-                    || path.starts_with(affected.as_str())
-                    || affected == "**"
-                    || path == "**"
-            });
-
-            if is_affected {
-                // Get current value (supports arrays/objects, not just scalars)
-                let js_value = match core.get_value(path) {
-                    Some(value) => {
-                        // Convert to JSON string, then parse in JavaScript
-                        let json_str = value.to_string();
-                        match js_sys::JSON::parse(&json_str) {
-                            Ok(js_val) => js_val,
-                            Err(_) => JsValue::NULL,
-                        }
-                    }
-                    None => JsValue::NULL,
-                };
-
-                // Always fire observer for broadcast changes (no change detection needed)
-                // We know the data changed because the server sent us changes
-                let _ = callback.call1(&JsValue::NULL, &js_value);
-            }
-        }
+fn fire_observers_for_paths(handle_id: usize, core: &CoreSwirlDB, affected_paths: &[String]) {
+    // Collect first, call after: a callback may re-enter and register an observer.
+    let callbacks: Vec<(Function, JsValue)> = OBSERVERS.with(|observers| {
+        observers
+            .borrow()
+            .iter()
+            .filter(|(id, path, _, _)| {
+                *id == handle_id
+                    && affected_paths.iter().any(|affected| {
+                        // Match if observer path is a prefix of affected path, or vice versa
+                        // e.g., observer="messages" matches affected="messages.msg_123"
+                        // Also handles glob patterns like "**"
+                        affected.starts_with(path.as_str())
+                            || path.starts_with(affected.as_str())
+                            || affected == "**"
+                            || path == "**"
+                    })
+            })
+            .map(|(_, path, callback, _)| (callback.clone(), json_to_js(core.get_value(path))))
+            .collect()
     });
+    for (callback, value) in callbacks {
+        // Always fire for broadcast changes: the server sent changes, so it changed.
+        let _ = callback.call1(&JsValue::NULL, &value);
+    }
 }
 
-/// Fire all observers for a database (used for Sync messages without affected_paths)
-fn fire_all_observers(db_id: usize, core: &swirldb_core::SwirlDB) {
-    OBSERVERS.with(|observers| {
-        let mut observers_ref = observers.borrow_mut();
-
-        for (id, path, callback, last_value) in observers_ref.iter_mut() {
-            if *id != db_id {
-                continue;
-            }
-
-            // Get current value (supports arrays/objects, not just scalars)
-            let js_value = match core.get_value(path) {
-                Some(value) => {
-                    // Convert to JSON string, then parse in JavaScript
-                    let json_str = value.to_string();
-                    match js_sys::JSON::parse(&json_str) {
-                        Ok(js_val) => js_val,
-                        Err(_) => JsValue::NULL,
-                    }
-                }
-                None => JsValue::NULL,
-            };
-
-            let _ = callback.call1(&JsValue::NULL, &js_value);
-
-            // Update last_value for change detection (use scalar for comparison)
-            *last_value = core.get_path(path);
-        }
+/// Fire all observers for a handle (used for Sync messages without affected_paths)
+fn fire_all_observers(handle_id: usize, core: &CoreSwirlDB) {
+    let callbacks: Vec<(Function, JsValue)> = OBSERVERS.with(|observers| {
+        let mut observers = observers.borrow_mut();
+        observers
+            .iter_mut()
+            .filter(|(id, _, _, _)| *id == handle_id)
+            .map(|(_, path, callback, last_value)| {
+                // Update last_value for change detection (use scalar for comparison)
+                *last_value = core.get_path(path);
+                (callback.clone(), json_to_js(core.get_value(path)))
+            })
+            .collect()
     });
+    for (callback, value) in callbacks {
+        let _ = callback.call1(&JsValue::NULL, &value);
+    }
 }
 
 /// Fire ephemeral handlers for incoming ephemeral updates
 /// Uses PathPatternMatcher to match handler patterns against update paths
-fn fire_ephemeral_handlers(db_id: usize, updates: &[(String, Vec<u8>)]) {
+fn fire_ephemeral_handlers(handle_id: usize, updates: &[(String, Vec<u8>)]) {
     use swirldb_core::policy::{Actor, PathPatternMatcher};
 
     let actor = Actor::anonymous();
 
-    EPHEMERAL_HANDLERS.with(|handlers| {
-        let handlers_ref = handlers.borrow();
+    let handlers: Vec<(String, Function)> = EPHEMERAL_HANDLERS.with(|handlers| {
+        handlers
+            .borrow()
+            .iter()
+            .filter(|(id, _, _, _)| *id == handle_id)
+            .map(|(_, _, pattern, callback)| (pattern.clone(), callback.clone()))
+            .collect()
+    });
 
-        for (handler_db_id, _, pattern, callback) in handlers_ref.iter() {
-            if *handler_db_id != db_id {
-                continue;
+    for (pattern, callback) in handlers {
+        for (path, data) in updates {
+            if PathPatternMatcher::matches(&pattern, path, &actor) {
+                let js_path = JsValue::from(path.as_str());
+                let js_data = Uint8Array::from(&data[..]);
+                let _ = callback.call2(&JsValue::NULL, &js_path, &js_data.into());
             }
+        }
+    }
+}
 
-            for (path, data) in updates {
-                if PathPatternMatcher::matches(pattern, path, &actor) {
-                    let js_path = JsValue::from(path.as_str());
-                    let js_data = Uint8Array::from(&data[..]);
-                    let _ = callback.call2(&JsValue::NULL, &js_path, &js_data.into());
+/// Route one server frame to the document it names.
+///
+/// The connection map is borrowed only long enough to find the binding and
+/// take what is needed from it; the document is changed and callbacks are
+/// called with the borrow released, because a callback may well call back in.
+fn dispatch(connection_id: usize, msg: Message) {
+    match msg {
+        Message::Sync {
+            heads,
+            changes,
+            document,
+        } => {
+            let found = CONNECTIONS.with(|connections| {
+                let mut connections = connections.borrow_mut();
+                let binding = connections
+                    .get_mut(&connection_id)?
+                    .documents
+                    .get_mut(&document)?;
+                binding.last_synced_heads = parse_heads(&heads);
+                Some((
+                    binding.handle_id,
+                    binding.core.clone(),
+                    binding.waiting.take(),
+                ))
+            });
+            let Some((handle_id, core, waiting)) = found else {
+                web_sys::console::warn_1(
+                    &format!("Sync for {}, which is not open here", document).into(),
+                );
+                return;
+            };
+            if changes.is_empty() {
+                web_sys::console::log_1(
+                    &format!("📥 SYNC [{}]: already up to date", document).into(),
+                );
+            } else {
+                let total_bytes: usize = changes.iter().map(|c| c.len()).sum();
+                web_sys::console::log_1(
+                    &format!(
+                        "📥 SYNC [{}]: {} changes ({} bytes) from server",
+                        document,
+                        changes.len(),
+                        total_bytes
+                    )
+                    .into(),
+                );
+                if let Err(e) = core.apply_changes(changes) {
+                    web_sys::console::error_1(&format!("Failed to apply changes: {}", e).into());
+                } else {
+                    fire_all_observers(handle_id, &core);
                 }
+            }
+            if let Some((resolve, _reject, handle)) = waiting {
+                let _ = resolve.call1(&JsValue::NULL, &handle);
+            }
+        }
+
+        Message::Broadcast {
+            from_client_id,
+            changes,
+            affected_paths,
+            document,
+        } => {
+            let found = CONNECTIONS.with(|connections| {
+                let connections = connections.borrow();
+                let binding = connections.get(&connection_id)?.documents.get(&document)?;
+                Some((binding.handle_id, binding.core.clone()))
+            });
+            let Some((handle_id, core)) = found else {
+                return;
+            };
+            if changes.is_empty() {
+                return;
+            }
+            let total_bytes: usize = changes.iter().map(|c| c.len()).sum();
+            web_sys::console::log_1(
+                &format!(
+                    "📥 RECV [{}]: {} changes ({} bytes) from {}",
+                    document,
+                    changes.len(),
+                    total_bytes,
+                    from_client_id
+                )
+                .into(),
+            );
+            if let Err(e) = core.apply_changes(changes) {
+                web_sys::console::error_1(&format!("Failed to apply changes: {}", e).into());
+            } else {
+                fire_observers_for_paths(handle_id, &core, &affected_paths);
+            }
+        }
+
+        Message::PushAck { heads, document } => {
+            CONNECTIONS.with(|connections| {
+                if let Some(binding) = connections
+                    .borrow_mut()
+                    .get_mut(&connection_id)
+                    .and_then(|connection| connection.documents.get_mut(&document))
+                {
+                    binding.last_synced_heads = parse_heads(&heads);
+                }
+            });
+        }
+
+        Message::SubscribeAck {
+            document, access, ..
+        } => {
+            CONNECTIONS.with(|connections| {
+                if let Some(binding) = connections
+                    .borrow_mut()
+                    .get_mut(&connection_id)
+                    .and_then(|connection| connection.documents.get_mut(&document))
+                {
+                    binding.access = Some(access);
+                }
+            });
+        }
+
+        Message::OpenDenied { document, reason } => {
+            web_sys::console::warn_1(&format!("🚫 {}: {}", document, reason).into());
+            let waiting = CONNECTIONS.with(|connections| {
+                connections
+                    .borrow_mut()
+                    .get_mut(&connection_id)
+                    .and_then(|connection| connection.documents.remove(&document))
+                    .and_then(|binding| binding.waiting)
+            });
+            if let Some((_resolve, reject, _handle)) = waiting {
+                let _ = reject.call1(&JsValue::NULL, &JsValue::from_str(&reason));
+            }
+        }
+
+        Message::Ephemeral {
+            path,
+            data,
+            document,
+        } => {
+            if let Some(handle_id) = handle_for(connection_id, &document) {
+                fire_ephemeral_handlers(handle_id, &[(path, data)]);
+            }
+        }
+
+        Message::EphemeralBatch { updates, document } => {
+            if let Some(handle_id) = handle_for(connection_id, &document) {
+                fire_ephemeral_handlers(handle_id, &updates);
+            }
+        }
+
+        Message::Error { message } => {
+            web_sys::console::error_1(&format!("Server error: {}", message).into());
+        }
+
+        _ => {}
+    }
+}
+
+fn handle_for(connection_id: usize, document: &str) -> Option<usize> {
+    CONNECTIONS.with(|connections| {
+        connections
+            .borrow()
+            .get(&connection_id)?
+            .documents
+            .get(document)
+            .map(|binding| binding.handle_id)
+    })
+}
+
+/// Open a WebSocket and register the connection. Nothing is sent until a
+/// document is opened on it; a connection exists to carry documents.
+fn create_connection(url: &str, client_id: String) -> Result<usize, JsValue> {
+    let ws = WebSocket::new(url)
+        .map_err(|e| JsValue::from_str(&format!("Failed to create WebSocket: {:?}", e)))?;
+    ws.set_binary_type(BinaryType::Arraybuffer);
+
+    let connection_id = NEXT_CONNECTION_ID.with(|next| {
+        let id = *next.borrow();
+        *next.borrow_mut() = id + 1;
+        id
+    });
+
+    let mut state = ConnectionState::new(client_id);
+
+    let onopen = Closure::wrap(Box::new(move |_| {
+        web_sys::console::log_1(&"✅ WebSocket connected".into());
+        // Take the queue out, then send with the borrow released.
+        let flush = CONNECTIONS.with(|connections| {
+            let mut connections = connections.borrow_mut();
+            let connection = connections.get_mut(&connection_id)?;
+            connection.socket_open = true;
+            Some((
+                connection.websocket.clone()?,
+                std::mem::take(&mut connection.pending),
+            ))
+        });
+        if let Some((ws, frames)) = flush {
+            for frame in frames {
+                if let Err(e) = ws.send_with_u8_array(&frame) {
+                    web_sys::console::error_1(&format!("Failed to send: {:?}", e).into());
+                }
+            }
+        }
+    }) as Box<dyn FnMut(web_sys::Event)>);
+    ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
+
+    let onmessage = Closure::wrap(Box::new(move |event: MessageEvent| {
+        if let Ok(array_buffer) = event.data().dyn_into::<js_sys::ArrayBuffer>() {
+            let bytes = js_sys::Uint8Array::new(&array_buffer).to_vec();
+            match Message::decode(&bytes) {
+                Ok(msg) => dispatch(connection_id, msg),
+                Err(e) => {
+                    web_sys::console::error_1(&format!("Failed to decode message: {}", e).into())
+                }
+            }
+        }
+    }) as Box<dyn FnMut(MessageEvent)>);
+    ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
+
+    let onclose = Closure::wrap(Box::new(move |_: CloseEvent| {
+        web_sys::console::log_1(&"WebSocket closed".into());
+        // Anything still waiting to open will never be answered.
+        let waiting: Vec<Function> = CONNECTIONS.with(|connections| {
+            connections
+                .borrow_mut()
+                .remove(&connection_id)
+                .map(|connection| {
+                    connection
+                        .documents
+                        .into_values()
+                        .filter_map(|binding| binding.waiting.map(|(_, reject, _)| reject))
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+        for reject in waiting {
+            let _ = reject.call1(&JsValue::NULL, &JsValue::from_str("connection closed"));
+        }
+    }) as Box<dyn FnMut(CloseEvent)>);
+    ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
+
+    let onerror = Closure::wrap(Box::new(move |e: ErrorEvent| {
+        web_sys::console::error_1(&format!("WebSocket error: {:?}", e).into());
+    }) as Box<dyn FnMut(ErrorEvent)>);
+    ws.set_onerror(Some(onerror.as_ref().unchecked_ref()));
+
+    state.websocket = Some(ws);
+    state.onopen_closure = Some(onopen);
+    state.onmessage_closure = Some(onmessage);
+    state.onclose_closure = Some(onclose);
+    state.onerror_closure = Some(onerror);
+
+    CONNECTIONS.with(|connections| {
+        connections.borrow_mut().insert(connection_id, state);
+    });
+
+    Ok(connection_id)
+}
+
+/// Bind a handle to a document on a connection and send the frame that opens it.
+fn open_on(
+    connection_id: usize,
+    document: &str,
+    handle_id: usize,
+    core: Rc<CoreSwirlDB>,
+    subscriptions: Vec<String>,
+    waiting: Option<(Function, Function, JsValue)>,
+) -> Result<(), JsValue> {
+    let heads = flatten_heads(core.get_heads());
+    CONNECTIONS.with(|connections| {
+        let mut connections = connections.borrow_mut();
+        let connection = connections
+            .get_mut(&connection_id)
+            .ok_or_else(|| JsValue::from_str("Connection is closed"))?;
+        if connection.documents.contains_key(document) {
+            return Err(JsValue::from_str(&format!(
+                "{} is already open on this connection",
+                document
+            )));
+        }
+        connection.documents.insert(
+            document.to_string(),
+            DocumentBinding {
+                handle_id,
+                core,
+                last_synced_heads: Vec::new(),
+                access: None,
+                waiting,
+            },
+        );
+        let frame = connection.open_frame(document, subscriptions, heads);
+        connection.send(frame);
+        Ok(())
+    })
+}
+
+/// One WebSocket to a server, carrying any number of documents.
+///
+/// ```javascript
+/// const connection = new Connection('ws://localhost:3030/ws', 'alice');
+/// const pattern = await connection.openDocument('pattern.7');
+/// const palette = await connection.openDocument('palette.3');
+/// pattern.setPath('source', '...'); pattern.syncChanges();
+/// ```
+#[wasm_bindgen]
+pub struct Connection {
+    id: usize,
+    client_id: String,
+}
+
+#[wasm_bindgen]
+impl Connection {
+    /// Open a socket to `url` as `client_id`. Nothing is sent until the first
+    /// `openDocument`.
+    #[wasm_bindgen(constructor)]
+    pub fn new(url: String, client_id: String) -> Result<Connection, JsValue> {
+        console_error_panic_hook::set_once();
+        let id = create_connection(&url, client_id.clone())?;
+        Ok(Connection { id, client_id })
+    }
+
+    /// Ask the server for a document. Resolves to a `SwirlDB` handle on it
+    /// once its history has arrived; rejects with the server's reason when the
+    /// authority refuses. `subscriptions` defaults to the whole document.
+    #[wasm_bindgen(js_name = openDocument)]
+    pub fn open_document(&self, document: String, subscriptions: Option<Vec<String>>) -> Promise {
+        let connection_id = self.id;
+        let subscriptions = subscriptions.unwrap_or_else(|| vec!["**".to_string()]);
+        Promise::new(&mut |resolve: Function, reject: Function| {
+            if document.is_empty() {
+                let _ = reject.call1(
+                    &JsValue::NULL,
+                    &JsValue::from_str("Document id must not be empty"),
+                );
+                return;
+            }
+            let core = Rc::new(CoreSwirlDB::new());
+            let handle_id = next_handle_id();
+            let handle = JsValue::from(SwirlDB {
+                core: core.clone(),
+                id: handle_id,
+                document: document.clone(),
+                connection: Rc::new(Cell::new(Some(connection_id))),
+            });
+            if let Err(e) = open_on(
+                connection_id,
+                &document,
+                handle_id,
+                core,
+                subscriptions.clone(),
+                Some((resolve.clone(), reject.clone(), handle)),
+            ) {
+                let _ = reject.call1(&JsValue::NULL, &e);
+            }
+        })
+    }
+
+    /// Stop receiving a document. The socket stays open for the others.
+    #[wasm_bindgen(js_name = closeDocument)]
+    pub fn close_document(&self, document: String) {
+        close_document_on(self.id, &document);
+    }
+
+    /// The documents currently open on this connection.
+    #[wasm_bindgen(js_name = openDocuments)]
+    pub fn open_documents(&self) -> Vec<String> {
+        CONNECTIONS.with(|connections| {
+            connections
+                .borrow()
+                .get(&self.id)
+                .map(|connection| {
+                    let mut ids: Vec<String> = connection.documents.keys().cloned().collect();
+                    ids.sort();
+                    ids
+                })
+                .unwrap_or_default()
+        })
+    }
+
+    #[wasm_bindgen(js_name = clientId)]
+    pub fn client_id(&self) -> String {
+        self.client_id.clone()
+    }
+
+    /// Close the socket and every document on it.
+    pub fn close(&self) {
+        let ws = CONNECTIONS.with(|connections| {
+            connections
+                .borrow()
+                .get(&self.id)
+                .and_then(|connection| connection.websocket.clone())
+        });
+        if let Some(ws) = ws {
+            let _ = ws.close();
+        }
+    }
+}
+
+fn close_document_on(connection_id: usize, document: &str) {
+    CONNECTIONS.with(|connections| {
+        let mut connections = connections.borrow_mut();
+        if let Some(connection) = connections.get_mut(&connection_id) {
+            if connection.documents.remove(document).is_some() {
+                let frame = Message::Close {
+                    document: document.to_string(),
+                }
+                .encode();
+                connection.send(frame);
             }
         }
     });
 }
 
-/// Browser-specific WASM wrapper around core SwirlDB
+/// One document, held locally.
 ///
-/// This is a thin binding layer that delegates to the core implementation
+/// This is a thin binding layer that delegates to the core implementation.
+/// Constructed on its own it is the default document; `Connection.openDocument`
+/// constructs handles on named documents.
 #[wasm_bindgen]
 pub struct SwirlDB {
     core: Rc<CoreSwirlDB>,
     id: usize,
+    /// The document this handle is on
+    document: String,
+    /// The connection carrying it, once connected
+    connection: Rc<Cell<Option<usize>>>,
+}
+
+impl SwirlDB {
+    fn from_core(core: CoreSwirlDB) -> Self {
+        Self {
+            core: Rc::new(core),
+            id: next_handle_id(),
+            document: DEFAULT_DOCUMENT.to_string(),
+            connection: Rc::new(Cell::new(None)),
+        }
+    }
 }
 
 #[wasm_bindgen]
@@ -179,16 +692,7 @@ impl SwirlDB {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
         console_error_panic_hook::set_once();
-        let id = NEXT_ID.with(|next_id| {
-            let id = *next_id.borrow();
-            *next_id.borrow_mut() = id + 1;
-            id
-        });
-
-        Self {
-            core: Rc::new(CoreSwirlDB::new()),
-            id,
-        }
+        Self::from_core(CoreSwirlDB::new())
     }
 
     /// Create a new SwirlDB instance with LocalStorage persistence
@@ -201,21 +705,10 @@ impl SwirlDB {
     pub fn with_local_storage(storage_key: String) -> Promise {
         future_to_promise(async move {
             console_error_panic_hook::set_once();
-            let id = NEXT_ID.with(|next_id| {
-                let id = *next_id.borrow();
-                *next_id.borrow_mut() = id + 1;
-                id
-            });
-
             let storage = LocalDocumentStorage::new(&storage_key)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
-
             let core = CoreSwirlDB::with_storage(Arc::new(storage), "db").await;
-
-            Ok(JsValue::from(SwirlDB {
-                core: Rc::new(core),
-                id,
-            }))
+            Ok(JsValue::from(SwirlDB::from_core(core)))
         })
     }
 
@@ -229,23 +722,39 @@ impl SwirlDB {
     pub fn with_indexed_db(db_name: String) -> Promise {
         future_to_promise(async move {
             console_error_panic_hook::set_once();
-            let id = NEXT_ID.with(|next_id| {
-                let id = *next_id.borrow();
-                *next_id.borrow_mut() = id + 1;
-                id
-            });
-
             let storage = IndexedDBAdapter::new(&db_name)
                 .await
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
-
             let core = CoreSwirlDB::with_storage(Arc::new(storage), "db").await;
-
-            Ok(JsValue::from(SwirlDB {
-                core: Rc::new(core),
-                id,
-            }))
+            Ok(JsValue::from(SwirlDB::from_core(core)))
         })
+    }
+
+    /// The document this handle is on. `"default"` unless opened by name.
+    #[wasm_bindgen(getter)]
+    pub fn document(&self) -> String {
+        self.document.clone()
+    }
+
+    /// What the server granted on this document: `"read"`, `"write"`, or
+    /// `null` before the server has answered or when not connected.
+    #[wasm_bindgen(getter)]
+    pub fn access(&self) -> JsValue {
+        let access = self.connection.get().and_then(|connection_id| {
+            CONNECTIONS.with(|connections| {
+                connections
+                    .borrow()
+                    .get(&connection_id)?
+                    .documents
+                    .get(&self.document)?
+                    .access
+            })
+        });
+        match access {
+            Some(Access::Read) => JsValue::from_str("read"),
+            Some(Access::Write) => JsValue::from_str("write"),
+            None => JsValue::NULL,
+        }
     }
 
     /// Set a value at the given dot-separated path
@@ -313,18 +822,7 @@ impl SwirlDB {
     /// ```
     #[wasm_bindgen(js_name = getValue)]
     pub fn get_value(&self, path: String) -> JsValue {
-        match self.core.get_value(&path) {
-            Some(value) => {
-                // Convert to JSON string, then parse in JavaScript for proper object creation
-                // This ensures JavaScript receives proper objects instead of Proxy-like structures
-                let json_str = value.to_string();
-                match js_sys::JSON::parse(&json_str) {
-                    Ok(js_val) => js_val,
-                    Err(_) => JsValue::NULL,
-                }
-            }
-            None => JsValue::NULL,
-        }
+        json_to_js(self.core.get_value(&path))
     }
 
     /// Get all root-level keys in the document
@@ -424,9 +922,7 @@ impl SwirlDB {
     /// These can be sent to the server for incremental sync
     #[wasm_bindgen(js_name = getHeads)]
     pub fn get_heads(&self) -> Uint8Array {
-        let heads = self.core.get_heads();
-        // Flatten all heads into a single byte array
-        let flat_bytes: Vec<u8> = heads.into_iter().flatten().collect();
+        let flat_bytes = flatten_heads(self.core.get_heads());
         Uint8Array::from(&flat_bytes[..])
     }
 
@@ -517,21 +1013,9 @@ impl SwirlDB {
     #[wasm_bindgen(js_name = withPolicy)]
     pub fn with_policy(json_str: String) -> Result<SwirlDB, JsValue> {
         console_error_panic_hook::set_once();
-        let id = NEXT_ID.with(|next_id| {
-            let id = *next_id.borrow();
-            *next_id.borrow_mut() = id + 1;
-            id
-        });
-
         let engine =
             PolicyEngine::from_json(&json_str).map_err(|e| JsValue::from_str(&e.to_string()))?;
-
-        let core = CoreSwirlDB::new().with_policy(engine);
-
-        Ok(SwirlDB {
-            core: Rc::new(core),
-            id,
-        })
+        Ok(SwirlDB::from_core(CoreSwirlDB::new().with_policy(engine)))
     }
 
     /// Authenticate with a JWT token
@@ -586,12 +1070,14 @@ impl SwirlDB {
     /// Manually trigger observer checks
     #[wasm_bindgen(js_name = checkObservers)]
     pub fn check_observers(&self) {
-        let db_id = self.id;
+        let handle_id = self.id;
 
-        OBSERVERS.with(|observers| {
-            for (id, path, callback, last_value) in observers.borrow_mut().iter_mut() {
-                // Only check observers for this DB instance
-                if *id != db_id {
+        // Decide what changed under the borrow; call back with it released.
+        let callbacks: Vec<(Function, JsValue)> = OBSERVERS.with(|observers| {
+            let mut observers = observers.borrow_mut();
+            let mut fired = Vec::new();
+            for (id, path, callback, last_value) in observers.iter_mut() {
+                if *id != handle_id {
                     continue;
                 }
 
@@ -605,32 +1091,27 @@ impl SwirlDB {
                 };
 
                 if changed {
-                    // Get full value (supports arrays/objects) for observer callback
-                    let js_value = match self.core.get_value(path) {
-                        Some(value) => {
-                            // Convert to JSON string, then parse in JavaScript
-                            let json_str = value.to_string();
-                            match js_sys::JSON::parse(&json_str) {
-                                Ok(js_val) => js_val,
-                                Err(_) => JsValue::NULL,
-                            }
-                        }
-                        None => JsValue::NULL,
-                    };
-
-                    let _ = callback.call1(&JsValue::NULL, &js_value);
+                    // Full value (supports arrays/objects) for the callback
+                    fired.push((callback.clone(), json_to_js(self.core.get_value(path))));
                     *last_value = current_scalar;
                 }
             }
+            fired
         });
+        for (callback, value) in callbacks {
+            let _ = callback.call1(&JsValue::NULL, &value);
+        }
     }
 
     // ===== Protocol Methods =====
 
-    /// Connect to sync server with WebSocket (managed internally)
+    /// Connect to a sync server and open this handle's document on the
+    /// connection (managed internally).
     ///
-    /// WebSocket connection is managed entirely in WASM. TypeScript doesn't need to handle
-    /// any protocol logic - just use the Proxy API for data access.
+    /// The WebSocket is managed entirely in WASM. TypeScript does not handle
+    /// any protocol logic — just use the Proxy API for data access. This is
+    /// the single-document API: one `SwirlDB`, one connection, the default
+    /// document. For several documents on one connection use `Connection`.
     ///
     /// Example:
     /// ```javascript
@@ -645,253 +1126,115 @@ impl SwirlDB {
         client_id: String,
         subscriptions: Vec<String>,
     ) -> Result<(), JsValue> {
-        let ws = WebSocket::new(&url)
-            .map_err(|e| JsValue::from_str(&format!("Failed to create WebSocket: {:?}", e)))?;
-
-        ws.set_binary_type(BinaryType::Arraybuffer);
-
-        let db_id = self.id;
-        let core = Rc::clone(&self.core);
-
-        // Create connection state
-        let mut conn_state = ConnectionState::new(client_id.clone(), subscriptions.clone());
-
-        // Get current heads for Connect message
-        let heads = self.core.get_heads();
-        let heads_bytes: Vec<u8> = heads.into_iter().flatten().collect();
-
-        // Create Connect message
-        let connect_msg = Message::Connect {
-            client_id: client_id.clone(),
-            subscriptions: subscriptions.clone(),
-            heads: heads_bytes,
-        };
-
-        // Setup onopen handler
-        let ws_clone = ws.clone();
-        let connect_bytes = connect_msg.encode();
-        let onopen = Closure::wrap(Box::new(move |_| {
-            web_sys::console::log_1(&"✅ WebSocket connected".into());
-            if let Err(e) = ws_clone.send_with_u8_array(&connect_bytes) {
-                web_sys::console::error_1(&format!("Failed to send Connect: {:?}", e).into());
-            }
-        }) as Box<dyn FnMut(web_sys::Event)>);
-        ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
-
-        // Setup onmessage handler
-        let onmessage = Closure::wrap(Box::new(move |event: MessageEvent| {
-            if let Ok(array_buffer) = event.data().dyn_into::<js_sys::ArrayBuffer>() {
-                let bytes = js_sys::Uint8Array::new(&array_buffer).to_vec();
-
-                // Decode and handle message
-                match Message::decode(&bytes) {
-                    Ok(msg) => {
-                        CONNECTIONS.with(|conns| {
-                            let mut conns_map = conns.borrow_mut();
-                            if let Some(state) = conns_map.get_mut(&db_id) {
-                                match msg {
-                                    Message::Sync { heads, changes } => {
-                                        // Apply changes from initial sync
-                                        if !changes.is_empty() {
-                                            let total_bytes: usize =
-                                                changes.iter().map(|c| c.len()).sum();
-                                            web_sys::console::log_1(
-                                                &format!(
-                                                    "📥 SYNC: {} changes ({} bytes) from server",
-                                                    changes.len(),
-                                                    total_bytes
-                                                )
-                                                .into(),
-                                            );
-
-                                            if let Err(e) = core.apply_changes(changes) {
-                                                web_sys::console::error_1(
-                                                    &format!("Failed to apply changes: {}", e)
-                                                        .into(),
-                                                );
-                                            } else {
-                                                // Fire all observers after initial sync (no affected_paths in Sync)
-                                                fire_all_observers(db_id, &core);
-                                            }
-                                        } else {
-                                            web_sys::console::log_1(
-                                                &"📥 SYNC: Already up to date".into(),
-                                            );
-                                        }
-                                        // Update heads
-                                        state.last_synced_heads.clear();
-                                        let mut offset = 0;
-                                        while offset + 32 <= heads.len() {
-                                            state
-                                                .last_synced_heads
-                                                .push(heads[offset..offset + 32].to_vec());
-                                            offset += 32;
-                                        }
-                                    }
-                                    Message::Broadcast {
-                                        from_client_id,
-                                        changes,
-                                        affected_paths,
-                                    } => {
-                                        if !changes.is_empty() {
-                                            // Calculate total bytes
-                                            let total_bytes: usize =
-                                                changes.iter().map(|c| c.len()).sum();
-                                            web_sys::console::log_1(
-                                                &format!(
-                                                    "📥 RECV: {} changes ({} bytes) from {}",
-                                                    changes.len(),
-                                                    total_bytes,
-                                                    from_client_id
-                                                )
-                                                .into(),
-                                            );
-
-                                            if let Err(e) = core.apply_changes(changes) {
-                                                web_sys::console::error_1(
-                                                    &format!("Failed to apply changes: {}", e)
-                                                        .into(),
-                                                );
-                                            } else {
-                                                // Fire observers for affected paths only
-                                                fire_observers_for_paths(
-                                                    db_id,
-                                                    &core,
-                                                    &affected_paths,
-                                                );
-                                            }
-                                        }
-                                    }
-                                    Message::PushAck { heads } => {
-                                        // Update heads for incremental sync
-                                        state.last_synced_heads.clear();
-                                        let mut offset = 0;
-                                        while offset + 32 <= heads.len() {
-                                            state
-                                                .last_synced_heads
-                                                .push(heads[offset..offset + 32].to_vec());
-                                            offset += 32;
-                                        }
-                                    }
-                                    Message::SubscribeAck {
-                                        added: _,
-                                        denied: _,
-                                    } => {
-                                        // Subscription confirmed
-                                    }
-                                    Message::Ephemeral { path, data } => {
-                                        fire_ephemeral_handlers(db_id, &[(path, data)]);
-                                    }
-                                    Message::EphemeralBatch { updates } => {
-                                        fire_ephemeral_handlers(db_id, &updates);
-                                    }
-                                    Message::Error { message } => {
-                                        web_sys::console::error_1(
-                                            &format!("Server error: {}", message).into(),
-                                        );
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        });
-                    }
-                    Err(e) => {
-                        web_sys::console::error_1(
-                            &format!("Failed to decode message: {}", e).into(),
-                        );
-                    }
-                }
-            }
-        }) as Box<dyn FnMut(MessageEvent)>);
-        ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
-
-        // Setup onclose handler
-        let onclose = Closure::wrap(Box::new(move |_: CloseEvent| {
-            web_sys::console::log_1(&"WebSocket closed".into());
-            CONNECTIONS.with(|conns| {
-                conns.borrow_mut().remove(&db_id);
-            });
-        }) as Box<dyn FnMut(CloseEvent)>);
-        ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
-
-        // Setup onerror handler
-        let onerror = Closure::wrap(Box::new(move |e: ErrorEvent| {
-            web_sys::console::error_1(&format!("WebSocket error: {:?}", e).into());
-        }) as Box<dyn FnMut(ErrorEvent)>);
-        ws.set_onerror(Some(onerror.as_ref().unchecked_ref()));
-
-        // Store connection state and closures
-        conn_state.websocket = Some(ws);
-        conn_state.onopen_closure = Some(onopen);
-        conn_state.onmessage_closure = Some(onmessage);
-        conn_state.onclose_closure = Some(onclose);
-        conn_state.onerror_closure = Some(onerror);
-
-        CONNECTIONS.with(|conns| {
-            conns.borrow_mut().insert(self.id, conn_state);
-        });
-
+        if self.connection.get().is_some() {
+            return Err(JsValue::from_str("Already connected"));
+        }
+        let connection_id = create_connection(&url, client_id)?;
+        open_on(
+            connection_id,
+            &self.document,
+            self.id,
+            self.core.clone(),
+            subscriptions,
+            None,
+        )?;
+        self.connection.set(Some(connection_id));
         Ok(())
+    }
+
+    /// Stop receiving this document. A handle from `Connection.openDocument`
+    /// leaves the socket open for the connection's other documents; a handle
+    /// that called `connect` closes its socket.
+    pub fn close(&self) {
+        let Some(connection_id) = self.connection.take() else {
+            return;
+        };
+        close_document_on(connection_id, &self.document);
+        let close_socket = CONNECTIONS.with(|connections| {
+            connections
+                .borrow()
+                .get(&connection_id)
+                .filter(|connection| connection.documents.is_empty())
+                .and_then(|connection| connection.websocket.clone())
+        });
+        if let Some(ws) = close_socket {
+            let _ = ws.close();
+        }
     }
 
     /// Send local changes to server (called after mutations)
     #[wasm_bindgen(js_name = syncChanges)]
     pub fn sync_changes(&self) {
-        CONNECTIONS.with(|conns| {
-            let conns_map = conns.borrow();
-            if let Some(state) = conns_map.get(&self.id) {
-                // Get changes since last sync (incremental if we have heads)
-                let changes = if state.last_synced_heads.is_empty() {
-                    self.core.get_changes()
-                } else {
-                    self.core.get_changes_since(&state.last_synced_heads)
-                };
+        let Some(connection_id) = self.connection.get() else {
+            return;
+        };
+        let last_synced_heads = CONNECTIONS.with(|connections| {
+            connections
+                .borrow()
+                .get(&connection_id)?
+                .documents
+                .get(&self.document)
+                .map(|binding| binding.last_synced_heads.clone())
+        });
+        let Some(last_synced_heads) = last_synced_heads else {
+            return;
+        };
 
-                if changes.is_empty() {
-                    return;
-                }
+        // Get changes since last sync (incremental if we have heads)
+        let changes = if last_synced_heads.is_empty() {
+            self.core.get_changes()
+        } else {
+            self.core.get_changes_since(&last_synced_heads)
+        };
 
-                // Calculate total bytes
-                let total_bytes: usize = changes.iter().map(|c| c.len()).sum();
-                let sync_mode = if state.last_synced_heads.is_empty() {
-                    "full"
-                } else {
-                    "delta"
-                };
-                web_sys::console::log_1(
-                    &format!(
-                        "📤 SEND: {} changes ({} bytes, {})",
-                        changes.len(),
-                        total_bytes,
-                        sync_mode
-                    )
-                    .into(),
-                );
+        if changes.is_empty() {
+            return;
+        }
 
-                // Get current heads
-                let heads = self.core.get_heads();
-                let heads_bytes: Vec<u8> = heads.into_iter().flatten().collect();
+        let total_bytes: usize = changes.iter().map(|c| c.len()).sum();
+        let sync_mode = if last_synced_heads.is_empty() {
+            "full"
+        } else {
+            "delta"
+        };
+        web_sys::console::log_1(
+            &format!(
+                "📤 SEND [{}]: {} changes ({} bytes, {})",
+                self.document,
+                changes.len(),
+                total_bytes,
+                sync_mode
+            )
+            .into(),
+        );
 
-                // Create Push message
-                let msg = Message::Push {
-                    heads: heads_bytes,
-                    changes,
-                };
+        let frame = Message::Push {
+            heads: flatten_heads(self.core.get_heads()),
+            changes,
+            document: self.document.clone(),
+        }
+        .encode();
+        self.send_frame(connection_id, frame);
+    }
 
-                // Send via WebSocket
-                if let Some(ws) = &state.websocket {
-                    let encoded = msg.encode();
-                    if let Err(e) = ws.send_with_u8_array(&encoded) {
-                        web_sys::console::error_1(&format!("Failed to send Push: {:?}", e).into());
-                    }
-                }
+    fn send_frame(&self, connection_id: usize, frame: Vec<u8>) {
+        CONNECTIONS.with(|connections| {
+            if let Some(connection) = connections.borrow_mut().get_mut(&connection_id) {
+                connection.send(frame);
             }
         });
     }
 
+    fn connected(&self) -> Result<usize, JsValue> {
+        self.connection
+            .get()
+            .ok_or_else(|| JsValue::from_str("Not connected"))
+    }
+
     // ===== Ephemeral Methods =====
 
-    /// Send an ephemeral message (bypasses CRDT and storage, pure pub/sub)
+    /// Send an ephemeral message on this document (bypasses CRDT and storage,
+    /// pure pub/sub). Presence and cursors go this way.
     ///
     /// Example:
     /// ```javascript
@@ -900,26 +1243,15 @@ impl SwirlDB {
     /// ```
     #[wasm_bindgen(js_name = sendEphemeral)]
     pub fn send_ephemeral(&self, path: String, data: &[u8]) -> Result<(), JsValue> {
-        CONNECTIONS.with(|conns| {
-            let conns_map = conns.borrow();
-            if let Some(state) = conns_map.get(&self.id) {
-                if let Some(ws) = &state.websocket {
-                    let msg = Message::Ephemeral {
-                        path,
-                        data: data.to_vec(),
-                    };
-                    let encoded = msg.encode();
-                    ws.send_with_u8_array(&encoded).map_err(|e| {
-                        JsValue::from_str(&format!("Failed to send ephemeral: {:?}", e))
-                    })?;
-                    Ok(())
-                } else {
-                    Err(JsValue::from_str("Not connected"))
-                }
-            } else {
-                Err(JsValue::from_str("Not connected"))
-            }
-        })
+        let connection_id = self.connected()?;
+        let frame = Message::Ephemeral {
+            path,
+            data: data.to_vec(),
+            document: self.document.clone(),
+        }
+        .encode();
+        self.send_frame(connection_id, frame);
+        Ok(())
     }
 
     /// Send a batch of ephemeral messages (single frame, lower overhead for 60fps updates)
@@ -957,25 +1289,14 @@ impl SwirlDB {
             update_vec.push((path, data_arr.to_vec()));
         }
 
-        CONNECTIONS.with(|conns| {
-            let conns_map = conns.borrow();
-            if let Some(state) = conns_map.get(&self.id) {
-                if let Some(ws) = &state.websocket {
-                    let msg = Message::EphemeralBatch {
-                        updates: update_vec,
-                    };
-                    let encoded = msg.encode();
-                    ws.send_with_u8_array(&encoded).map_err(|e| {
-                        JsValue::from_str(&format!("Failed to send ephemeral batch: {:?}", e))
-                    })?;
-                    Ok(())
-                } else {
-                    Err(JsValue::from_str("Not connected"))
-                }
-            } else {
-                Err(JsValue::from_str("Not connected"))
-            }
-        })
+        let connection_id = self.connected()?;
+        let frame = Message::EphemeralBatch {
+            updates: update_vec,
+            document: self.document.clone(),
+        }
+        .encode();
+        self.send_frame(connection_id, frame);
+        Ok(())
     }
 
     /// Register a handler for incoming ephemeral messages matching a path pattern
@@ -1020,18 +1341,21 @@ impl SwirlDB {
 
     /// Encode a Connect message (for manual WebSocket control)
     ///
-    /// This is primarily for testing - normally use connect() instead
+    /// This is primarily for testing - normally use connect() instead.
+    /// `document` defaults to this handle's document.
     #[wasm_bindgen(js_name = encodeConnectMessage)]
     pub fn encode_connect_message(
         &self,
         client_id: String,
         subscriptions: Vec<String>,
         heads: Uint8Array,
+        document: Option<String>,
     ) -> Uint8Array {
         let msg = Message::Connect {
             client_id,
             subscriptions,
             heads: heads.to_vec(),
+            document: document.unwrap_or_else(|| self.document.clone()),
         };
         let encoded = msg.encode();
         Uint8Array::from(&encoded[..])
@@ -1039,13 +1363,20 @@ impl SwirlDB {
 
     /// Encode a Push message (for manual WebSocket control)
     ///
-    /// This is primarily for testing - normally use syncChanges() instead
+    /// This is primarily for testing - normally use syncChanges() instead.
+    /// `document` defaults to this handle's document.
     #[wasm_bindgen(js_name = encodePushMessage)]
-    pub fn encode_push_message(&self, heads: Uint8Array, changes: Vec<Uint8Array>) -> Uint8Array {
+    pub fn encode_push_message(
+        &self,
+        heads: Uint8Array,
+        changes: Vec<Uint8Array>,
+        document: Option<String>,
+    ) -> Uint8Array {
         let changes_vec: Vec<Vec<u8>> = changes.into_iter().map(|arr| arr.to_vec()).collect();
         let msg = Message::Push {
             heads: heads.to_vec(),
             changes: changes_vec,
+            document: document.unwrap_or_else(|| self.document.clone()),
         };
         let encoded = msg.encode();
         Uint8Array::from(&encoded[..])
@@ -1060,171 +1391,176 @@ impl SwirlDB {
         let bytes = data.to_vec();
         let msg = Message::decode(&bytes)
             .map_err(|e| JsValue::from_str(&format!("Failed to decode message: {}", e)))?;
-
-        // Convert Message to a JavaScript-friendly object
-        let result = match msg {
-            Message::Connect {
-                client_id,
-                subscriptions,
-                heads,
-            } => {
-                let obj = js_sys::Object::new();
-                js_sys::Reflect::set(&obj, &"type".into(), &"Connect".into())?;
-                js_sys::Reflect::set(&obj, &"clientId".into(), &client_id.into())?;
-                let subs = subscriptions
-                    .into_iter()
-                    .map(JsValue::from)
-                    .collect::<js_sys::Array>();
-                js_sys::Reflect::set(&obj, &"subscriptions".into(), &subs)?;
-                js_sys::Reflect::set(&obj, &"heads".into(), &Uint8Array::from(&heads[..]))?;
-                obj.into()
-            }
-            Message::SubscribeAck { added, denied } => {
-                let obj = js_sys::Object::new();
-                js_sys::Reflect::set(&obj, &"type".into(), &"SubscribeAck".into())?;
-                let added_arr = added
-                    .into_iter()
-                    .map(JsValue::from)
-                    .collect::<js_sys::Array>();
-                js_sys::Reflect::set(&obj, &"added".into(), &added_arr)?;
-                let denied_arr = denied
-                    .into_iter()
-                    .map(JsValue::from)
-                    .collect::<js_sys::Array>();
-                js_sys::Reflect::set(&obj, &"denied".into(), &denied_arr)?;
-                obj.into()
-            }
-            Message::Sync { heads, changes } => {
-                let obj = js_sys::Object::new();
-                js_sys::Reflect::set(&obj, &"type".into(), &"Sync".into())?;
-                js_sys::Reflect::set(&obj, &"heads".into(), &Uint8Array::from(&heads[..]))?;
-                let changes_arr = changes
-                    .into_iter()
-                    .map(|c| Uint8Array::from(&c[..]))
-                    .map(JsValue::from)
-                    .collect::<js_sys::Array>();
-                js_sys::Reflect::set(&obj, &"changes".into(), &changes_arr)?;
-                obj.into()
-            }
-            Message::Push { heads, changes } => {
-                let obj = js_sys::Object::new();
-                js_sys::Reflect::set(&obj, &"type".into(), &"Push".into())?;
-                js_sys::Reflect::set(&obj, &"heads".into(), &Uint8Array::from(&heads[..]))?;
-                let changes_arr = changes
-                    .into_iter()
-                    .map(|c| Uint8Array::from(&c[..]))
-                    .map(JsValue::from)
-                    .collect::<js_sys::Array>();
-                js_sys::Reflect::set(&obj, &"changes".into(), &changes_arr)?;
-                obj.into()
-            }
-            Message::Broadcast {
-                from_client_id,
-                changes,
-                affected_paths,
-            } => {
-                let obj = js_sys::Object::new();
-                js_sys::Reflect::set(&obj, &"type".into(), &"Broadcast".into())?;
-                js_sys::Reflect::set(&obj, &"fromClientId".into(), &from_client_id.into())?;
-                let changes_arr = changes
-                    .into_iter()
-                    .map(|c| Uint8Array::from(&c[..]))
-                    .map(JsValue::from)
-                    .collect::<js_sys::Array>();
-                js_sys::Reflect::set(&obj, &"changes".into(), &changes_arr)?;
-                let paths_arr = affected_paths
-                    .into_iter()
-                    .map(JsValue::from)
-                    .collect::<js_sys::Array>();
-                js_sys::Reflect::set(&obj, &"affectedPaths".into(), &paths_arr)?;
-                obj.into()
-            }
-            Message::PushAck { heads } => {
-                let obj = js_sys::Object::new();
-                js_sys::Reflect::set(&obj, &"type".into(), &"PushAck".into())?;
-                js_sys::Reflect::set(&obj, &"heads".into(), &Uint8Array::from(&heads[..]))?;
-                obj.into()
-            }
-            Message::Error { message } => {
-                let obj = js_sys::Object::new();
-                js_sys::Reflect::set(&obj, &"type".into(), &"Error".into())?;
-                js_sys::Reflect::set(&obj, &"message".into(), &message.into())?;
-                obj.into()
-            }
-            Message::Ephemeral { path, data } => {
-                let obj = js_sys::Object::new();
-                js_sys::Reflect::set(&obj, &"type".into(), &"Ephemeral".into())?;
-                js_sys::Reflect::set(&obj, &"path".into(), &path.into())?;
-                js_sys::Reflect::set(&obj, &"data".into(), &Uint8Array::from(&data[..]))?;
-                obj.into()
-            }
-            Message::EphemeralBatch { updates } => {
-                let obj = js_sys::Object::new();
-                js_sys::Reflect::set(&obj, &"type".into(), &"EphemeralBatch".into())?;
-                let updates_arr = js_sys::Array::new();
-                for (path, data) in updates {
-                    let pair = js_sys::Array::new();
-                    pair.push(&JsValue::from(path));
-                    pair.push(&Uint8Array::from(&data[..]).into());
-                    updates_arr.push(&pair);
-                }
-                js_sys::Reflect::set(&obj, &"updates".into(), &updates_arr)?;
-                obj.into()
-            }
-            Message::EphemeralRelay {
-                origin,
-                seq,
-                path_through,
-                updates,
-            } => {
-                let obj = js_sys::Object::new();
-                js_sys::Reflect::set(&obj, &"type".into(), &"EphemeralRelay".into())?;
-                js_sys::Reflect::set(&obj, &"origin".into(), &origin.into())?;
-                js_sys::Reflect::set(&obj, &"seq".into(), &JsValue::from(seq as f64))?;
-                let path_arr = path_through
-                    .into_iter()
-                    .map(JsValue::from)
-                    .collect::<js_sys::Array>();
-                js_sys::Reflect::set(&obj, &"pathThrough".into(), &path_arr)?;
-                let updates_arr = js_sys::Array::new();
-                for (path, data) in updates {
-                    let pair = js_sys::Array::new();
-                    pair.push(&JsValue::from(path));
-                    pair.push(&Uint8Array::from(&data[..]).into());
-                    updates_arr.push(&pair);
-                }
-                js_sys::Reflect::set(&obj, &"updates".into(), &updates_arr)?;
-                obj.into()
-            }
-            Message::Subscribe { add, remove } => {
-                let obj = js_sys::Object::new();
-                js_sys::Reflect::set(&obj, &"type".into(), &"Subscribe".into())?;
-                let add_arr = add
-                    .into_iter()
-                    .map(JsValue::from)
-                    .collect::<js_sys::Array>();
-                js_sys::Reflect::set(&obj, &"add".into(), &add_arr)?;
-                let remove_arr = remove
-                    .into_iter()
-                    .map(JsValue::from)
-                    .collect::<js_sys::Array>();
-                js_sys::Reflect::set(&obj, &"remove".into(), &remove_arr)?;
-                obj.into()
-            }
-            Message::Ping => {
-                let obj = js_sys::Object::new();
-                js_sys::Reflect::set(&obj, &"type".into(), &"Ping".into())?;
-                obj.into()
-            }
-            Message::Pong => {
-                let obj = js_sys::Object::new();
-                js_sys::Reflect::set(&obj, &"type".into(), &"Pong".into())?;
-                obj.into()
-            }
-        };
-
-        Ok(result)
+        message_to_js(msg)
     }
+}
+
+fn strings_to_array(strings: Vec<String>) -> js_sys::Array {
+    strings.into_iter().map(JsValue::from).collect()
+}
+
+fn changes_to_array(changes: Vec<Vec<u8>>) -> js_sys::Array {
+    changes
+        .into_iter()
+        .map(|c| Uint8Array::from(&c[..]))
+        .map(JsValue::from)
+        .collect()
+}
+
+fn updates_to_array(updates: Vec<(String, Vec<u8>)>) -> js_sys::Array {
+    let array = js_sys::Array::new();
+    for (path, data) in updates {
+        let pair = js_sys::Array::new();
+        pair.push(&JsValue::from(path));
+        pair.push(&Uint8Array::from(&data[..]).into());
+        array.push(&pair);
+    }
+    array
+}
+
+fn access_to_js(access: Access) -> JsValue {
+    match access {
+        Access::Read => JsValue::from_str("read"),
+        Access::Write => JsValue::from_str("write"),
+    }
+}
+
+/// Convert a Message to a JavaScript-friendly object
+fn message_to_js(msg: Message) -> Result<JsValue, JsValue> {
+    let obj = js_sys::Object::new();
+    let set = |key: &str, value: &JsValue| js_sys::Reflect::set(&obj, &key.into(), value);
+    match msg {
+        Message::Connect {
+            client_id,
+            subscriptions,
+            heads,
+            document,
+        } => {
+            set("type", &"Connect".into())?;
+            set("clientId", &client_id.into())?;
+            set("subscriptions", &strings_to_array(subscriptions))?;
+            set("heads", &Uint8Array::from(&heads[..]))?;
+            set("document", &document.into())?;
+        }
+        Message::Open {
+            document,
+            subscriptions,
+            heads,
+        } => {
+            set("type", &"Open".into())?;
+            set("document", &document.into())?;
+            set("subscriptions", &strings_to_array(subscriptions))?;
+            set("heads", &Uint8Array::from(&heads[..]))?;
+        }
+        Message::Close { document } => {
+            set("type", &"Close".into())?;
+            set("document", &document.into())?;
+        }
+        Message::OpenDenied { document, reason } => {
+            set("type", &"OpenDenied".into())?;
+            set("document", &document.into())?;
+            set("reason", &reason.into())?;
+        }
+        Message::SubscribeAck {
+            added,
+            denied,
+            document,
+            access,
+        } => {
+            set("type", &"SubscribeAck".into())?;
+            set("added", &strings_to_array(added))?;
+            set("denied", &strings_to_array(denied))?;
+            set("document", &document.into())?;
+            set("access", &access_to_js(access))?;
+        }
+        Message::Sync {
+            heads,
+            changes,
+            document,
+        } => {
+            set("type", &"Sync".into())?;
+            set("heads", &Uint8Array::from(&heads[..]))?;
+            set("changes", &changes_to_array(changes))?;
+            set("document", &document.into())?;
+        }
+        Message::Push {
+            heads,
+            changes,
+            document,
+        } => {
+            set("type", &"Push".into())?;
+            set("heads", &Uint8Array::from(&heads[..]))?;
+            set("changes", &changes_to_array(changes))?;
+            set("document", &document.into())?;
+        }
+        Message::Broadcast {
+            from_client_id,
+            changes,
+            affected_paths,
+            document,
+        } => {
+            set("type", &"Broadcast".into())?;
+            set("fromClientId", &from_client_id.into())?;
+            set("changes", &changes_to_array(changes))?;
+            set("affectedPaths", &strings_to_array(affected_paths))?;
+            set("document", &document.into())?;
+        }
+        Message::PushAck { heads, document } => {
+            set("type", &"PushAck".into())?;
+            set("heads", &Uint8Array::from(&heads[..]))?;
+            set("document", &document.into())?;
+        }
+        Message::Error { message } => {
+            set("type", &"Error".into())?;
+            set("message", &message.into())?;
+        }
+        Message::Ephemeral {
+            path,
+            data,
+            document,
+        } => {
+            set("type", &"Ephemeral".into())?;
+            set("path", &path.into())?;
+            set("data", &Uint8Array::from(&data[..]))?;
+            set("document", &document.into())?;
+        }
+        Message::EphemeralBatch { updates, document } => {
+            set("type", &"EphemeralBatch".into())?;
+            set("updates", &updates_to_array(updates))?;
+            set("document", &document.into())?;
+        }
+        Message::EphemeralRelay {
+            origin,
+            seq,
+            path_through,
+            updates,
+            document,
+        } => {
+            set("type", &"EphemeralRelay".into())?;
+            set("origin", &origin.into())?;
+            set("seq", &JsValue::from(seq as f64))?;
+            set("pathThrough", &strings_to_array(path_through))?;
+            set("updates", &updates_to_array(updates))?;
+            set("document", &document.into())?;
+        }
+        Message::Subscribe {
+            add,
+            remove,
+            document,
+        } => {
+            set("type", &"Subscribe".into())?;
+            set("add", &strings_to_array(add))?;
+            set("remove", &strings_to_array(remove))?;
+            set("document", &document.into())?;
+        }
+        Message::Ping => {
+            set("type", &"Ping".into())?;
+        }
+        Message::Pong => {
+            set("type", &"Pong".into())?;
+        }
+    }
+    Ok(obj.into())
 }
 
 impl Default for SwirlDB {
@@ -1290,8 +1626,83 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn test_can_instantiate() {
-        let _db = SwirlDB::new();
-        // If we get here without panicking, instantiation works
+        let db = SwirlDB::new();
+        assert_eq!(db.document(), DEFAULT_DOCUMENT);
+        assert!(db.access().is_null());
+    }
+
+    #[wasm_bindgen_test]
+    fn test_connect_message_names_the_document() {
+        let db = SwirlDB::new();
+        let frame = db.encode_connect_message(
+            "alice".into(),
+            vec!["**".into()],
+            Uint8Array::new_with_length(0),
+            Some("pattern.7".into()),
+        );
+        let decoded = db.decode_message(frame).unwrap();
+        let document = js_sys::Reflect::get(&decoded, &"document".into()).unwrap();
+        assert_eq!(document.as_string().unwrap(), "pattern.7");
+
+        // Without a document the handle's own is used: the default.
+        let frame = db.encode_connect_message(
+            "alice".into(),
+            vec!["**".into()],
+            Uint8Array::new_with_length(0),
+            None,
+        );
+        let decoded = db.decode_message(frame).unwrap();
+        let document = js_sys::Reflect::get(&decoded, &"document".into()).unwrap();
+        assert_eq!(document.as_string().unwrap(), DEFAULT_DOCUMENT);
+    }
+
+    #[wasm_bindgen_test]
+    fn test_open_and_denied_messages_decode() {
+        let db = SwirlDB::new();
+        let open = Message::Open {
+            document: "palette.3".into(),
+            subscriptions: vec!["**".into()],
+            heads: vec![],
+        }
+        .encode();
+        let decoded = db.decode_message(Uint8Array::from(&open[..])).unwrap();
+        assert_eq!(
+            js_sys::Reflect::get(&decoded, &"type".into())
+                .unwrap()
+                .as_string()
+                .unwrap(),
+            "Open"
+        );
+
+        let denied = Message::OpenDenied {
+            document: "secret".into(),
+            reason: "not a member".into(),
+        }
+        .encode();
+        let decoded = db.decode_message(Uint8Array::from(&denied[..])).unwrap();
+        assert_eq!(
+            js_sys::Reflect::get(&decoded, &"reason".into())
+                .unwrap()
+                .as_string()
+                .unwrap(),
+            "not a member"
+        );
+
+        let ack = Message::SubscribeAck {
+            added: vec![],
+            denied: vec![],
+            document: "secret".into(),
+            access: Access::Read,
+        }
+        .encode();
+        let decoded = db.decode_message(Uint8Array::from(&ack[..])).unwrap();
+        assert_eq!(
+            js_sys::Reflect::get(&decoded, &"access".into())
+                .unwrap()
+                .as_string()
+                .unwrap(),
+            "read"
+        );
     }
 
     #[wasm_bindgen_test]

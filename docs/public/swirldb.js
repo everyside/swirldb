@@ -1,5 +1,6 @@
 // src/wrapper.ts
 import init from "./wasm/swirldb_browser.js";
+var DEFAULT_DOCUMENT = "default";
 var wasmInitialized = false;
 var wasmInitPromise = null;
 async function ensureWasmInit() {
@@ -171,6 +172,69 @@ var SwirlDB = class _SwirlDB {
     return this.proxy;
   }
   /**
+   * The document this handle is on: `'default'` unless it came from
+   * `SwirlDBConnection.openDocument`.
+   */
+  get document() {
+    return this.wasmDB.document;
+  }
+  /**
+   * What the server granted on this document — `'read'`, `'write'` — or
+   * `null` before the server has answered or when not connected. A handle
+   * with `'read'` receives every change and may send presence, but its own
+   * changes are refused by the server.
+   */
+  get access() {
+    return this.wasmDB.access ?? null;
+  }
+  /**
+   * Stop receiving this document. On a connection with other documents open
+   * the socket stays up for them.
+   */
+  close() {
+    this.wasmDB.close();
+  }
+  /**
+   * Send an ephemeral message on this document: not stored, not merged,
+   * routed to whoever has the document open and subscribes to the path.
+   */
+  sendEphemeral(path, data) {
+    this.wasmDB.sendEphemeral(path, data);
+  }
+  /**
+   * Receive ephemeral messages on this document whose path matches the
+   * pattern. Returns a handler id for `offEphemeral`.
+   */
+  onEphemeral(pattern, callback) {
+    return this.wasmDB.onEphemeral(pattern, callback);
+  }
+  offEphemeral(handlerId) {
+    this.wasmDB.offEphemeral(handlerId);
+  }
+  /**
+   * Presence: who is in this document and where. Rides the ephemeral channel
+   * under `presence.<clientId>`, so it is per document, never stored, and
+   * gone when the sender goes. `state` is any JSON — a cursor, a selection,
+   * a name and a color.
+   */
+  sendPresence(clientId, state) {
+    this.sendEphemeral(`presence.${clientId}`, new TextEncoder().encode(JSON.stringify(state)));
+  }
+  /**
+   * Hear presence from the others in this document. The callback gets the
+   * sender's client id and the state they sent.
+   */
+  onPresence(callback) {
+    return this.onEphemeral("presence.*", (path, data) => {
+      const clientId = path.slice("presence.".length);
+      try {
+        callback(clientId, JSON.parse(new TextDecoder().decode(data)));
+      } catch (error) {
+        console.warn("Presence from", clientId, "was not JSON:", error);
+      }
+    });
+  }
+  /**
    * Traditional path-based access (for compatibility)
    */
   setPath(path, value) {
@@ -337,6 +401,41 @@ var SwirlDB = class _SwirlDB {
     };
   }
 };
+var SwirlDBConnection = class _SwirlDBConnection {
+  constructor(connection) {
+    this.connection = connection;
+  }
+  /** Open a socket to `url` as `clientId`. Nothing is sent until the first document. */
+  static async open(url, clientId) {
+    await ensureWasmInit();
+    const { Connection: WasmConnection } = await import("./wasm/swirldb_browser.js");
+    return new _SwirlDBConnection(new WasmConnection(url, clientId));
+  }
+  /**
+   * Open a document. Resolves once the server has sent its history; rejects
+   * with the server's reason when the authority refuses. `subscriptions`
+   * defaults to the whole document.
+   */
+  async openDocument(document, subscriptions) {
+    const handle = await this.connection.openDocument(document, subscriptions);
+    return new SwirlDB(handle);
+  }
+  /** Stop receiving one document; the socket stays open for the others. */
+  closeDocument(document) {
+    this.connection.closeDocument(document);
+  }
+  /** The documents currently open on this connection. */
+  get openDocuments() {
+    return this.connection.openDocuments();
+  }
+  get clientId() {
+    return this.connection.clientId();
+  }
+  /** Close the socket and every document on it. */
+  close() {
+    this.connection.close();
+  }
+};
 function createStore(db, basePath = "") {
   return db.at(basePath);
 }
@@ -369,7 +468,9 @@ function createPersistedStore(db, storageKey, basePath = "") {
   });
 }
 export {
+  DEFAULT_DOCUMENT,
   SwirlDB,
+  SwirlDBConnection,
   createPersistedStore,
   createStore
 };
