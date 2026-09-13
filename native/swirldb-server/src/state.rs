@@ -5,7 +5,8 @@
 //!
 //! The server holds many documents. Each is its own `SwirlDB` — its own
 //! Automerge history — loaded from storage under its id the first time
-//! somebody opens it and persisted under that id after every change. Nothing
+//! somebody opens it, persisted under that id after every change, and
+//! unloaded again once no connection has it open (`unload_if_unheld`). Nothing
 //! is shared between documents: a change graph is not partitioned by path, so
 //! the only history a client can be given selectively is a whole document's,
 //! and that is the unit of access as well as of sync.
@@ -375,6 +376,46 @@ impl ServerState {
         ids
     }
 
+    /// Unload a document once nothing needs it in memory: no connection has
+    /// it open, and nothing is holding the loaded instance right now.
+    ///
+    /// **Loaded used to mean loaded for good.** Every document anybody had
+    /// opened since the process started stayed in memory, so memory grew
+    /// with every document ever opened rather than with the ones open — and a
+    /// document is an Automerge history, which materializes to many times
+    /// what it weighs on disk. That is how Studio's staging server was
+    /// OOMKilled ten times on 2026-09-12.
+    ///
+    /// Safe to drop because a document is persisted after every change while
+    /// its instance is held (`apply_changes_inner`), so storage already
+    /// spells what memory does. The strong count is read under the map's
+    /// lock, which is the only place an instance is handed out: a count of
+    /// one is the map's own reference, so no apply or read is in flight on
+    /// it, and whoever asks next loads the stored one. An open racing this —
+    /// loaded, not yet recorded on its connection — loses nothing either:
+    /// its sync and its pushes each ask `document` again and load it back.
+    /// The default document stays, as peers work on it.
+    async fn unload_if_unheld(&self, id: &str) {
+        if id == DEFAULT_DOCUMENT {
+            return;
+        }
+        if self
+            .clients
+            .iter()
+            .any(|client| client.documents.contains_key(id))
+        {
+            return;
+        }
+        let mut documents = self.documents.lock().await;
+        if documents
+            .get(id)
+            .is_some_and(|document| Arc::strong_count(document) == 1)
+        {
+            documents.remove(id);
+            info!("📄 Document {} unloaded; nobody has it open", id);
+        }
+    }
+
     /// How many documents are loaded in memory.
     pub async fn loaded_document_count(&self) -> usize {
         self.documents.lock().await.len()
@@ -691,10 +732,13 @@ impl ServerState {
             client.documents.remove(document);
             client.client_id.clone()
         };
-        let mut managers = self.subscriptions.lock().await;
-        if let Some(manager) = managers.get_mut(document) {
-            manager.remove_client(&client_id);
+        {
+            let mut managers = self.subscriptions.lock().await;
+            if let Some(manager) = managers.get_mut(document) {
+                manager.remove_client(&client_id);
+            }
         }
+        self.unload_if_unheld(document).await;
         Some(client_id)
     }
 
@@ -771,6 +815,10 @@ impl ServerState {
                         manager.remove_client(&client_info.client_id);
                     }
                 }
+            }
+
+            for document in client_info.documents.keys() {
+                self.unload_if_unheld(document).await;
             }
 
             self.log_activity(ActivityEvent::ClientDisconnected {
@@ -1170,6 +1218,55 @@ mod tests {
         assert_eq!(
             again.document("beta").await.read().await.get_path("name"),
             Some(ScalarValue::Str("beta".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_document_nobody_has_open_is_unloaded_and_loses_nothing() {
+        let storage = Arc::new(InMemoryDocStorage::new());
+        let state = ServerState::new(None, storage.clone()).await;
+        let alice = Uuid::new_v4();
+        let bob = Uuid::new_v4();
+        for (connection, name) in [(alice, "alice"), (bob, "bob")] {
+            state
+                .register_client(connection, name.into(), actor(name), "test".into())
+                .await;
+            state
+                .open_document(&connection, "piece", vec!["**".into()])
+                .await
+                .unwrap();
+        }
+        let scratch: Document = Arc::new(RwLock::new(SwirlDB::new()));
+        let changes = changes_setting(&scratch, "name", "kept").await;
+        state
+            .apply_changes("alice".into(), alice, "piece", changes, vec!["name".into()])
+            .await
+            .unwrap();
+        // The default document, and this one.
+        assert_eq!(state.loaded_document_count().await, 2);
+
+        // Bob still has it open.
+        state.close_document(&alice, "piece").await;
+        assert_eq!(state.loaded_document_count().await, 2);
+
+        // Somebody is holding the instance: a read in flight.
+        let held = state.document("piece").await;
+        state.unregister_client(&bob).await.unwrap();
+        assert_eq!(state.loaded_document_count().await, 2);
+        drop(held);
+
+        // Nobody: the next close of it lets it go, and the default stays.
+        state
+            .open_document(&alice, "piece", vec!["**".into()])
+            .await
+            .unwrap();
+        state.close_document(&alice, "piece").await;
+        assert_eq!(state.loaded_document_count().await, 1);
+
+        // And what it held comes back from storage.
+        assert_eq!(
+            state.document("piece").await.read().await.get_path("name"),
+            Some(ScalarValue::Str("kept".into()))
         );
     }
 
