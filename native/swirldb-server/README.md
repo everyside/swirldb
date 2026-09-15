@@ -230,6 +230,25 @@ The server uses redb for persistent storage:
 
 Changes are persisted to redb and applied to the in-memory CRDT. On restart, the CRDT state is loaded from redb.
 
+### Compaction
+
+Each document is stored as its whole Automerge history, and that history only
+grows. Once it passes `CompactionThreshold::DEFAULT` — 500 changes, or 100 KB
+of changes written since the last compaction — the server folds it into one
+change that writes the document's current state and stores that in its place.
+It happens at the two moments nobody has the document open: when it is loaded,
+before anybody is sent it, and when its last connection closes, before it is
+unloaded. Never while a connection holds it, because the fold replaces every
+change hash and that connection's next push would depend on history that is
+gone. The default document, which peers sync by heads, is never compacted.
+
+A client whose copy predates a compaction is refused, not merged: `Connect` or
+`Open` with heads the compacted document lacks is answered `OpenDenied` with
+the reason `compacted`, and a `Push` whose changes depend on history the
+document lacks is answered with an `Error`. Watch for
+`🗜️ Document … compacted` in the log. Why Automerge allows nothing finer is in
+`native/swirldb-core/src/compaction.rs`.
+
 ## Development
 
 ### Run with debug logging

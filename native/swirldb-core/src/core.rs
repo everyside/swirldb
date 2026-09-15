@@ -1374,6 +1374,93 @@ impl SwirlDB {
         })
     }
 
+    /// How much history this document carries: its changes and their bytes.
+    pub fn history(&self) -> crate::compaction::History {
+        let mut doc = self.doc.lock().unwrap();
+        crate::compaction::history(&mut doc)
+    }
+
+    /// Fold this document's history into one change that writes its current
+    /// state, and hold that instead (see [`crate::compaction`]).
+    ///
+    /// Every value reads the same afterwards, so no observer is told
+    /// anything; what changes is the history, and with it every hash. A peer
+    /// holding the old history can no longer sync with this document — its
+    /// heads name changes that are gone — which is why the server compacts
+    /// only a document nobody has open. Not persisted: call
+    /// [`Self::persist`] to store it.
+    pub fn compact(&self) -> Result<crate::compaction::Compaction> {
+        let mut doc = self.doc.lock().unwrap();
+        let before = crate::compaction::history(&mut doc);
+        let mut snapshot = crate::compaction::snapshot(&doc, self.text_encoding)?;
+        let after = crate::compaction::history(&mut snapshot);
+        let registry =
+            PathRegistry::from_document(&snapshot).unwrap_or_else(|_| PathRegistry::new());
+        // The snapshot's change is nobody's local write, so the instance goes
+        // on as a fresh actor rather than the snapshot's. Not as the actor it
+        // was either: that actor's sequence numbers restart at one in the new
+        // history, and a second change numbered one by the same actor is a
+        // different change under the same name.
+        *doc = snapshot.with_actor(automerge::ActorId::random());
+        drop(doc);
+        *self.path_registry.write().unwrap() = registry;
+        Ok(crate::compaction::Compaction { before, after })
+    }
+
+    /// Whether this document's history begins with a compaction.
+    pub fn is_compacted(&self) -> bool {
+        let mut doc = self.doc.lock().unwrap();
+        crate::compaction::is_compacted(&mut doc)
+    }
+
+    /// The heads among these that this document does not have. A peer's
+    /// heads that are all known here can be answered with a delta; one that
+    /// is not names either changes the peer made and has not pushed, or
+    /// history this document no longer holds.
+    pub fn unknown_heads(&self, heads: &[Vec<u8>]) -> Vec<Vec<u8>> {
+        let doc = self.doc.lock().unwrap();
+        heads
+            .iter()
+            .filter(|head| {
+                change_hashes(std::slice::from_ref(*head))
+                    .first()
+                    .is_none_or(|hash| doc.get_change_by_hash(hash).is_none())
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// The changes these depend on that neither this document nor the batch
+    /// itself holds, as hashes. Empty means every change can be applied now;
+    /// anything else would be queued by Automerge until the missing history
+    /// arrived — which, for history a compaction folded away, is never.
+    pub fn missing_dependencies(&self, changes: &[Vec<u8>]) -> Result<Vec<Vec<u8>>> {
+        use automerge::Change;
+        let parsed: Vec<Change> = changes
+            .iter()
+            .map(|bytes| {
+                Change::from_bytes(bytes.clone())
+                    .map_err(|e| anyhow!("Failed to parse change: {:?}", e))
+            })
+            .collect::<Result<_>>()?;
+        let in_batch: std::collections::HashSet<ChangeHash> =
+            parsed.iter().map(|change| change.hash()).collect();
+        let doc = self.doc.lock().unwrap();
+        let mut missing: Vec<Vec<u8>> = Vec::new();
+        for change in &parsed {
+            for dependency in change.deps() {
+                if in_batch.contains(dependency) || doc.get_change_by_hash(dependency).is_some() {
+                    continue;
+                }
+                let bytes = dependency.as_ref().to_vec();
+                if !missing.contains(&bytes) {
+                    missing.push(bytes);
+                }
+            }
+        }
+        Ok(missing)
+    }
+
     /// Get the current heads (tips of the change graph) as bytes
     ///
     /// These can be used with get_changes_since() for efficient sync

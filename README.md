@@ -157,6 +157,37 @@ and its connection ends. Everyone else on the document is untouched. See
 What stays single-document: server-to-server peer sync (`connect_to_peer`,
 the peer manager, the LAN transport) speaks about the default document only.
 
+**Compaction: a document's history folded into its state.** An Automerge
+document keeps every change ever made to it, every open sends that whole
+history, and every load materializes every operation in it — so without
+compaction a document costs what its past weighs, not what it holds. Studio's
+staging server was OOMKilled ten times on 2026-09-12 loading one pattern of
+1,085 changes. The server now compacts a document once its history passes
+**500 changes or 100 KB of changes written since its last compaction**
+(`CompactionThreshold::DEFAULT`): it replaces the history with one change
+that writes the document's current state, stores that, and logs
+`🗜️ Document … compacted: N changes (B bytes) folded into 1 (b bytes)`.
+
+It does this **only when nobody has the document open** — when it is loaded
+into memory and when it is unloaded after its last connection closes —
+because Automerge has no partial fold: every change depends on the ones
+before it back to the first, so the only fold there is mints a new history
+that shares no hash with the old one. A client holding the old history
+could not sync with it, so no client may be holding it. A client that opens
+afterwards is sent the snapshot and works as with any document. Two
+refusals cover a client that kept its own copy from before (the browser's
+`withIndexedDB` followed by `connect`): opening with heads the compacted
+document does not have is answered `OpenDenied` with the reason
+`compacted`, and a `Push` whose changes depend on history the server does not
+have is answered with an `Error` rather than acknowledged and silently queued.
+Both refusals mean the same thing: drop the copy and open the document afresh.
+
+Kept: every map, list and text with its current value, scalars with their
+types, counters as counters. Not kept: the history (who changed what, when),
+the losing side of a conflict, and text marks. The default document is never
+compacted, since peers sync it by heads. See
+`native/swirldb-core/src/compaction.rs` and `tests/integration/compaction.rs`.
+
 ## Text, and two people in it
 
 A string set with `setPath` is one value: the next `setPath` replaces it, and

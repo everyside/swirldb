@@ -15,7 +15,8 @@ use axum::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use swirldb_core::storage::InMemoryDocStorage;
+use swirldb_core::compaction::CompactionThreshold;
+use swirldb_core::storage::{DocumentStorage, InMemoryDocStorage};
 use swirldb_server::authority::{Authority, OpenToAll};
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
@@ -41,12 +42,27 @@ impl TestServer {
     pub async fn start_with_policy(
         policy: Option<swirldb_core::policy::PolicyEngine>,
     ) -> Result<Self> {
-        Self::start_with(policy, Arc::new(OpenToAll), None).await
+        Self::start_with(policy, Arc::new(OpenToAll), None, None, None).await
+    }
+
+    /// Start a test server over `storage` that compacts at `threshold`
+    pub async fn start_with_storage_and_compaction(
+        storage: Arc<dyn DocumentStorage>,
+        threshold: CompactionThreshold,
+    ) -> Result<Self> {
+        Self::start_with(
+            None,
+            Arc::new(OpenToAll),
+            None,
+            Some(storage),
+            Some(threshold),
+        )
+        .await
     }
 
     /// Start a test server whose documents open only as `authority` allows
     pub async fn start_with_authority(authority: Arc<dyn Authority>) -> Result<Self> {
-        Self::start_with(None, authority, None).await
+        Self::start_with(None, authority, None, None, None).await
     }
 
     /// Start a test server with an authority and the secret its
@@ -55,21 +71,27 @@ impl TestServer {
         authority: Arc<dyn Authority>,
         secret: &str,
     ) -> Result<Self> {
-        Self::start_with(None, authority, Some(secret)).await
+        Self::start_with(None, authority, Some(secret), None, None).await
     }
 
     async fn start_with(
         policy: Option<swirldb_core::policy::PolicyEngine>,
         authority: Arc<dyn Authority>,
         admin_secret: Option<&str>,
+        storage: Option<Arc<dyn DocumentStorage>>,
+        compaction: Option<CompactionThreshold>,
     ) -> Result<Self> {
         // Bind to port 0 to get a random available port
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let port = addr.port();
 
-        let storage = Arc::new(InMemoryDocStorage::new());
+        let storage = storage.unwrap_or_else(|| Arc::new(InMemoryDocStorage::new()));
         let state = ServerState::with_authority(policy, storage, authority).await;
+        let state = match compaction {
+            Some(threshold) => state.with_compaction(threshold),
+            None => state,
+        };
         let state = match admin_secret {
             Some(secret) => state.with_admin_secret(secret),
             None => state,

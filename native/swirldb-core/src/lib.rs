@@ -28,6 +28,9 @@ pub mod auth;
 // Path tracking - field-level change tracking
 pub mod paths;
 
+// Compaction - a document's history folded into one change of its state
+pub mod compaction;
+
 // Re-export automerge types for convenience
 pub use automerge;
 

@@ -48,6 +48,11 @@ pub fn bearer_token(headers: &HeaderMap, query: &HashMap<String, String>) -> Opt
     })
 }
 
+/// The reason an open is refused when the client's copy of the document
+/// predates the document's compaction: the client should drop its copy and
+/// open the document afresh.
+pub const COMPACTED: &str = "compacted";
+
 /// Size of an Automerge change hash (SHA-256).
 const AUTOMERGE_HEAD_SIZE: usize = 32;
 
@@ -123,6 +128,36 @@ async fn open_and_answer(
         }
     };
 
+    // A client that kept its own copy of the document opens with that copy's
+    // heads. When the document has been compacted since, those heads name
+    // history that is gone, and a Sync would hand the client a snapshot that
+    // shares no change with its copy: merging the two corrupts both, and
+    // everything it pushed afterwards would depend on missing history
+    // (swirldb-core's `compaction` module). So it is told to open afresh.
+    let client_heads = parse_heads(heads);
+    if !client_heads.is_empty() {
+        let predates_compaction = {
+            let db = state.document(document).await;
+            let db = db.read().await;
+            db.is_compacted() && !db.unknown_heads(&client_heads).is_empty()
+        };
+        if predates_compaction {
+            state.close_document(&connection_id, document).await;
+            info!(
+                "🗜️ {} opened {} with heads from before its compaction; told to open afresh",
+                client_id, document
+            );
+            return send(
+                sender,
+                Message::OpenDenied {
+                    document: document.to_string(),
+                    reason: COMPACTED.to_string(),
+                },
+            )
+            .await;
+        }
+    }
+
     if !opened.denied.is_empty() {
         warn!(
             "{} subscriptions on {} denied by policy",
@@ -148,7 +183,6 @@ async fn open_and_answer(
     let (server_heads, changes) = {
         let db = state.document(document).await;
         let db = db.read().await;
-        let client_heads = parse_heads(heads);
         let changes = if client_heads.is_empty() {
             db.get_changes()
         } else {
@@ -321,6 +355,38 @@ pub async fn handle_websocket(socket: WebSocket, state: ServerState, token: Opti
                                             break;
                                         }
                                         continue;
+                                    }
+
+                                    // Changes that depend on history the document
+                                    // does not hold would be queued by Automerge,
+                                    // never applied, and acknowledged all the
+                                    // same. Said instead.
+                                    let missing = {
+                                        let db = state.document(&document).await;
+                                        let db = db.read().await;
+                                        db.missing_dependencies(&changes)
+                                    };
+                                    match missing {
+                                        Ok(missing) if missing.is_empty() => {}
+                                        Ok(missing) => {
+                                            warn!("{} pushed {} changes to {} that depend on {} changes it does not have",
+                                                client_id, changes.len(), document, missing.len());
+                                            if !send(&mut sender, Message::Error {
+                                                message: format!(
+                                                    "{} changes pushed to {} depend on history the server does not have; open the document afresh",
+                                                    changes.len(), document
+                                                ),
+                                            }).await {
+                                                break;
+                                            }
+                                            continue;
+                                        }
+                                        Err(e) => {
+                                            if !send(&mut sender, Message::Error { message: e.to_string() }).await {
+                                                break;
+                                            }
+                                            continue;
+                                        }
                                     }
 
                                     let affected_paths = {

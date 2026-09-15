@@ -6,7 +6,11 @@
 //! The server holds many documents. Each is its own `SwirlDB` — its own
 //! Automerge history — loaded from storage under its id the first time
 //! somebody opens it, persisted under that id after every change, and
-//! unloaded again once no connection has it open (`unload_if_unheld`). Nothing
+//! unloaded again once no connection has it open (`unload_if_unheld`), and
+//! compacted — its history folded into one change of its state — when it is
+//! loaded or unloaded with nobody holding it and too much history behind it
+//! (`compact_if_due`; swirldb-core's `compaction` module says why only then).
+//! Nothing
 //! is shared between documents: a change graph is not partitioned by path, so
 //! the only history a client can be given selectively is a whole document's,
 //! and that is the unit of access as well as of sync.
@@ -30,13 +34,14 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use swirldb_core::compaction::CompactionThreshold;
 use swirldb_core::core::SwirlDB;
 use swirldb_core::policy::{Actor, PolicyEngine};
 use swirldb_core::protocol::{Access, DEFAULT_DOCUMENT};
 use swirldb_core::storage::DocumentStorage;
 use swirldb_core::sync::SubscriptionManager;
 use tokio::sync::{broadcast, Mutex, RwLock};
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 /// Maximum number of messages to buffer in broadcast channel
@@ -214,6 +219,9 @@ pub struct ServerState {
     /// Where documents are loaded from and persisted to, keyed by id.
     storage: Arc<dyn DocumentStorage>,
 
+    /// How much history a document may carry before it is compacted.
+    compaction: CompactionThreshold,
+
     /// Policy used to validate subscription patterns within a document.
     policy: Option<PolicyEngine>,
 
@@ -296,6 +304,7 @@ impl ServerState {
             documents: Arc::new(Mutex::new(documents)),
             default_document,
             storage,
+            compaction: CompactionThreshold::DEFAULT,
             policy,
             authority,
             subscriptions: Arc::new(Mutex::new(HashMap::new())),
@@ -329,6 +338,13 @@ impl ServerState {
         self
     }
 
+    /// Compact documents at this threshold rather than the default. Tests
+    /// use it to reach a threshold in a few changes.
+    pub fn with_compaction(mut self, threshold: CompactionThreshold) -> Self {
+        self.compaction = threshold;
+        self
+    }
+
     /// The secret an administrative request must present, if any.
     pub fn admin_secret(&self) -> Option<&str> {
         self.admin_secret.as_deref()
@@ -357,9 +373,67 @@ impl ServerState {
         let document: Document = Arc::new(RwLock::new(
             SwirlDB::with_storage(self.storage.clone(), id).await,
         ));
-        documents.insert(id.to_string(), document.clone());
         info!("📄 Document {} loaded", id);
+        self.compact_if_due(id, &document).await;
+        documents.insert(id.to_string(), document.clone());
         document
+    }
+
+    /// Fold a document's history into one change of its state, and store
+    /// that, when the history has passed the threshold and nobody has the
+    /// document open.
+    ///
+    /// **Only when nobody has it open.** A compaction replaces every change
+    /// hash, and a connection that holds the document holds the old ones: its
+    /// next push would depend on history that is gone. Every client in this
+    /// repository opens a document from empty and is sent the whole history,
+    /// so a connection that opens after the compaction is sent the snapshot and
+    /// syncs with it as with any document; the connections that must not be
+    /// compacted under are exactly those that have it open. So the two moments
+    /// that know nobody does are where this runs: a load, which is the first
+    /// thing anybody needs from a document that was not in memory, and an
+    /// unload, which is the last. The load covers a document that grew
+    /// before compaction existed, or while the server was down; the unload,
+    /// one that grew while it was open. The default document is never
+    /// compacted: peers sync it by heads.
+    ///
+    /// A failure is logged and changes nothing that matters: the document
+    /// reads the same compacted or not, and storage keeps what it had.
+    async fn compact_if_due(&self, id: &str, document: &Document) {
+        if id == DEFAULT_DOCUMENT || self.is_open_anywhere(id) {
+            return;
+        }
+        let document = document.write().await;
+        let history = document.history();
+        if !self.compaction.is_due(history) {
+            return;
+        }
+        let compaction = match document.compact() {
+            Ok(compaction) => compaction,
+            Err(error) => {
+                warn!("🗜️ Document {} could not be compacted: {}", id, error);
+                return;
+            }
+        };
+        if let Err(error) = document.persist().await {
+            warn!("🗜️ Document {} was compacted but not stored: {}", id, error);
+            return;
+        }
+        info!(
+            "🗜️ Document {} compacted: {} changes ({} bytes) folded into {} ({} bytes)",
+            id,
+            compaction.before.changes,
+            compaction.before.bytes,
+            compaction.after.changes,
+            compaction.after.bytes
+        );
+    }
+
+    /// Whether any connection has this document open.
+    fn is_open_anywhere(&self, id: &str) -> bool {
+        self.clients
+            .iter()
+            .any(|client| client.documents.contains_key(id))
     }
 
     /// Ids of every document this server knows: loaded now or persisted before.
@@ -399,18 +473,19 @@ impl ServerState {
         if id == DEFAULT_DOCUMENT {
             return;
         }
-        if self
-            .clients
-            .iter()
-            .any(|client| client.documents.contains_key(id))
-        {
+        if self.is_open_anywhere(id) {
             return;
         }
         let mut documents = self.documents.lock().await;
-        if documents
+        if let Some(document) = documents
             .get(id)
-            .is_some_and(|document| Arc::strong_count(document) == 1)
+            .filter(|document| Arc::strong_count(document) == 1)
+            .cloned()
         {
+            // Compacted while the map's lock is held, so nobody can be handed
+            // the instance in the middle of it and nobody can open it.
+            self.compact_if_due(id, &document).await;
+            drop(document);
             documents.remove(id);
             info!("📄 Document {} unloaded; nobody has it open", id);
         }
@@ -1268,6 +1343,71 @@ mod tests {
             state.document("piece").await.read().await.get_path("name"),
             Some(ScalarValue::Str("kept".into()))
         );
+    }
+
+    /// Stores `id` with `writes` changes, each its own.
+    async fn store_long_history(storage: &InMemoryDocStorage, id: &str, writes: usize) {
+        let db = SwirlDB::new();
+        for index in 0..writes {
+            db.set_path("count", ScalarValue::Int(index as i64))
+                .unwrap();
+            db.get_heads();
+        }
+        storage.save(id, &db.save_state()).await.unwrap();
+    }
+
+    const SMALL: CompactionThreshold = CompactionThreshold {
+        changes: 10,
+        bytes: usize::MAX,
+    };
+
+    #[tokio::test]
+    async fn a_load_compacts_unless_a_connection_already_has_the_document_open() {
+        let storage = Arc::new(InMemoryDocStorage::new());
+        store_long_history(&storage, "held", 20).await;
+        store_long_history(&storage, "free", 20).await;
+        let state = ServerState::new(None, storage.clone())
+            .await
+            .with_compaction(SMALL);
+        let connection = Uuid::new_v4();
+        state
+            .register_client(connection, "alice".into(), actor("alice"), "test".into())
+            .await;
+
+        // Recorded as open without being in memory: the race `unload_if_unheld`
+        // describes, where the next ask loads it back. Not compacted under her.
+        state
+            .clients
+            .get_mut(&connection)
+            .unwrap()
+            .documents
+            .insert("held".into(), Access::Write);
+        let held = state.document("held").await;
+        assert_eq!(held.read().await.history().changes, 20);
+        assert_eq!(
+            held.read().await.get_path("count"),
+            Some(ScalarValue::Int(19))
+        );
+
+        let free = state.document("free").await;
+        assert_eq!(free.read().await.history().changes, 1);
+        assert_eq!(
+            free.read().await.get_path("count"),
+            Some(ScalarValue::Int(19))
+        );
+        let stored = SwirlDB::with_storage(storage.clone(), "free").await;
+        assert!(stored.is_compacted());
+    }
+
+    #[tokio::test]
+    async fn the_default_document_is_never_compacted() {
+        let storage = Arc::new(InMemoryDocStorage::new());
+        store_long_history(&storage, DEFAULT_DOCUMENT, 20).await;
+        let state = ServerState::new(None, storage).await.with_compaction(SMALL);
+        let document = state.document(DEFAULT_DOCUMENT).await;
+        assert_eq!(document.read().await.history().changes, 20);
+        state.unload_if_unheld(DEFAULT_DOCUMENT).await;
+        assert_eq!(state.db().read().await.history().changes, 20);
     }
 
     #[tokio::test]
