@@ -9,12 +9,22 @@
 !native/swirldb-server
 !tests/Cargo.toml
 !tests/integration
+# The browser module, for a consumer that builds it from this directory as a
+# named context: Swirl Lighting Studio's interface image does
+# (`--build-context swirldb=...`), and a named context is filtered by this
+# file too, so without these lines the crate is invisible there. The crate
+# is outside the workspace and carries its own lockfile; nothing else of
+# it (pkg/, node_modules/, the wrapper's build) is an input.
+!native/swirldb-browser/Cargo.toml
+!native/swirldb-browser/Cargo.lock
+!native/swirldb-browser/src
 
 # And none of what those directories accumulate.
 **/target
 **/node_modules
 **/.DS_Store
 native/*/Cargo.lock
+!native/swirldb-browser/Cargo.lock
 native/swirldb-server/data
 **/*.redb
 **/*.pem

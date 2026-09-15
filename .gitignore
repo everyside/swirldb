@@ -4,6 +4,10 @@ Cargo.lock
 # The workspace has binaries; its lockfile is what was tested and what the
 # Dockerfile builds with (--locked)
 !/Cargo.lock
+# The browser crate is outside the workspace, so it resolves on its own; its
+# lockfile is what makes a module built from a commit the same module twice
+# (wasm-bindgen's glue and its CLI must agree, and the CLI follows this file)
+!/native/swirldb-browser/Cargo.lock
 **/*.rs.bk
 
 # Node.js / npm
