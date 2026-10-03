@@ -12,24 +12,33 @@
 //! direction of that seam: the application says a subject's access ended,
 //! and the server closes what the subject holds now.
 //!
+//! `GET /admin/open` is what the application asks to learn what the server
+//! holds when it has no way to know: after it restarted, say, with people
+//! still inside documents it was asked about before. It answers every
+//! document some connection has open and the subjects holding it, so the
+//! application can ask itself `may-open` again for each and close, through
+//! `/admin/revoke`, what it would no longer grant.
+//!
 //! Every request proves itself with `AUTHORITY_SECRET` as a bearer — the
 //! secret the server presents to the authority, so the application that
 //! answers the server is the one that may order it. With no secret
 //! configured the endpoint is closed rather than open: an order anyone can
 //! give is not an order.
 
-use crate::state::{Revoked, ServerState};
+use crate::state::{Held, Revoked, ServerState};
 use axum::{
     extract::State,
     http::{header::AUTHORIZATION, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::post,
+    routing::{get, post},
     Json, Router,
 };
 
 /// The administrative routes, to be merged into the server's router.
 pub fn router() -> Router<ServerState> {
-    Router::new().route("/admin/revoke", post(revoke))
+    Router::new()
+        .route("/admin/revoke", post(revoke))
+        .route("/admin/open", get(open))
 }
 
 /// What `POST /admin/revoke` takes: the subject — the `id` of the actor
@@ -71,27 +80,56 @@ fn same_secret(presented: &str, required: &str) -> bool {
     difference == 0
 }
 
+/// What `GET /admin/open` answers: every document some connection has open,
+/// with the subjects holding it, in document order.
+#[derive(Debug, serde::Serialize)]
+pub struct OpenResponse {
+    pub documents: Vec<Held>,
+}
+
+/// The refusal for a request without the secret, or `None` when it bears it.
+fn refused(state: &ServerState, headers: &HeaderMap) -> Option<Response> {
+    let Some(required) = state.admin_secret() else {
+        tracing::warn!(
+            "An administrative request arrived, but with no AUTHORITY_SECRET the endpoints are closed"
+        );
+        return Some(
+            (
+                StatusCode::FORBIDDEN,
+                "the administrative endpoints need AUTHORITY_SECRET; they are closed without one",
+            )
+                .into_response(),
+        );
+    };
+    if !bearer(headers).is_some_and(|presented| same_secret(presented, required)) {
+        return Some(
+            (
+                StatusCode::UNAUTHORIZED,
+                "the bearer is not AUTHORITY_SECRET",
+            )
+                .into_response(),
+        );
+    }
+    None
+}
+
+async fn open(State(state): State<ServerState>, headers: HeaderMap) -> Response {
+    if let Some(refusal) = refused(&state, &headers) {
+        return refusal;
+    }
+    Json(OpenResponse {
+        documents: state.held_documents(),
+    })
+    .into_response()
+}
+
 async fn revoke(
     State(state): State<ServerState>,
     headers: HeaderMap,
     Json(request): Json<RevokeRequest>,
 ) -> Response {
-    let Some(required) = state.admin_secret() else {
-        tracing::warn!(
-            "A revocation was asked for, but with no AUTHORITY_SECRET the endpoint is closed"
-        );
-        return (
-            StatusCode::FORBIDDEN,
-            "revocation needs AUTHORITY_SECRET; the endpoint is closed without one",
-        )
-            .into_response();
-    };
-    if !bearer(&headers).is_some_and(|presented| same_secret(presented, required)) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            "the bearer is not AUTHORITY_SECRET",
-        )
-            .into_response();
+    if let Some(refusal) = refused(&state, &headers) {
+        return refusal;
     }
     if request.subject.is_empty() {
         return (StatusCode::BAD_REQUEST, "subject must not be empty").into_response();

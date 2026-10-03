@@ -466,3 +466,110 @@ async fn a_browser_hears_its_document_closed_by_a_revocation() {
     browser.close().await.unwrap();
     server.shutdown().await.unwrap();
 }
+
+/// `GET /admin/open`, as the application would ask it.
+async fn held(server: &TestServer, bearer: Option<&str>) -> (StatusCode, serde_json::Value) {
+    let request = reqwest::Client::new().get(format!("{}/admin/open", server.http_url()));
+    let request = match bearer {
+        Some(bearer) => request.bearer_auth(bearer),
+        None => request,
+    };
+    let response = request.send().await.unwrap();
+    let status = StatusCode::from_u16(response.status().as_u16()).unwrap();
+    let body = response.text().await.unwrap();
+    (
+        status,
+        serde_json::from_str(&body).unwrap_or(serde_json::Value::String(body)),
+    )
+}
+
+/// An application that restarted asks what is held and by whom, to ask
+/// itself `may-open` again: every document some connection has open, each
+/// subject once, and nothing a connection has closed. Only to the secret.
+#[tokio::test]
+async fn the_application_learns_who_holds_what_and_nobody_else_does() {
+    init_test_logging();
+    let (server, _membership) = server_and_membership().await;
+
+    let (status, body) = held(&server, Some(SECRET)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "documents": [] }));
+
+    let alice_one = SyncClient::open_authenticated_with_id(
+        &server.ws_url(),
+        "alice-laptop",
+        "alice-token",
+        "draft.1",
+        everything(),
+    )
+    .await
+    .unwrap();
+    let alice_two = SyncClient::open_authenticated_with_id(
+        &server.ws_url(),
+        "alice-phone",
+        "alice-token",
+        "draft.2",
+        everything(),
+    )
+    .await
+    .unwrap();
+    let _also_alice = SyncClient::open_authenticated_with_id(
+        &server.ws_url(),
+        "alice-tablet",
+        "alice-token",
+        "draft.1",
+        everything(),
+    )
+    .await
+    .unwrap();
+    let _bob = SyncClient::open_authenticated_with_id(
+        &server.ws_url(),
+        "bob",
+        "bob-token",
+        "draft.1",
+        everything(),
+    )
+    .await
+    .unwrap();
+    let (status, body) = held(&server, Some(SECRET)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body,
+        json!({ "documents": [
+            { "document": "draft.1", "subjects": ["alice", "bob"] },
+            { "document": "draft.2", "subjects": ["alice"] },
+        ] })
+    );
+
+    // A document its last holder closes is held by nobody, and not listed.
+    drop(alice_two);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let (_, body) = held(&server, Some(SECRET)).await;
+        if body["documents"].as_array().map(Vec::len) == Some(1) {
+            assert_eq!(
+                body,
+                json!({ "documents": [{ "document": "draft.1", "subjects": ["alice", "bob"] }] })
+            );
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "draft.2 is still listed: {body}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    drop(alice_one);
+
+    // Who holds what is the application's to know, and nobody else's.
+    let (status, _) = held(&server, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = held(&server, Some("wrong")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    server.shutdown().await.unwrap();
+
+    let closed = TestServer::start().await.unwrap();
+    let (status, _) = held(&closed, Some(SECRET)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    closed.shutdown().await.unwrap();
+}

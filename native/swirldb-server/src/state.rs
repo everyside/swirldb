@@ -873,6 +873,28 @@ impl ServerState {
         revoked
     }
 
+    /// Every document some connection has open, with the subjects holding
+    /// it — each once, sorted — in document order: what `GET /admin/open`
+    /// answers. A subject is the authority's name for a connection, as
+    /// [`Self::revoke`] takes it.
+    pub fn held_documents(&self) -> Vec<Held> {
+        let mut held: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+            std::collections::BTreeMap::new();
+        for client in self.clients.iter() {
+            for document in client.documents.keys() {
+                held.entry(document.clone())
+                    .or_default()
+                    .insert(client.actor.id.clone());
+            }
+        }
+        held.into_iter()
+            .map(|(document, subjects)| Held {
+                document,
+                subjects: subjects.into_iter().collect(),
+            })
+            .collect()
+    }
+
     /// What this connection may do with the document, if it has it open.
     pub fn document_access(&self, connection_id: &Uuid, document: &str) -> Option<Access> {
         self.clients
@@ -1170,6 +1192,15 @@ impl ServerState {
     pub async fn get_activity(&self) -> Vec<ActivityEvent> {
         self.activity_log.read().await.iter().cloned().collect()
     }
+}
+
+/// One document some connection has open, and who holds it (for
+/// `GET /admin/open`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Held {
+    pub document: String,
+    /// The subjects holding it, each once, sorted.
+    pub subjects: Vec<String>,
 }
 
 /// Server statistics (for /admin/stats)

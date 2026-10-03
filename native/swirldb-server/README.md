@@ -73,7 +73,7 @@ Environment variables:
 | `PORT` | 3030 | WebSocket server port |
 | `RUST_LOG` | (none) | Log level: `error`, `warn`, `info`, `debug`, `trace` |
 | `AUTHORITY_URL` | (none) | Base URL of the application that answers `POST /whoami` (whose token is this) and `POST /may-open` (may this subject open this document). Without it every connection is whoever it says it is and every document is open to it, and the log says so |
-| `AUTHORITY_SECRET` | (none) | Shared secret sent to the authority as `Authorization: Bearer <secret>` on both questions, so the application can refuse to answer anyone else, and required as the bearer on `POST /admin/revoke`, so nobody else can give the server orders. Without it the only credential a request can carry is user-info in `AUTHORITY_URL` (`http://swirldb:<secret>@host/authority`, sent as `Basic`); that form is kept for one release and dropped from the URL whenever `AUTHORITY_SECRET` is set — and `/admin/revoke` stays closed |
+| `AUTHORITY_SECRET` | (none) | Shared secret sent to the authority as `Authorization: Bearer <secret>` on both questions, so the application can refuse to answer anyone else, and required as the bearer on `POST /admin/revoke` and `GET /admin/open`, so nobody else can give the server orders or learn who holds what. Without it the only credential a request can carry is user-info in `AUTHORITY_URL` (`http://swirldb:<secret>@host/authority`, sent as `Basic`); that form is kept for one release and dropped from the URL whenever `AUTHORITY_SECRET` is set — and the administrative endpoints stay closed |
 
 ## Endpoints
 
@@ -169,6 +169,25 @@ which is not an error:
 ```json
 { "closed": [{ "client_id": "alice-laptop", "document": "palette.3" }] }
 ```
+
+#### GET `/admin/open`
+
+What the server holds now: every document some connection has open, and the
+subjects holding it. For an application that cannot know — one that has just
+restarted, with people still inside documents it was asked about before —
+so it can ask itself `may-open` again for each and close, through
+`/admin/revoke`, what it would no longer grant.
+
+```bash
+curl http://localhost:3030/admin/open -H "Authorization: Bearer $AUTHORITY_SECRET"
+```
+
+```json
+{ "documents": [{ "document": "palette.3", "subjects": ["alice", "bob"] }] }
+```
+
+Documents in id order, each subject once and sorted. Bearing
+`AUTHORITY_SECRET`, as `/admin/revoke` does; closed without one.
 
 `401` for a missing or wrong bearer, `400` for an empty subject, and `403`
 when the server has no `AUTHORITY_SECRET`: an order anyone can give is not
