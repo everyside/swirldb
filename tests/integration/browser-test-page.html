@@ -163,6 +163,15 @@
                 handle.syncChanges();
             },
 
+            /// One splice and one push per character, in one turn of the event loop.
+            typeDocumentText(document, path, position, text) {
+                const handle = handles.get(document);
+                for (const [index, character] of Array.from(text).entries()) {
+                    handle.spliceText(path, position + index, 0, character);
+                    handle.syncChanges();
+                }
+            },
+
             takeDocumentTextChanges(document) {
                 const seen = textChanges.get(document);
                 textChanges.set(document, []);

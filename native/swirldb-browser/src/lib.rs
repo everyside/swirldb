@@ -87,8 +87,16 @@ struct DocumentBinding {
     handle_id: usize,
     /// The handle's document, shared so frames can be applied to it
     core: Rc<CoreSwirlDB>,
-    /// Heads the server last acknowledged, for delta pushes
-    last_synced_heads: Vec<Vec<u8>>,
+    /// Heads the server holds as far as this client knows: the server's own
+    /// at open, then this document's at each push. Not the heads a PushAck
+    /// carries: a push sent before the last one is acknowledged would go
+    /// again, as would every keystroke on a server too busy to acknowledge
+    /// one; and the server's heads can name a change it has not sent here
+    /// yet, which makes "since" mean everything.
+    pushed_heads: Vec<Vec<u8>>,
+    /// The changes heard from the server since `pushed_heads` was set: the
+    /// server's already, so a push does not send them back.
+    heard: Vec<Vec<u8>>,
     /// What the server granted, once its SubscribeAck has arrived
     access: Option<Access>,
     /// An `openDocument` still waiting for its first Sync: resolve, reject,
@@ -338,7 +346,10 @@ fn dispatch(connection_id: usize, msg: Message) {
                     .get_mut(&connection_id)?
                     .documents
                     .get_mut(&document)?;
-                binding.last_synced_heads = parse_heads(&heads);
+                // A push made before the server's history arrived is still
+                // the server's: keep its heads beside the server's own.
+                binding.pushed_heads.extend(parse_heads(&heads));
+                binding.heard.clear();
                 Some((
                     binding.handle_id,
                     binding.core.clone(),
@@ -411,6 +422,7 @@ fn dispatch(connection_id: usize, msg: Message) {
             );
             match core.apply_changes(changes) {
                 Ok(applied) => {
+                    hear(connection_id, &document, &core, applied.hashes);
                     fire_observers_for_paths(handle_id, &core, &affected_paths, false);
                     fire_text_observers(handle_id, &applied.text_changes);
                 }
@@ -420,17 +432,10 @@ fn dispatch(connection_id: usize, msg: Message) {
             }
         }
 
-        Message::PushAck { heads, document } => {
-            CONNECTIONS.with(|connections| {
-                if let Some(binding) = connections
-                    .borrow_mut()
-                    .get_mut(&connection_id)
-                    .and_then(|connection| connection.documents.get_mut(&document))
-                {
-                    binding.last_synced_heads = parse_heads(&heads);
-                }
-            });
-        }
+        // What a push owes is counted from this client's own pushes (see
+        // `DocumentBinding::pushed_heads`), so an acknowledgement changes
+        // nothing here.
+        Message::PushAck { .. } => {}
 
         Message::SubscribeAck {
             document, access, ..
@@ -493,6 +498,30 @@ fn dispatch(connection_id: usize, msg: Message) {
 
         _ => {}
     }
+}
+
+/// Note changes heard from the server on a document, so the next push leaves
+/// them out. When nothing is owed besides, the server holds everything this
+/// document does, and its heads become the ones a push counts from: a
+/// document only listened to keeps no list of what it heard.
+fn hear(connection_id: usize, document: &str, core: &CoreSwirlDB, hashes: Vec<Vec<u8>>) {
+    CONNECTIONS.with(|connections| {
+        let mut connections = connections.borrow_mut();
+        let Some(binding) = connections
+            .get_mut(&connection_id)
+            .and_then(|connection| connection.documents.get_mut(document))
+        else {
+            return;
+        };
+        binding.heard.extend(hashes);
+        if core
+            .changes_since_except(&binding.pushed_heads, &binding.heard)
+            .is_empty()
+        {
+            binding.pushed_heads = core.get_heads();
+            binding.heard.clear();
+        }
+    });
 }
 
 fn handle_for(connection_id: usize, document: &str) -> Option<usize> {
@@ -640,7 +669,8 @@ fn open_on(
             DocumentBinding {
                 handle_id,
                 core,
-                last_synced_heads: Vec::new(),
+                pushed_heads: Vec::new(),
+                heard: Vec::new(),
                 access: None,
                 waiting,
             },
@@ -1510,54 +1540,53 @@ impl SwirlDB {
         }
     }
 
-    /// Send local changes to server (called after mutations)
+    /// Send the server what it does not have, after a write: the changes
+    /// written here since the last push (or held here and not the server's at
+    /// open), and nothing it sent. Call it at every keystroke; each push is
+    /// that keystroke, whether or not the server has acknowledged the last.
     #[wasm_bindgen(js_name = syncChanges)]
     pub fn sync_changes(&self) {
         let Some(connection_id) = self.connection.get() else {
             return;
         };
-        let last_synced_heads = CONNECTIONS.with(|connections| {
-            connections
-                .borrow()
-                .get(&connection_id)?
+        // What the server has not been sent and did not send here: every
+        // change since the heads it holds, less what was heard from it since.
+        // Counted and marked pushed under one borrow, so a push is never
+        // counted twice.
+        let pushed = CONNECTIONS.with(|connections| {
+            let mut connections = connections.borrow_mut();
+            let binding = connections
+                .get_mut(&connection_id)?
                 .documents
-                .get(&self.document)
-                .map(|binding| binding.last_synced_heads.clone())
+                .get_mut(&self.document)?;
+            let changes = self
+                .core
+                .changes_since_except(&binding.pushed_heads, &binding.heard);
+            if changes.is_empty() {
+                return None;
+            }
+            let heads = self.core.get_heads();
+            binding.pushed_heads = heads.clone();
+            binding.heard.clear();
+            Some((changes, heads))
         });
-        let Some(last_synced_heads) = last_synced_heads else {
+        let Some((changes, heads)) = pushed else {
             return;
         };
-
-        // Get changes since last sync (incremental if we have heads)
-        let changes = if last_synced_heads.is_empty() {
-            self.core.get_changes()
-        } else {
-            self.core.get_changes_since(&last_synced_heads)
-        };
-
-        if changes.is_empty() {
-            return;
-        }
 
         let total_bytes: usize = changes.iter().map(|c| c.len()).sum();
-        let sync_mode = if last_synced_heads.is_empty() {
-            "full"
-        } else {
-            "delta"
-        };
         web_sys::console::log_1(
             &format!(
-                "📤 SEND [{}]: {} changes ({} bytes, {})",
+                "📤 SEND [{}]: {} changes ({} bytes)",
                 self.document,
                 changes.len(),
                 total_bytes,
-                sync_mode
             )
             .into(),
         );
 
         let frame = Message::Push {
-            heads: flatten_heads(self.core.get_heads()),
+            heads: flatten_heads(heads),
             changes,
             document: self.document.clone(),
         }

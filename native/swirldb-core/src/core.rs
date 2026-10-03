@@ -91,6 +91,10 @@ pub struct Applied {
     /// when the whole document was replaced, as by [`SwirlDB::load_state`],
     /// where nothing narrower is honest.
     pub changed_paths: Vec<String>,
+    /// The hash of every change applied, in the order given: what a client
+    /// heard from the server and so need not send it back. Empty when the
+    /// whole document was replaced.
+    pub hashes: Vec<Vec<u8>>,
 }
 
 /// Core SwirlDB engine - pure Rust, platform-agnostic
@@ -1222,6 +1226,7 @@ impl SwirlDB {
         Ok(Applied {
             text_changes,
             changed_paths: Vec::new(),
+            hashes: Vec::new(),
         })
     }
 
@@ -1264,6 +1269,25 @@ impl SwirlDB {
         changes
             .into_iter()
             .filter(|c| c.actor_id() == &actor)
+            .map(|c| c.raw_bytes().to_vec())
+            .collect()
+    }
+
+    /// The changes since `heads` other than those whose hash is in `except`,
+    /// as bytes. This is what a client owes a server that holds `heads` and
+    /// sent it `except` since: unlike [`Self::local_changes_since`] it owes
+    /// changes of any actor, so a document loaded from storage, written
+    /// under an earlier actor and never sent, is sent too.
+    pub fn changes_since_except(&self, heads: &[Vec<u8>], except: &[Vec<u8>]) -> Vec<Vec<u8>> {
+        let mut doc = self.doc.lock().unwrap();
+        let changes = doc.get_changes(&change_hashes(heads));
+        changes
+            .into_iter()
+            .filter(|c| {
+                !except
+                    .iter()
+                    .any(|hash| c.hash().as_ref() == hash.as_slice())
+            })
             .map(|c| c.raw_bytes().to_vec())
             .collect()
     }
@@ -1339,10 +1363,12 @@ impl SwirlDB {
         // index is kept up between calls.
         let before = doc.get_heads();
         doc.update_diff_cursor();
+        let mut hashes = Vec::with_capacity(changes.len());
         let applied = (|| {
             for change_bytes in changes {
                 let change = Change::from_bytes(change_bytes)
                     .map_err(|e| anyhow!("Failed to parse change: {:?}", e))?;
+                hashes.push(change.hash().as_ref().to_vec());
                 doc.apply_changes([change])
                     .map_err(|e| anyhow!("Failed to apply change: {:?}", e))?;
             }
@@ -1371,6 +1397,7 @@ impl SwirlDB {
         Ok(Applied {
             text_changes,
             changed_paths,
+            hashes,
         })
     }
 
@@ -2731,6 +2758,53 @@ mod tests {
         assert_eq!(
             reader.get_path("subtitle"),
             Some(ScalarValue::Str("Bob".into()))
+        );
+    }
+
+    #[test]
+    fn test_changes_since_except_leave_out_what_was_heard_and_keep_any_actor() {
+        let server = SwirlDB::new();
+        server
+            .set_path("title", ScalarValue::Str("server".into()))
+            .unwrap();
+        let opened_at = server.get_heads();
+
+        // A client loaded from storage holds a change of an earlier actor
+        // the server never had, then opens and is sent the server's.
+        let earlier = SwirlDB::new();
+        earlier
+            .set_path("offline", ScalarValue::Str("written offline".into()))
+            .unwrap();
+        let client = SwirlDB::new();
+        client.apply_changes(earlier.get_changes()).unwrap();
+        client.apply_changes(server.get_changes()).unwrap();
+        assert!(client.local_changes_since(&opened_at).is_empty());
+        let owed = client.changes_since_except(&opened_at, &[]);
+        assert_eq!(owed.len(), 1);
+
+        // It hears another write from the server and writes one of its own:
+        // it owes its own and the offline one, not what it heard.
+        server
+            .set_path("title", ScalarValue::Str("server again".into()))
+            .unwrap();
+        let applied = client
+            .apply_changes(server.get_changes_since(&opened_at))
+            .unwrap();
+        assert_eq!(applied.hashes.len(), 1);
+        client
+            .set_path("subtitle", ScalarValue::Str("client".into()))
+            .unwrap();
+        assert_eq!(client.get_changes_since(&opened_at).len(), 3);
+        let owed = client.changes_since_except(&opened_at, &applied.hashes);
+        assert_eq!(owed.len(), 2);
+        server.apply_changes(owed).unwrap();
+        assert_eq!(
+            server.get_path("offline"),
+            Some(ScalarValue::Str("written offline".into()))
+        );
+        assert_eq!(
+            server.get_path("subtitle"),
+            Some(ScalarValue::Str("client".into()))
         );
     }
 

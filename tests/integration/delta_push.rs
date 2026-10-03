@@ -9,7 +9,7 @@
 //! changes each push carried, which is what these tests read; it keeps the
 //! last hundred events, which bounds how long a history they build.
 
-use super::{init_test_logging, test_server::TestServer};
+use super::{browser_client::BrowserTestClient, init_test_logging, test_server::TestServer};
 use automerge::ScalarValue;
 use serde_json::json;
 use std::time::Duration;
@@ -49,6 +49,45 @@ async fn pushes_from(server: &TestServer, client_id: &str, document: &str) -> Ve
         .collect();
     counts.reverse(); // the log is most recent first
     counts
+}
+
+/// How many changes each push from the browser on `document` carried. The
+/// test page names its connection `browser-<time>`, and each test here has
+/// one browser.
+async fn browser_pushes(server: &TestServer, document: &str) -> Vec<usize> {
+    let mut counts: Vec<usize> = server
+        .state
+        .get_activity()
+        .await
+        .into_iter()
+        .filter_map(|event| match event {
+            ActivityEvent::ChangesApplied {
+                from_client_id,
+                document: applied_to,
+                change_count,
+                ..
+            } if from_client_id.starts_with("browser-") && applied_to == document => {
+                Some(change_count)
+            }
+            _ => None,
+        })
+        .collect();
+    counts.reverse();
+    counts
+}
+
+/// Wait until the server has applied `count` pushes from the browser.
+async fn wait_for_browser_pushes(server: &TestServer, document: &str, count: usize) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while browser_pushes(server, document).await.len() < count {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the server saw {:?} from the browser, not {} pushes",
+            browser_pushes(server, document).await,
+            count
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// Wait until the server has applied `count` pushes from `client_id`.
@@ -210,5 +249,129 @@ async fn a_change_heard_from_the_server_is_not_pushed_back() {
         Some(ScalarValue::Str("Bob".into()))
     );
 
+    server.shutdown().await.unwrap();
+}
+
+/// An editor pushes at every keystroke and does not wait for the server to
+/// acknowledge one before the next; on a busy server none arrives for
+/// seconds. Each push is the keystroke it follows and nothing before it:
+/// the browser module used to send everything since the server's last
+/// acknowledgement, so the thirty-second keystroke without one carried
+/// thirty-two changes (Studio's S-21).
+#[tokio::test]
+async fn a_browser_typing_faster_than_the_server_acknowledges_pushes_each_keystroke_once() {
+    init_test_logging();
+    let server = TestServer::start().await.unwrap();
+
+    let browser =
+        BrowserTestClient::start_with_documents(&server.ws_url(), vec!["typing.1".into()])
+            .await
+            .unwrap();
+    browser
+        .set_document_text("typing.1", "source", "")
+        .await
+        .unwrap();
+    wait_for_browser_pushes(&server, "typing.1", 1).await;
+
+    let typed = "hue = time * 0.25 + index / 32.0";
+    browser
+        .type_document_text("typing.1", "source", 0, typed)
+        .await
+        .unwrap();
+    let keystrokes = typed.chars().count();
+    wait_for_browser_pushes(&server, "typing.1", 1 + keystrokes).await;
+    let counts = browser_pushes(&server, "typing.1").await;
+    assert_eq!(counts.len(), 1 + keystrokes, "{:?}", counts);
+    assert!(counts.iter().all(|&count| count == 1), "{:?}", counts);
+
+    // What the server holds is what was typed, in order.
+    let listener = SyncClient::open(&server.ws_url(), "typing.1", everything())
+        .await
+        .unwrap();
+    assert_eq!(
+        listener.get_path("source").await,
+        Some(ScalarValue::Str(typed.into()))
+    );
+
+    browser.close().await.unwrap();
+    server.shutdown().await.unwrap();
+}
+
+/// Two people typing into one text: what the browser hears from the other
+/// between its own keystrokes is the server's already and does not go back
+/// with its next push, and what the server acknowledges (heads that may
+/// name changes the browser has not heard yet) never makes it send more.
+#[tokio::test]
+async fn a_browser_typing_beside_another_pushes_only_its_own_keystrokes() {
+    init_test_logging();
+    let server = TestServer::start().await.unwrap();
+
+    let browser =
+        BrowserTestClient::start_with_documents(&server.ws_url(), vec!["typing.2".into()])
+            .await
+            .unwrap();
+    browser
+        .set_document_text("typing.2", "source", "")
+        .await
+        .unwrap();
+    wait_for_browser_pushes(&server, "typing.2", 1).await;
+    let worker = SyncClient::open_with_id(&server.ws_url(), "worker", "typing.2", everything())
+        .await
+        .unwrap();
+
+    for round in 0..20 {
+        browser
+            .splice_document_text("typing.2", "source", 0, 0, "a")
+            .await
+            .unwrap();
+        worker.splice_text("source", 0, 0, "b").await.unwrap();
+        // Heard before the browser's next keystroke, every other round;
+        // in the rest the browser types on before it has heard.
+        if round % 2 == 0 {
+            browser
+                .wait_for_document_text_change("typing.2")
+                .await
+                .unwrap();
+            browser
+                .take_document_text_changes("typing.2")
+                .await
+                .unwrap();
+        }
+    }
+    wait_for_browser_pushes(&server, "typing.2", 21).await;
+    wait_for_pushes(&server, "worker", "typing.2", 20).await;
+    let counts = browser_pushes(&server, "typing.2").await;
+    assert_eq!(counts.len(), 21, "{:?}", counts);
+    assert!(counts.iter().all(|&count| count == 1), "{:?}", counts);
+    assert_eq!(
+        pushes_from(&server, "worker", "typing.2").await,
+        vec![1; 20]
+    );
+
+    // Both hold forty characters, the same forty.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let in_browser = browser
+            .get_document_path("typing.2", "source")
+            .await
+            .unwrap();
+        let in_worker = worker.get_path("source").await;
+        if let (Some(serde_json::Value::String(seen)), Some(ScalarValue::Str(held))) =
+            (&in_browser, &in_worker)
+        {
+            if seen.len() == 40 && seen.as_str() == held.as_str() {
+                break;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the browser holds {:?} and the worker {:?}",
+            in_browser,
+            in_worker
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    browser.close().await.unwrap();
     server.shutdown().await.unwrap();
 }

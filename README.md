@@ -243,6 +243,17 @@ Writes made through `client.db()` directly — several scalars under one lock
 — ride with the next write that pushes, or with `client.push()`, which sends
 what is owed and nothing when nothing is.
 
+**The browser's `syncChanges` sends the same: what the server has not been
+sent and did not send.** A browser handle counts from the server's heads at
+open and then from its own heads at each push, and leaves out the changes it
+heard from the server since — of any actor, so a document loaded from storage
+sends what it wrote offline. It never counts from the heads a `PushAck`
+carries: an editor pushes at every keystroke without waiting for one, and on
+a busy server none comes for seconds, so counting from the last
+acknowledgement sent the thirty-second keystroke with the thirty-one before
+it; and the server's heads can name a change still on its way here, which
+makes "since" everything.
+
 `setText` on a path that already holds a text replaces the whole text, which
 throws away edits others are making to it at that moment; it is for creating
 a text, and `spliceText` is for changing it. A text observer sees such a

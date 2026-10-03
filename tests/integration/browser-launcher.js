@@ -147,6 +147,13 @@ rl.on('line', async (line) => {
                 sendIPC({ type: 'set_complete' });
                 break;
 
+            case 'typeDocumentText':
+                await page.evaluate(({ document, path, position, text }) => {
+                    window.testAPI.typeDocumentText(document, path, position, text);
+                }, { document: msg.document, path: msg.path, position: msg.position, text: msg.text });
+                sendIPC({ type: 'set_complete' });
+                break;
+
             case 'takeDocumentTextChanges':
                 const textChanges = await page.evaluate(({ document }) => {
                     return window.testAPI.takeDocumentTextChanges(document);

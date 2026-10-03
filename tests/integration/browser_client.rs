@@ -76,6 +76,13 @@ enum IpcCommand {
         delete_count: usize,
         insert: String,
     },
+    #[serde(rename = "typeDocumentText")]
+    TypeDocumentText {
+        document: String,
+        path: String,
+        position: usize,
+        text: String,
+    },
     #[serde(rename = "takeDocumentTextChanges")]
     TakeDocumentTextChanges { document: String },
     #[serde(rename = "waitForDocumentTextChange")]
@@ -396,6 +403,29 @@ impl BrowserTestClient {
             position,
             delete_count,
             insert: insert.to_string(),
+        })
+        .await?;
+        self.wait_for_response(|r| matches!(r, IpcResponse::SetComplete))
+            .await?;
+        Ok(())
+    }
+
+    /// Type `text` into the text at a path one character at a time from
+    /// `position`, pushing after each character as an editor does, all in one
+    /// turn of the page's event loop: no acknowledgement from the server can
+    /// arrive between two keystrokes, as none does on a busy server.
+    pub async fn type_document_text(
+        &self,
+        document: &str,
+        path: &str,
+        position: usize,
+        text: &str,
+    ) -> Result<()> {
+        self.send_command(IpcCommand::TypeDocumentText {
+            document: document.to_string(),
+            path: path.to_string(),
+            position,
+            text: text.to_string(),
         })
         .await?;
         self.wait_for_response(|r| matches!(r, IpcResponse::SetComplete))
